@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 import urllib.parse
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=15)
     parser.add_argument("--wu-url-template", default="", help="Optional WU URL template with {station}, {date}, {iso_date}")
     parser.add_argument("--wu-values", type=Path, help="Optional CSV with columns date,value from manual WU checks")
+    parser.add_argument(
+        "--request-interval-seconds",
+        type=float,
+        default=60.0,
+        help="Delay between paged AviationWeather requests; default follows the 1 request/minute guidance.",
+    )
     args = parser.parse_args(argv)
 
     days = min(args.days, MAX_HISTORY_DAYS)
@@ -39,7 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     unit = str(args.unit).upper()
     end = datetime.now(ZoneInfo(timezone_name)).date() - timedelta(days=1)
     dates = [end - timedelta(days=offset) for offset in range(days - 1, -1, -1)]
-    observations, raw_url = _fetch_recent_observations(args.station, days + 1)
+    observations, raw_url = _fetch_observations_for_dates(
+        station=args.station,
+        dates=dates,
+        timezone_name=timezone_name,
+        request_interval_seconds=args.request_interval_seconds,
+    )
     wu_values = _read_wu_values(args.wu_values) if args.wu_values else {}
 
     writer = csv.DictWriter(
@@ -89,15 +101,55 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _fetch_recent_observations(station: str, days: int) -> tuple[list[dict[str, Any]], str]:
-    hours = min(days, MAX_HISTORY_DAYS) * 24
-    params = {"ids": station.upper(), "format": "json", "hours": str(hours)}
+def _fetch_observations_for_dates(
+    *,
+    station: str,
+    dates: list[date],
+    timezone_name: str,
+    request_interval_seconds: float,
+) -> tuple[list[dict[str, Any]], str]:
+    if not dates:
+        return [], ""
+    all_rows: list[dict[str, Any]] = []
+    raw_urls: list[str] = []
+    chunks = _date_chunks(dates, chunk_days=7)
+    for index, chunk in enumerate(chunks):
+        rows, raw_url = _fetch_observation_chunk(station=station, start_date=chunk[0], end_date=chunk[-1], timezone_name=timezone_name)
+        all_rows.extend(rows)
+        raw_urls.append(raw_url)
+        if index < len(chunks) - 1 and request_interval_seconds > 0:
+            time.sleep(request_interval_seconds)
+    return _dedupe_observations(all_rows), " ".join(raw_urls)
+
+
+def _fetch_observation_chunk(*, station: str, start_date: date, end_date: date, timezone_name: str) -> tuple[list[dict[str, Any]], str]:
+    tz = ZoneInfo(timezone_name)
+    end_local = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=tz) + timedelta(hours=2)
+    end_utc = end_local.astimezone(timezone.utc)
+    hours = int(((end_date - start_date).days + 2) * 24 + 2)
+    params = {"ids": station.upper(), "format": "json", "date": end_utc.strftime("%Y%m%d_%H%M"), "hours": str(hours)}
     headers = {"User-Agent": SETTINGS.user_agent, "Accept": "application/json"}
     response = requests.get(AVIATIONWEATHER_METAR_URL, params=params, headers=headers, timeout=30)
     if response.status_code == 204:
         return [], f"{AVIATIONWEATHER_METAR_URL}?{urllib.parse.urlencode(params)}"
     response.raise_for_status()
     return parse_observations(response.json()), response.url
+
+
+def _date_chunks(dates: list[date], chunk_days: int) -> list[list[date]]:
+    return [dates[index : index + chunk_days] for index in range(0, len(dates), chunk_days)]
+
+
+def _dedupe_observations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("icaoId") or ""), str(row.get("obsTime") or ""), str(row.get("rawOb") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
 
 
 def _read_wu_values(path: Path) -> dict[date, float]:
