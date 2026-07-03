@@ -1,0 +1,29 @@
+{
+  "name": "anthropic-exec-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "clob-keys": "tsx src/deriveClobKeys.ts",
+    "deposit-wallet": "tsx src/depositWallet.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.10",
+    "@polymarket/builder-signing-sdk": "^0.0.8",
+    "@polymarket/clob-client-v2": "latest",
+    "dotenv": "latest",
+    "playwright": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "viem": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest"
+  },
+  "overrides": {
+    "ws": "^8.21.0"
+  }
+}
