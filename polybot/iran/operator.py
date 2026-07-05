@@ -277,7 +277,7 @@ def _combine_modes(global_mode: str, position_mode: str) -> str:
 
 
 def _telegram_configured() -> bool:
-    return bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"))
+    return bool(os.getenv("TELEGRAM_BOT_TOKEN") and (os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_ID")))
 
 
 def _anthropic_configured() -> bool:

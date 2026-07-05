@@ -77,6 +77,16 @@ def test_live_preflight_blocks_missing_required_integrations(tmp_path: Path, mon
     assert "anthropic_not_configured" not in status.warnings
 
 
+def test_telegram_id_alias_counts_as_configured(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.setenv("TELEGRAM_ID", "chat")
+
+    from polybot.iran.operator import _telegram_configured
+
+    assert _telegram_configured() is True
+
+
 def test_read_only_status_keeps_missing_integrations_as_warnings(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)

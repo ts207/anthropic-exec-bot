@@ -350,6 +350,15 @@ class IranProtectionBot:
             decision = Decision("NO_ACTION", "0", "keyword_gate_no_escalation")
             self._log_decision(article, decision, gate=gate.__dict__)
             return decision
+        age_hours = _article_age_hours(article)
+        max_age = self.config.sources.max_trade_article_age_hours
+        if max_age > 0 and age_hours is not None and age_hours > max_age:
+            # Stale items can neither trade nor suspend time decay; skip the
+            # classifier entirely instead of paying two LLM passes for a
+            # decision the freshness gate would discard.
+            decision = Decision("ALERT_ONLY", "3", f"article_stale_skipped_classification:{age_hours:.0f}h")
+            self._log_decision(article, decision, gate=gate.__dict__)
+            return decision
         try:
             passes = run_classifier_passes(
                 self.classifier,

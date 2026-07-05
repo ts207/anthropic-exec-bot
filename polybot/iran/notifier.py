@@ -36,6 +36,12 @@ class TelegramNotifier(Notifier):
         except Exception as exc:
             try:
                 safe_fields = {f"field_{key}" if key in {"message", "error", "event"} else key: value for key, value in fields.items()}
-                log_event("iran_notify_error", message=message, error=str(exc), **safe_fields)
+                log_event("iran_notify_error", message=message, error=self._sanitize_error(exc), **safe_fields)
             except Exception:
                 pass
+
+    def _sanitize_error(self, exc: Exception) -> str:
+        text = str(exc)
+        if self.token:
+            text = text.replace(self.token, "<redacted>")
+        return text

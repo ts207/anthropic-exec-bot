@@ -890,3 +890,29 @@ def test_telegram_notifier_never_raises_on_error_field_collision(monkeypatch) ->
     notifier = TelegramNotifier()
     # Caller passes error= (as runner does) while delivery fails: must not raise.
     notifier.notify("cycle failed; continuing", error="boom", event="collide")
+
+
+def test_telegram_notifier_redacts_token_from_delivery_errors(monkeypatch) -> None:
+    import requests as requests_module
+    from polybot.iran.notifier import TelegramNotifier
+
+    records = []
+    token = "123456:secret-token"
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+
+    def fake_log_event(event: str, **fields):
+        records.append((event, fields))
+
+    def failing_post(*args, **kwargs):
+        raise requests_module.RequestException(f"400 Bad Request for https://api.telegram.org/bot{token}/sendMessage")
+
+    monkeypatch.setattr("polybot.iran.notifier.log_event", fake_log_event)
+    monkeypatch.setattr("polybot.iran.notifier.requests.post", failing_post)
+
+    TelegramNotifier().notify("cycle failed")
+
+    notify_errors = [fields for event, fields in records if event == "iran_notify_error"]
+    assert notify_errors
+    assert token not in notify_errors[-1]["error"]
+    assert "<redacted>" in notify_errors[-1]["error"]

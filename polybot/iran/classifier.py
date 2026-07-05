@@ -235,10 +235,13 @@ class LLMClassifier:
     def _anthropic(self, prompt: str) -> str:
         # Structured outputs guarantee the response is valid JSON matching the
         # SignalFactors schema; temperature is not sent (rejected on Opus 4.7+).
+        # Both agreement passes send an identical prompt; caching lets the
+        # second pass read the first pass's prefix at ~0.1x input price.
         response = self._anthropic_client_or_build().messages.create(
             model=self.config.model,
             max_tokens=8192,
             thinking={"type": "adaptive"},
+            cache_control={"type": "ephemeral"},
             output_config={"format": {"type": "json_schema", "schema": _ANTHROPIC_OUTPUT_SCHEMA}},
             messages=[{"role": "user", "content": prompt}],
         )
