@@ -34,6 +34,7 @@ export function decideThresholdLeg(
       sourceDate: evidence.latestTapeDate,
       maxEligibleValuation: crossedValue,
       maxEligibleDate: crossedDate,
+      distancePct: distancePct(crossedValue, leg.threshold),
       fairPrice,
       edge,
       confidence: 10,
@@ -55,6 +56,7 @@ export function decideThresholdLeg(
     sourceDate: evidence.latestTapeDate,
     maxEligibleValuation: evidence.maxEligibleValuation,
     maxEligibleDate: evidence.maxEligibleDate,
+    distancePct: distancePct(evidence.latestValuation, leg.threshold),
     fairPrice: 0,
     edge: 0,
     confidence: 8,
@@ -76,6 +78,7 @@ function candidateBase(leg: ValuationLeg, evidence: NpmEvidence | undefined, quo
     sourceDate: evidence?.latestTapeDate,
     maxEligibleValuation: evidence?.maxEligibleValuation,
     maxEligibleDate: evidence?.maxEligibleDate,
+    distancePct: evidence && leg.threshold !== undefined ? distancePct(evidence.latestValuation, leg.threshold) : undefined,
     yesAsk: quote?.bestAsk ?? null,
     bestBid: quote?.bestBid ?? null,
     spread: quote?.spread ?? null,
@@ -89,7 +92,7 @@ function candidateBase(leg: ValuationLeg, evidence: NpmEvidence | undefined, quo
 }
 
 function noAction(base: ReturnType<typeof candidateBase>, reason: string): ValuationCandidate {
-  return { ...base, signalType: "NO_ACTION", status: "skip", reason, maxPrice: 0, orderUsd: 0, liveAllowed: false };
+  return { ...base, signalType: "NO_ACTION", status: "skip", reason, confidenceScore: 0, edgeScore: 0, maxPrice: 0, orderUsd: 0, liveAllowed: false };
 }
 
 function alert(
@@ -98,5 +101,9 @@ function alert(
   reason: string,
   confidence: number,
 ): ValuationCandidate {
-  return { ...base, signalType, status: "alert", reason, confidence, maxPrice: 0, orderUsd: 0, liveAllowed: false };
+  return { ...base, signalType, status: "alert", reason, confidence, confidenceScore: confidence, edgeScore: 0, maxPrice: 0, orderUsd: 0, liveAllowed: false };
+}
+
+function distancePct(valuation: number, threshold: number): number {
+  return Math.abs(valuation - threshold) / threshold;
 }

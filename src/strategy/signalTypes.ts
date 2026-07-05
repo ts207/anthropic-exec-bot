@@ -133,6 +133,7 @@ export type ValuationCandidate = {
   sourceDate?: string;
   maxEligibleValuation?: number;
   maxEligibleDate?: string;
+  distancePct?: number;
   yesAsk: number | null;
   bestBid: number | null;
   spread: number | null;
@@ -140,8 +141,19 @@ export type ValuationCandidate = {
   fairPrice: number;
   edge: number;
   confidence: number;
+  confidenceScore: number;
+  edgeScore: number;
   maxPrice: number;
   orderUsd: number;
+  orderTemplate?: {
+    tokenId: string;
+    side: "BUY";
+    outcome: "YES";
+    orderType: "FAK";
+    amountUsd: number;
+    maxPrice: number;
+    posted: false;
+  };
   liveAllowed: boolean;
   reason: string;
   ruleHash: string;

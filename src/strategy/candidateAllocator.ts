@@ -1,7 +1,7 @@
 import type { SignalType, StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
 
 export function allocateCandidate(
-  base: Omit<ValuationCandidate, "maxPrice" | "orderUsd" | "liveAllowed">,
+  base: Omit<ValuationCandidate, "confidenceScore" | "edgeScore" | "maxPrice" | "orderUsd" | "orderTemplate" | "liveAllowed">,
   config: StrategyConfig,
 ): ValuationCandidate {
   const maxPrice = Math.min(
@@ -16,10 +16,25 @@ export function allocateCandidate(
     ? Math.max(0.1, Math.min(1, (base.liquidity * 0.25) / config.baseOrderUsd))
     : 0;
   const orderUsd = roundUsd(config.baseOrderUsd * multiplier * edgeMultiplier * confidenceMultiplier * liquidityMultiplier);
+  const edgeScore = Math.max(0, Math.min(10, (base.edge / Math.max(0.01, minimumEdgeFor(base.signalType, config))) * 5));
+  const confidenceScore = Math.max(0, Math.min(10, base.confidence));
   return {
     ...base,
+    confidenceScore,
+    edgeScore,
     maxPrice,
     orderUsd,
+    orderTemplate: orderUsd > 0 && base.yesTokenId
+      ? {
+        tokenId: base.yesTokenId,
+        side: "BUY",
+        outcome: "YES",
+        orderType: "FAK",
+        amountUsd: orderUsd,
+        maxPrice,
+        posted: false,
+      }
+      : undefined,
     liveAllowed: config.mode === "live" && base.status === "candidate" && orderUsd > 0 && base.confidence >= 9,
   };
 }

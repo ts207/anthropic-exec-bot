@@ -31,6 +31,7 @@ export function driftCandidate(
     sourceDate: evidence.latestTapeDate,
     maxEligibleValuation: evidence.maxEligibleValuation,
     maxEligibleDate: evidence.maxEligibleDate,
+    distancePct,
     yesAsk: quote.bestAsk,
     bestBid: quote.bestBid,
     spread: quote.spread,

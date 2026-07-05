@@ -74,6 +74,18 @@ test("source-confirmed crossed threshold creates BUY YES candidate", () => {
   assert.equal(candidate.status, "candidate");
   assert.equal(candidate.liveAllowed, true);
   assert.equal(candidate.orderUsd > 0, true);
+  assert.equal(candidate.distancePct !== undefined && candidate.distancePct < 0.001, true);
+  assert.equal(candidate.confidenceScore, 10);
+  assert.equal(candidate.edgeScore > 0, true);
+  assert.deepEqual(candidate.orderTemplate, {
+    tokenId: "yes-token",
+    side: "BUY",
+    outcome: "YES",
+    orderType: "FAK",
+    amountUsd: candidate.orderUsd,
+    maxPrice: 0.95,
+    posted: false,
+  });
 });
 
 test("non-crossed threshold no-actions unless drift edge exists", () => {
