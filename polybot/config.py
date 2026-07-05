@@ -41,6 +41,39 @@ def _int_env(name: str, default: int) -> int:
     return parsed
 
 
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip() != "":
+            return value
+    return None
+
+
+def _int_env_first(names: tuple[str, ...], default: int) -> int:
+    value = _env_first(*names)
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed < 0:
+        joined = " or ".join(names)
+        raise ValueError(f"{joined} must be non-negative")
+    return parsed
+
+
+def _signature_type_env() -> int | None:
+    raw = _env_first("POLYBOT_SIGNATURE_TYPE")
+    if raw is None:
+        if _env_first("DEPOSIT_WALLET_ADDRESS"):
+            return 3
+        if _env_first("FUNDER_ADDRESS", "POLYBOT_FUNDER_ADDRESS"):
+            return 1
+        return None
+    parsed = int(raw)
+    if parsed not in {0, 1, 2, 3}:
+        raise ValueError("POLYBOT_SIGNATURE_TYPE must be 0, 1, 2, or 3")
+    return parsed
+
+
 def _int_env_lower_only(name: str, default: int) -> int:
     parsed = _int_env(name, default)
     if parsed <= 0:
@@ -75,8 +108,6 @@ class Settings:
     logs_dir: Path
     risk_state_path: Path
     user_agent: str
-    wu_history_url_template: str | None
-    wu_api_key: str | None
     guardrails: Guardrails
 
 
@@ -93,28 +124,22 @@ def load_settings() -> Settings:
     )
     return Settings(
         dry_run=_bool_env("POLYBOT_DRY_RUN", True),
-        clob_host=os.getenv("POLYBOT_CLOB_HOST", "https://clob.polymarket.com"),
+        clob_host=_env_first("POLYBOT_CLOB_HOST", "CLOB_HOST") or "https://clob.polymarket.com",
         gamma_host=os.getenv("POLYBOT_GAMMA_HOST", "https://gamma-api.polymarket.com"),
         data_api_host=os.getenv("POLYBOT_DATA_API_HOST", "https://data-api.polymarket.com"),
-        chain_id=_int_env("POLYBOT_CHAIN_ID", 137),
-        private_key=os.getenv("POLYBOT_PRIVATE_KEY") or None,
-        clob_api_key=os.getenv("POLYBOT_CLOB_API_KEY") or None,
-        clob_secret=os.getenv("POLYBOT_CLOB_SECRET") or None,
-        clob_passphrase=os.getenv("POLYBOT_CLOB_PASSPHRASE") or None,
-        signature_type=(
-            int(os.environ["POLYBOT_SIGNATURE_TYPE"])
-            if os.getenv("POLYBOT_SIGNATURE_TYPE")
-            else None
-        ),
-        funder_address=os.getenv("POLYBOT_FUNDER_ADDRESS") or None,
+        chain_id=_int_env_first(("POLYBOT_CHAIN_ID", "CHAIN_ID"), 137),
+        private_key=_env_first("POLYBOT_PRIVATE_KEY", "PRIVATE_KEY"),
+        clob_api_key=_env_first("POLYBOT_CLOB_API_KEY", "CLOB_API_KEY"),
+        clob_secret=_env_first("POLYBOT_CLOB_SECRET", "CLOB_SECRET"),
+        clob_passphrase=_env_first("POLYBOT_CLOB_PASSPHRASE", "CLOB_PASS_PHRASE"),
+        signature_type=_signature_type_env(),
+        funder_address=_env_first("POLYBOT_FUNDER_ADDRESS", "DEPOSIT_WALLET_ADDRESS", "FUNDER_ADDRESS"),
         logs_dir=logs_dir,
         risk_state_path=Path(os.getenv("POLYBOT_RISK_STATE_PATH", str(logs_dir / "risk_state.json"))),
         user_agent=os.getenv(
             "POLYBOT_USER_AGENT",
             "polybot/0.1 contact=operator; source-update research bot",
         ),
-        wu_history_url_template=os.getenv("WU_HISTORY_URL_TEMPLATE") or None,
-        wu_api_key=os.getenv("WU_API_KEY") or None,
         guardrails=guardrails,
     )
 

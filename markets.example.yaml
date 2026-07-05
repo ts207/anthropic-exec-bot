@@ -1,9 +1,0 @@
-markets:
-  - type: weather
-    source: metar
-    slug: highest-temperature-in-seoul-on-july-3-2026
-    station: RKSI
-    date: "2026-07-03"
-    unit: C
-    timezone: Asia/Seoul
-    poll_seconds: 60

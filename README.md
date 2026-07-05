@@ -1,14 +1,10 @@
 # polybot
 
-`polybot` is a source-update execution bot for narrow Polymarket markets. The
-first target is airport-station daily-high weather markets. The default weather
-source is METAR through the official AviationWeather.gov API; Wunderground is
-kept as an optional reference/calibration source. The default is always dry-run;
-the main purpose is to produce a complete JSONL trail that shows whether a
-source-first edge exists.
+`polybot` is now focused on Polymarket position protection for the US-Iran
+peace-talks July 17 YES thesis. The active Python bot lives under
+`polybot/iran/` and is configured by `iran-july17-yes-protection.yaml`.
 
-This repository also contains the earlier TypeScript NPM/Anthropic bot. The
-Python `polybot/` package is separate and does not overwrite that code.
+The older weather-market automation path has been removed.
 
 ## Install
 
@@ -23,12 +19,12 @@ Verified locally:
 - `ClobClient(host, chain_id, key, creds, signature_type, funder)`
 - `create_market_order(MarketOrderArgs, PartialCreateOrderOptions)`
 - `post_order(order, OrderType.FAK)`
-- `MarketOrderArgs(token_id, amount, side, price, order_type)`
+- `get_balance_allowance(BalanceAllowanceParams(...))`
 
-Important: the public `Polymarket/py-clob-client` repository is marked archived
-and no longer recommended for new integrations. The wrapper is therefore
-defensive, dry-run first, and documents the installed API it was verified
-against. Re-check the official Polymarket SDK/docs before live use.
+Important: the public `Polymarket/py-clob-client` repository is marked
+archived and no longer recommended for new integrations. This bot remains
+dry-run first and should be rechecked against current Polymarket docs before
+live use.
 
 ## Environment
 
@@ -38,11 +34,23 @@ Dry-run is the default:
 POLYBOT_DRY_RUN=1
 ```
 
-Live trading requires all three:
+Live Iran execution requires all of:
 
-1. `POLYBOT_DRY_RUN=0`
-2. `python -m polybot.main run --config markets.yaml --live`
-3. typing `yes` at the interactive guardrail prompt
+1. `execution.dry_run: false` in the Iran YAML config
+2. `python -m polybot.main run-iran --config <config.yaml> --live`
+3. valid Polymarket credentials
+
+The Iran classifier now calls the Anthropic API (`classifier.provider: anthropic`,
+model `claude-opus-4-8`, two passes with required agreement and structured JSON
+output). It needs a key in the bot's process environment — note the Python bot
+does not read `.env`, so export it in the shell or run wrapper:
+
+```bash
+ANTHROPIC_API_KEY=
+```
+
+If the key is missing or the API is down, every escalated article degrades to
+`ALERT_ONLY` and no trade is placed (`classifier.if_api_down`).
 
 Trading-related variables:
 
@@ -55,155 +63,195 @@ POLYBOT_SIGNATURE_TYPE=
 POLYBOT_FUNDER_ADDRESS=
 ```
 
-Guardrails are read from `polybot.config.Guardrails`. Env vars may only make
-the bot more conservative; values above the defaults are clamped back to the
-defaults.
+Shared aliases are also accepted for compatibility:
 
 ```bash
-POLYBOT_MAX_ENTRY_PRICE=0.90
-POLYBOT_MAX_ENTRY_PRICE_REVISABLE=0.85
-POLYBOT_PER_ORDER_NOTIONAL=25
-POLYBOT_PER_MARKET_NOTIONAL=50
-POLYBOT_PER_DAY_NOTIONAL=100
-POLYBOT_KILL_SWITCH_FAILURES=2
+PRIVATE_KEY=
+CLOB_API_KEY=
+CLOB_SECRET=
+CLOB_PASS_PHRASE=
+DEPOSIT_WALLET_ADDRESS=
+FUNDER_ADDRESS=
+CHAIN_ID=
+CLOB_HOST=
 ```
 
-## Weather Source
+Supported signature types are:
 
-Weather markets default to `source: metar`, using the official AviationWeather
-Center endpoint:
+- `0` for EOA
+- `1` for Polymarket proxy/Magic wallet
+- `2` for browser-wallet Gnosis Safe proxy
+- `3` for Polymarket deposit wallet / `POLY_1271`
 
-```text
-https://aviationweather.gov/api/data/metar?ids=KLGA&format=json
-```
+If `DEPOSIT_WALLET_ADDRESS` is set and no explicit signature type is provided,
+the bot defaults to `3`. If only `FUNDER_ADDRESS`/`POLYBOT_FUNDER_ADDRESS` is
+set, it defaults to `1`.
 
-No key is required. `polybot` sends the configured custom User-Agent and limits
-polling to one request per minute per station. AviationWeather's database
-currently exposes only the previous 15 days of data, so historical calibration
-is capped there.
+## Commands
 
-For US stations, the METAR parser decodes the `T` remark group, such as
-`T03780211`, so tenths of a degree Celsius are preserved before converting to
-Fahrenheit. This avoids the common one-degree Fahrenheit error at bucket edges.
-
-The weather strategy also has a mandatory boundary guard: it maps the rounded
-display value into a bucket, then skips if the raw temperature is less than
-0.5° from the bucket edge. Boundary days are data, not trades.
-
-Run a calibration table:
+Inspect a Polymarket event:
 
 ```bash
-.venv/bin/python -m polybot.calibrate_metar \
-  --station KLGA \
-  --timezone America/New_York \
-  --unit F \
-  --days 15 \
-  --wu-url-template 'https://www.wunderground.com/history/daily/{station}/date/{iso_date}' \
-  > calibration-klga.csv
+.venv/bin/python -m polybot.main inspect <event-slug>
 ```
 
-If you manually record Wunderground daily highs in a CSV with `date,value`, add
-`--wu-values wu-klga.csv` to emit deltas and exact-match flags.
-
-## Wunderground Setup
-
-Wunderground history pages are JavaScript-rendered and backed by weather.com
-APIs that require a key. `polybot` does not scrape or hardcode browser keys.
-Configure your own authorized data access only if you explicitly set
-`source: wunderground` in a market:
+Inspect and verify an Iran config:
 
 ```bash
-WU_API_KEY=...
-WU_HISTORY_URL_TEMPLATE='https://your-authorized-endpoint.example/history?station={station}&date={date}&unit={unit}&apiKey={api_key}'
+.venv/bin/python -m polybot.main inspect-iran --config iran-july17-yes-protection.yaml
 ```
 
-The template may use `{station}`, `{date}` (`YYYYMMDD`), `{iso_date}`,
-`{unit}`, and `{api_key}`. The adapter polls day `D` and `D+1`; it only returns
-`confidence=1.0` when the first `D+1` observation exists and there is no
-afternoon gap over two hours. Epoch timestamps from `valid_time_gmt` are
-converted into the configured station timezone before lock detection and gap
-checks.
-
-Source polling is limited to one request per minute per station and checks
-`robots.txt`. If a source blocks automated access, stop and use a permitted data
-route.
-
-## Add A Market
-
-Copy `markets.example.yaml`:
-
-```yaml
-markets:
-  - type: weather
-    source: metar
-    slug: highest-temperature-in-seoul-on-july-3-2026
-    station: RKSI
-    date: "2026-07-03"
-    unit: C
-    timezone: Asia/Seoul
-    poll_seconds: 60
-```
-
-Inspect before running:
+Preflight live readiness, including operator mode, config hash ack, credentials,
+token mapping, and live balances:
 
 ```bash
-.venv/bin/python -m polybot.main inspect highest-temperature-in-seoul-on-july-3-2026
+.venv/bin/python -m polybot.main preflight-iran --config iran-july17-yes-protection.yaml --live
 ```
 
-Dry-run:
+Set the current position mode and acknowledge the exact config hash before live:
 
 ```bash
-.venv/bin/python -m polybot.main run --config markets.yaml
+.venv/bin/python -m polybot.main set-iran-mode --config iran-july17-yes-protection.yaml --mode live
+.venv/bin/python -m polybot.main ack-iran-live --config iran-july17-yes-protection.yaml --note "reviewed live config"
 ```
 
-## Log Schema
+Read a portfolio-style position snapshot:
 
-Logs are JSONL at `logs/polybot.jsonl`. Every event includes:
+```bash
+.venv/bin/python -m polybot.main positions --config positions.example.yaml
+.venv/bin/python -m polybot.main inspect-position iran-july17-yes --config positions.example.yaml
+```
 
-- `ts_utc`
-- `ts_et`
-- `ts_mono`
-- `event`
+Probe the TypeScript `clob-client-v2` deposit-wallet path without posting:
 
-Important event types:
+```bash
+.venv/bin/python -m polybot.main probe-iran-clob-v2 --config iran-july17-yes-protection.yaml --amount 5
+```
 
-- `source_poll`
-- `source_locked`
-- `strategy_skip`
-- `book_snapshot`
-- `order_skip`
-- `order_submit`
-- `settlement_check`
-- `settlement_terminal`
-- `risk_state_update`
+Smoke the configured classifier without executing:
 
-Every skip has a machine-readable `reason`, such as `price_above_cap`,
-`no_depth`, `stale_book`, `not_tradeable`, `daily_limit`,
-`parse_low_confidence`, `already_traded`, or `halted`.
+```bash
+.venv/bin/python -m polybot.main smoke-iran-classifier --config iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
+```
 
-Live orders are at-most-once per market. The risk state reserves the market and
-notional before `post_order` so a transient network exception cannot cause a
-resubmit. A shared `SettlementWatcher` polls live orders until confirmed,
-failed, or timed out; failures and timeouts feed the kill switch.
+Live runs default to the Python CLOB adapter. The legacy TypeScript
+`clob-client-v2` backend is still available for diagnostics, but the posted
+probe exposed a Polymarket-side deposit-wallet signer/API-key mismatch:
+
+```bash
+POLYBOT_EXECUTION_BACKEND=clob_v2
+```
+
+The official beta SDK backend is also wired:
+
+```bash
+POLYBOT_EXECUTION_BACKEND=polymarket_beta
+```
+
+It requires Node 24. The bot has been migrated to the beta-derived deposit
+wallet `0xf9021f4aa0cec3059a6b1da1083a68c9dc5fa267`, which is where on-chain
+reconciliation shows the July 17 YES shares. The bridge refuses balance queries
+and orders if `DEPOSIT_WALLET_ADDRESS` differs from the beta SDK's derived
+wallet, so it cannot silently trade the wrong account.
+
+Run the Iran bot:
+
+```bash
+.venv/bin/python -m polybot.main run-iran --config iran-july17-yes-protection.yaml
+```
+
+Run live only after config and credential review:
+
+```bash
+.venv/bin/python -m polybot.main run-iran --config iran-july17-yes-protection.yaml --live
+```
+
+## Iran Configs
+
+- `iran-july17-yes-protection.yaml`: protects a YES position on the July 17
+  peace-talks leg.
+- `positions.example.yaml`: read-only portfolio snapshot config. It does not
+  authorize live trading; operator mode files and config-hash acks still gate
+  execution.
+
+`sources.poll_urls` is for fixed, execution-grade article URLs. `sources.feed_urls`
+is for discovery-grade RSS/Atom feeds. Feed items are processed through the same
+keyword gate and classifier, but `allow_feed_auto_trade: false` keeps them from
+placing trades by default. A trusted feed item can still record a scheduled-round
+hold signal and pause a blind July 17 YES time-decay sale. If a feed item can be
+resolved to a publisher URL but the full article fetch fails, it remains
+`promoted_feed_summary`: useful for alerts/hold signals, never auto-trade.
+
+## Safety Model
+
+The Iran bot is a state machine, not a market-making system. It writes explicit
+states below the configured `data_dir`, with dry-run state isolated under
+`data_dir/dry_run`.
+
+Important states include:
+
+- `TRIGGER_DETECTED`
+- `CANCELING_ORDERS`
+- `SELLING_NO`
+- `SELLING_YES`
+- `NO_SOLD`
+- `BUYING_YES`
+- `BUYING_NO`
+- `FLIPPED`
+- `EXITED`
+- `FLIP_INCOMPLETE`
+- `NO_POSITION_UNCONFIRMED`
+- `YES_POSITION_UNCONFIRMED`
+- `TIME_DECAY_PRICE_FLOOR`
+- `EXECUTION_ERROR`
+
+Live execution cancels open market orders before sizing when
+`safety.cancel_open_orders_first: true`. Transient zero-balance reads are
+nonterminal, and unexpected execution exceptions write `EXECUTION_ERROR` and
+keep the polling process alive.
+
+The operator gate blocks live execution unless the position mode is `live` and
+the current config hash has been acknowledged. The bot re-reads the mode files
+every polling cycle; write `off` or `alert_only` to
+`data/operator/positions/<config-stem>.mode` to stop live execution mid-run.
+Live preflight also blocks missing Telegram credentials when degraded alerts are
+required, and missing `ANTHROPIC_API_KEY`/`LLM_API_KEY` when the configured
+classifier provider is `anthropic`.
+
+The July 17 YES config includes calendar-decay brakes:
+
+- trusted scheduled-round hold signals suspend time-decay selling temporarily
+- `time_decay.min_trim_price` prevents dumping trims below a floor
+- `time_decay.min_exit_price` prevents dumping full exits below a floor
+- Reuters/AP discovery uses Google News RSS because stable public RSS is not
+  available for those sources
+- State Department discovery uses official State RSS feeds and safely no-ops in
+  environments where State returns an HTML error page instead of RSS
+
+IRNA is alert-only by default. It can surface information, but a single IRNA
+item should not auto-trade.
+
+## Logs
+
+Primary logs are JSONL under `logs/`. Iran decisions are written to
+`logs/decisions.jsonl`, article hashes to `logs/articles.jsonl`, and shared
+runtime events to `logs/polybot.jsonl`.
+
+Every log event is intended to explain why the bot acted or skipped.
 
 ## Go-Live Checklist
 
-- Run the test suite: `.venv/bin/python -m pytest -q -s`.
-- Run `inspect` on the market and manually verify Gamma fields, token IDs,
-  `tick_size`, `neg_risk`, and `accepting_orders`.
-- Independently verify Polymarket access and legality in your jurisdiction.
-- Independently verify that the market rules match the configured station,
-  date, unit, and bucket labels.
-- Run METAR calibration for the station and manually compare against
-  Wunderground history away from bucket boundaries.
-- If using `source: wunderground`, confirm that Wunderground data access is
-  authorized and reliable.
-- Run at least one full dry-run session that produces
-  `source_poll -> source_locked -> book_snapshot -> order_submit(dry_run)`.
+- Run the tests: `.venv/bin/python -m pytest -q -s`.
+- Run `inspect-iran` and manually verify question, rule text, token IDs,
+  `condition_id`, `tick_size`, `neg_risk`, and `accepting_orders`.
+- Pin and review the rule-text SHA256.
+- Add real `sources.poll_urls` if relying on news protection.
+- Verify Polymarket access and legality in your jurisdiction.
+- Confirm position caps match the actual position size you are willing to sell.
+- Run at least one complete dry-run session and inspect state/log output.
 - Fund only an amount you can lose entirely.
-- Keep guardrails at or below defaults unless the code is re-reviewed.
 
 ## Out Of Scope
 
-No selling, no exits, no market making, no automatic position-size increases, no
-macro hot path beyond a stub, no crypto/sports/social-media adapters, and no UI.
+No weather markets, no market making, no automatic position-size increases, no
+generic sports/crypto/social-media adapters, and no UI.

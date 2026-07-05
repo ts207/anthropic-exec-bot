@@ -6,14 +6,19 @@
   "scripts": {
     "start": "tsx src/main.ts",
     "clob-keys": "tsx src/deriveClobKeys.ts",
+    "clob-v2-bridge": "tsx src/clobV2Bridge.ts",
+    "clob-v2-probe": "tsx src/clobV2ExecutionProbe.ts",
+    "polymarket-beta-bridge": "tsx src/polymarketBetaBridge.ts",
     "deposit-wallet": "tsx src/depositWallet.ts",
+    "migrate-iran-yes": "tsx src/migrateIranYesToBetaWallet.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@polymarket/builder-relayer-client": "^0.0.10",
     "@polymarket/builder-signing-sdk": "^0.0.8",
-    "@polymarket/clob-client-v2": "latest",
+    "@polymarket/client": "^0.1.0-beta.12",
+    "@polymarket/clob-client-v2": "^1.0.8",
     "dotenv": "latest",
     "playwright": "latest",
     "tsx": "latest",

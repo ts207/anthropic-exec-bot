@@ -1,0 +1,109 @@
+market:
+  slug: "next-round-of-us-iran-peace-talks-byptptpt-20260623022722982"
+  target_leg: "July 17"
+  held_side: "YES"
+  expected_question_contains: "July 17"
+  expected_rule_text_sha256: "9d2d90f0046a11609f512e17b56c1b1649b2714eb182cefee3a35b0bff4a3147"
+
+position:
+  source: "onchain"
+  expected_yes_token_id: "61185693373091340617494150277851514641770797636186465474956889484881632951438"
+  expected_no_token_id: "12926245040899451804437509621465764609213522509461670123611024472259491643478"
+  max_yes_shares_to_sell: 100000
+  max_no_usd_to_buy: 100
+
+trigger:
+  auto_execute_level: 4
+  require_two_sources: false
+  trusted_single_source_execution: true
+
+classifier:
+  provider: "anthropic"
+  model: "claude-opus-4-8"
+  passes: 2
+  require_pass_agreement: true
+  require_verbatim_quote: true
+  include_market_rule_text: true
+  if_api_down: "urgent_alert_no_trade"
+
+time_decay:
+  enabled: true
+  trim_after_date: "2026-07-12"
+  exit_after_date: "2026-07-15"
+  trim_fraction: 0.25
+  suspend_exit_on_scheduled_signal: true
+  scheduled_signal_suspension_days: 3
+  min_trim_price: 0.05
+  min_exit_price: 0.10
+
+execution:
+  dry_run: false
+  order_type: "FAK"
+  sell_yes:
+    enabled: true
+    min_price: 0.03
+    retry_partial_once: true
+    retry_delay_seconds: 2
+    trim_fraction: 0.25
+  buy_no:
+    enabled: true
+    max_price_exit: 0.90
+    usd_budget: 100
+    skip_if_above_cap: true
+  sell_no:
+    enabled: false
+  buy_yes:
+    enabled: false
+
+safety:
+  one_shot: true
+  cancel_open_orders_first: true
+  query_live_position: true
+  verify_fills_before_final_lock: true
+  quote_must_match_article_text: true
+  token_mapping_must_match: true
+  yes_cap_never_blocks_no_sell: true
+  degraded_mode_alert: true
+  max_executions: 1
+  poll_seconds: 30
+
+sources:
+  # Fixed article URLs are execution-grade; feed URLs below are discovery/alert-grade by default.
+  poll_urls: []
+  feed_urls:
+    - "https://news.google.com/rss/search?q=%28Iran%20OR%20Araghchi%20OR%20Witkoff%29%20%28talks%20OR%20negotiations%20OR%20Doha%20OR%20Oman%20OR%20Qatar%29%20site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen"
+    - "https://news.google.com/rss/search?q=%28Iran%20OR%20Araghchi%20OR%20Witkoff%29%20%28talks%20OR%20negotiations%20OR%20Doha%20OR%20Oman%20OR%20Qatar%29%20site%3Aapnews.com&hl=en-US&gl=US&ceid=US%3Aen"
+    - "https://www.state.gov/rss-feed/press-releases/feed/"
+    - "https://www.state.gov/rss-feed/speeches-and-remarks/feed/"
+    - "https://www.state.gov/rss-feed/media-note/feed/"
+  allow_feed_auto_trade: false
+  promote_feed_to_article: true
+  feed_exclude_terms:
+    - "visa"
+    - "visas"
+    - "reciprocity"
+    - "civil documents"
+    - "travel advisory"
+    - "travel.state.gov"
+    - "aoprals.state.gov"
+    - "2001-2009.state.gov"
+    - "2009-2017.state.gov"
+    - "2021-2025.state.gov"
+    - "consular"
+    - "passport"
+    - "allowances"
+  auto_trade_domains:
+    - "reuters.com"
+    - "apnews.com"
+    - "afp.com"
+    - "state.gov"
+    - "whitehouse.gov"
+    - "mfa.gov.ir"
+    - "mofa.gov.qa"
+    - "fm.gov.om"
+    - "mofa.gov.pk"
+  alert_only_domains:
+    - "x.com"
+    - "twitter.com"
+    - "t.me"
+    - "irna.ir"
