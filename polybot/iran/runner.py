@@ -441,6 +441,14 @@ class IranProtectionBot:
             return Decision("ALERT_ONLY", "3", "feed_item_auto_trade_disabled", decision.factors)
         if article.source_kind == "promoted_feed_summary" and decision.action in TRADE_ACTIONS:
             return Decision("ALERT_ONLY", "3", "promoted_feed_summary_auto_trade_disabled", decision.factors)
+        if decision.action in TRADE_ACTIONS:
+            # Feeds resurface old items (and Google News re-emits them under new
+            # URLs, defeating hash dedup); never auto-trade on stale news the
+            # market has already priced.
+            age_hours = _article_age_hours(article)
+            max_age = self.config.sources.max_trade_article_age_hours
+            if max_age > 0 and age_hours is not None and age_hours > max_age:
+                return Decision("ALERT_ONLY", "3", f"article_stale_for_auto_trade:{age_hours:.0f}h", decision.factors)
         if domain_allowed(article.domain, self.config.sources.alert_only_domains):
             return Decision("ALERT_ONLY", "3", "source_domain_alert_only", decision.factors)
         if not domain_allowed(article.domain, self.config.sources.auto_trade_domains):
@@ -525,6 +533,23 @@ def _classifier_context_for(config: IranBotConfig, market_rule_text: str) -> str
     if not config.classifier.include_market_rule_text:
         return f"Target leg: {config.market.target_leg}"
     return f"{market_rule_text}\nTarget leg: {config.market.target_leg}"
+
+
+def _article_age_hours(article: Article) -> float | None:
+    if not article.published_at:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+
+        published = parsedate_to_datetime(article.published_at)
+    except (TypeError, ValueError):
+        try:
+            published = datetime.fromisoformat(article.published_at)
+        except ValueError:
+            return None
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - published).total_seconds() / 3600.0
 
 
 def _level_meets_threshold(level: str, threshold: int) -> bool:

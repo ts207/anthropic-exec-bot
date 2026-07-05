@@ -773,3 +773,76 @@ def test_pass_agreement_ignores_pure_verdict_fields() -> None:
     decision = classify_agreement([first, second], held_side="YES")
     assert decision.action == "EXIT_YES_OPTIONAL_BUY_NO"
     assert decision.level == "4B"
+
+
+def test_stale_article_trade_action_downgraded_to_alert(tmp_path) -> None:
+    from polybot.iran.runner import _article_age_hours
+
+    stale = Article(
+        url="https://apnews.com/old-strikes-story",
+        domain="apnews.com",
+        title="Iran attacks following US strikes",
+        published_at="Mon, 29 Jun 2026 05:15:00 GMT",
+        fetched_at="2026-07-05T12:00:00Z",
+        raw_text="Iran attacked following US strikes.",
+        hash="stalehash",
+        source_kind="article",
+    )
+    age = _article_age_hours(stale)
+    assert age is not None and age > 24
+
+    fresh_iso = Article(
+        url="https://apnews.com/fresh",
+        domain="apnews.com",
+        title="fresh",
+        published_at="2026-07-05T11:00:00+00:00",
+        fetched_at="2026-07-05T12:00:00Z",
+        raw_text="fresh",
+        hash="freshhash",
+    )
+    assert _article_age_hours(fresh_iso) is not None
+
+    unknown = Article(
+        url="https://apnews.com/unknown",
+        domain="apnews.com",
+        title="unknown",
+        published_at=None,
+        fetched_at="2026-07-05T12:00:00Z",
+        raw_text="unknown",
+        hash="unknownhash",
+    )
+    assert _article_age_hours(unknown) is None
+
+
+def test_source_policy_blocks_stale_trade_actions(tmp_path) -> None:
+    from polybot.gamma import MarketMeta
+    from polybot.iran.executor import DryRunTradingAdapter
+    from polybot.iran.runner import IranProtectionBot
+
+    cfg = IranBotConfig(
+        market=MarketConfig(slug="iran-event", held_side="YES"),
+        data_dir=tmp_path / "data",
+        logs_dir=tmp_path / "logs",
+    )
+    market = MarketMeta(
+        event_slug="iran-event", market_slug="july-17", condition_id="0xc", question="July 17?",
+        description="d", resolution_source="", outcomes=["Yes", "No"], outcome_prices=[0.5, 0.5],
+        yes_token_id="1", no_token_id="2", tick_size="0.01", neg_risk=False,
+        active=True, closed=False, accepting_orders=True, volume=0.0, liquidity=0.0,
+    )
+    bot = IranProtectionBot(config=cfg, market=market, market_rule_text="rules", adapter=DryRunTradingAdapter())
+    stale = Article(
+        url="https://apnews.com/old", domain="apnews.com", title="old",
+        published_at="Mon, 29 Jun 2026 05:15:00 GMT", fetched_at="2026-07-05T12:00:00Z",
+        raw_text="old", hash="h1",
+    )
+    decision = bot._enforce_source_policy(stale, Decision("EXIT_YES_OPTIONAL_BUY_NO", "4B", "strikes_or_breakdown"))
+    assert decision.action == "ALERT_ONLY"
+    assert decision.reason.startswith("article_stale_for_auto_trade")
+
+    fresh = Article(
+        url="https://apnews.com/new", domain="apnews.com", title="new",
+        published_at=None, fetched_at="2026-07-05T12:00:00Z", raw_text="new", hash="h2",
+    )
+    decision = bot._enforce_source_policy(fresh, Decision("EXIT_YES_OPTIONAL_BUY_NO", "4B", "strikes_or_breakdown"))
+    assert decision.action == "EXIT_YES_OPTIONAL_BUY_NO"

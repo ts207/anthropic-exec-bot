@@ -172,6 +172,10 @@ class SourcesConfig:
     max_feed_entries_per_cycle: int = 20
     allow_feed_auto_trade: bool = False
     promote_feed_to_article: bool = True
+    # Trade actions are downgraded to ALERT_ONLY for articles published more
+    # than this many hours ago (0 disables). Alerts and hold signals are
+    # unaffected.
+    max_trade_article_age_hours: float = 24.0
 
 
 @dataclass(frozen=True)

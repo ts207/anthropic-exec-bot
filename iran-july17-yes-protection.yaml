@@ -78,6 +78,7 @@ sources:
     - "https://www.state.gov/rss-feed/media-note/feed/"
   allow_feed_auto_trade: false
   promote_feed_to_article: true
+  max_trade_article_age_hours: 24
   feed_exclude_terms:
     - "visa"
     - "visas"
