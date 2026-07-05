@@ -59,8 +59,14 @@ def classify_agreement(passes: list[SignalFactors], held_side: str = "NO") -> De
     first = passes[0]
     if len(passes) == 1:
         return final_decision(first, held_side=held_side)
-    if not all(agree(first, other, fields) for other in passes[1:]):
-        return Decision("ALERT_ONLY", "3", "classifier_pass_disagreement", first)
+    differing = sorted({
+        field
+        for other in passes[1:]
+        for field in fields
+        if getattr(first, field) != getattr(other, field)
+    })
+    if differing:
+        return Decision("ALERT_ONLY", "3", f"classifier_pass_disagreement:{','.join(differing)}", first)
     return final_decision(first, held_side=held_side)
 
 

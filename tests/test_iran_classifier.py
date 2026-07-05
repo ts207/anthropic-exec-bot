@@ -110,7 +110,7 @@ def test_classifier_pass_disagreement_is_alert_only() -> None:
     decision = classify_agreement([first, second])
     assert decision.action == "ALERT_ONLY"
     assert decision.level == "3"
-    assert decision.reason == "classifier_pass_disagreement"
+    assert decision.reason.startswith("classifier_pass_disagreement")
 
 
 def test_yes_protection_senior_round_scheduled_before_deadline_is_hold_signal() -> None:
