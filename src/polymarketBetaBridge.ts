@@ -15,7 +15,7 @@ import { AssetType, type ApiKeyCreds } from "@polymarket/bindings/clob";
 import { http, type Hex } from "viem";
 import { polygon } from "viem/chains";
 
-type Action = "account" | "balance" | "book" | "open-orders" | "cancel-market-orders" | "fak";
+type Action = "account" | "balance" | "collateral" | "book" | "open-orders" | "cancel-market-orders" | "fak";
 
 const CONDITIONAL_DECIMALS = 1_000_000;
 const BALANCE_POLL_ATTEMPTS = 20;
@@ -54,6 +54,22 @@ async function main(): Promise<void> {
         no_shares: no.shares,
       },
       raw: { yes, no },
+    });
+  }
+
+  if (action === "collateral") {
+    requireConfiguredWalletMatches(client, configuredWallet);
+    const result = await fetchBalanceAllowance(client, { assetType: AssetType.COLLATERAL });
+    const record = result as Record<string, unknown>;
+    const raw = String(record.balance ?? record.available ?? "0");
+    return print({
+      action,
+      account: client.account,
+      collateral: {
+        raw,
+        usd: Number(raw) / CONDITIONAL_DECIMALS,
+        allowances: asStringRecord(record.allowances),
+      },
     });
   }
 

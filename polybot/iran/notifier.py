@@ -16,7 +16,7 @@ class Notifier:
 class TelegramNotifier(Notifier):
     def __init__(self) -> None:
         self.token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_ID")
 
     def notify(self, message: str, **fields: Any) -> None:
         super().notify(message, **fields)

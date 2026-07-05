@@ -8,7 +8,21 @@ from .types import SignalFactors
 from .verifier import quote_in_article
 
 
-AGREEMENT_FIELDS = [
+# Pass agreement is required on exactly the fields the configured decision path
+# consumes. The classifier's `level`/`recommended_action` are pure verdicts the
+# decision layer re-derives, and NO-thesis fields like `protect_no_position` are
+# meaningless for a YES holder; LLM passes jitter on those even when every
+# decision-relevant fact matches, which would veto real triggers.
+YES_AGREEMENT_FIELDS = [
+    "source_is_trusted",
+    "technical_or_implementation_only",
+    "event_type",
+    "seniority",
+    "timing_relative_to_deadline",
+    "source_tier",
+]
+
+NO_AGREEMENT_FIELDS = [
     "protect_no_position",
     "would_resolve_yes_if_true",
     "level",
@@ -22,6 +36,9 @@ AGREEMENT_FIELDS = [
     "source_tier",
 ]
 
+# Backwards-compatible alias (NO side keeps the historical strict list).
+AGREEMENT_FIELDS = NO_AGREEMENT_FIELDS
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -31,17 +48,18 @@ class Decision:
     factors: SignalFactors | None = None
 
 
-def agree(left: SignalFactors, right: SignalFactors) -> bool:
-    return all(getattr(left, field) == getattr(right, field) for field in AGREEMENT_FIELDS)
+def agree(left: SignalFactors, right: SignalFactors, fields: list[str] | None = None) -> bool:
+    return all(getattr(left, field) == getattr(right, field) for field in (fields or AGREEMENT_FIELDS))
 
 
 def classify_agreement(passes: list[SignalFactors], held_side: str = "NO") -> Decision:
     if not passes:
         return Decision("ALERT_ONLY", "3", "classifier_unavailable")
+    fields = YES_AGREEMENT_FIELDS if held_side.upper() == "YES" else NO_AGREEMENT_FIELDS
     first = passes[0]
     if len(passes) == 1:
         return final_decision(first, held_side=held_side)
-    if not all(agree(first, other) for other in passes[1:]):
+    if not all(agree(first, other, fields) for other in passes[1:]):
         return Decision("ALERT_ONLY", "3", "classifier_pass_disagreement", first)
     return final_decision(first, held_side=held_side)
 

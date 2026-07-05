@@ -742,3 +742,34 @@ def test_scheduled_hold_marker_survives_state_overwrite(tmp_path) -> None:
     marker = store.marker("YES_SCHEDULED_HOLD_SIGNAL")
     assert marker is not None
     assert _active_scheduled_hold(cfg, marker) is not None
+
+
+def test_pass_agreement_ignores_pure_verdict_fields() -> None:
+    base = dict(
+        source_is_trusted=True,
+        event_status="postponed",
+        before_deadline=False,
+        scheduled_before_july30=False,
+        begun_before_july31=False,
+        formal_senior_level_round=True,
+        senior_us_representative_involved=True,
+        senior_iran_representative_involved=True,
+        in_person_or_indirect_in_person=True,
+        peace_talks_or_negotiations=True,
+        technical_or_implementation_only=False,
+        protect_no_position=False,
+        would_resolve_yes_if_true=False,
+        quote_supporting_trigger="The next round of negotiations has been postponed until August 4",
+        event_type="round_postponed",
+        seniority="senior",
+        timing_relative_to_deadline="after",
+        source_tier="wire",
+    )
+    # LLM passes agree on every YES-decision-relevant fact but jitter on the
+    # verdict fields and on NO-thesis fields a YES holder never consumes.
+    first = SignalFactors(**base, recommended_action="alert_only", level="2")
+    second_fields = dict(base, protect_no_position=True, would_resolve_yes_if_true=True, formal_senior_level_round=False, before_deadline=True)
+    second = SignalFactors(**second_fields, recommended_action="sell_yes_and_buy_no", level="4A")
+    decision = classify_agreement([first, second], held_side="YES")
+    assert decision.action == "EXIT_YES_OPTIONAL_BUY_NO"
+    assert decision.level == "4B"
