@@ -14,7 +14,7 @@ from polybot.gamma import MarketMeta
 from polybot.log import log_event
 
 from .classifier import build_classifier, run_classifier_passes
-from .config import IranBotConfig, load_iran_config
+from .config import ClassifierConfig, IranBotConfig, load_iran_config
 from .decision import Decision, classify_agreement, final_decision, time_decay_decision, verify_quote_or_alert
 from .executor import DryRunTradingAdapter, FlipExecutor, LiveClobTradingAdapter, TradingAdapter, TsClobV2TradingAdapter, TsPolymarketBetaTradingAdapter
 from .keyword_gate import keyword_gate
@@ -179,6 +179,7 @@ def smoke_iran_classifier_command(
         hash=f"smoke:{hash(text or '')}",
     )
     classifier = build_classifier(config.classifier, config.sources)
+    budget_status = ClassifierBudgetStore(config.data_dir).status(config.classifier)
     try:
         passes = run_classifier_passes(
             classifier,
@@ -195,6 +196,7 @@ def smoke_iran_classifier_command(
                         "provider": config.classifier.provider,
                         "model": config.classifier.model,
                         "passes": config.classifier.passes,
+                        "budget": budget_status,
                     },
                     "ok": False,
                     "error": str(exc),
@@ -223,6 +225,12 @@ def smoke_iran_classifier_command(
                     "factors": asdict(decision.factors) if decision.factors else None,
                 },
                 "pass_agreement": len(passes) <= 1 or all(passes[0] == item for item in passes[1:]),
+                "classifier": {
+                    "provider": config.classifier.provider,
+                    "model": config.classifier.model,
+                    "passes": config.classifier.passes,
+                    "budget": budget_status,
+                },
                 "executed": False,
                 "ok": True,
             },
@@ -283,6 +291,86 @@ def _live_adapter_for_market(market: MarketMeta) -> TradingAdapter:
     raise SystemExit(f"unsupported POLYBOT_EXECUTION_BACKEND={backend!r}; expected py_clob, clob_v2, or polymarket_beta")
 
 
+class ClassifierBudgetStore:
+    def __init__(self, data_dir: Path) -> None:
+        self.path = data_dir / "classifier_budget.json"
+
+    def block_reason(self, config: ClassifierConfig) -> str | None:
+        now = datetime.now(timezone.utc)
+        raw = self._read()
+        hour_key = self._hour_key(now)
+        day_key = self._day_key(now)
+        if config.max_classifier_errors_per_hour > 0 and raw.get("errors_by_hour", {}).get(hour_key, 0) >= config.max_classifier_errors_per_hour:
+            return "classifier_error_cap_exceeded"
+        if config.max_escalations_per_hour > 0 and raw.get("attempts_by_hour", {}).get(hour_key, 0) >= config.max_escalations_per_hour:
+            return "classifier_budget_exhausted_hourly"
+        if config.max_escalations_per_day > 0 and raw.get("attempts_by_day", {}).get(day_key, 0) >= config.max_escalations_per_day:
+            return "classifier_budget_exhausted_daily"
+        return None
+
+    def record_attempt(self) -> None:
+        now = datetime.now(timezone.utc)
+        self._increment("attempts_by_hour", self._hour_key(now))
+        self._increment("attempts_by_day", self._day_key(now))
+
+    def record_error(self) -> None:
+        now = datetime.now(timezone.utc)
+        self._increment("errors_by_hour", self._hour_key(now))
+
+    def mark_notified_once(self, reason: str, window: str) -> bool:
+        now = datetime.now(timezone.utc)
+        key = self._hour_key(now) if window == "hour" else self._day_key(now)
+        raw = self._read()
+        notified = raw.setdefault("notified", {})
+        reason_notified = notified.setdefault(reason, [])
+        if key in reason_notified:
+            return False
+        reason_notified.append(key)
+        self._write(raw)
+        return True
+
+    def status(self, config: ClassifierConfig) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        raw = self._read()
+        hour_key = self._hour_key(now)
+        day_key = self._day_key(now)
+        return {
+            "hour_key": hour_key,
+            "day_key": day_key,
+            "attempts_this_hour": raw.get("attempts_by_hour", {}).get(hour_key, 0),
+            "attempts_today": raw.get("attempts_by_day", {}).get(day_key, 0),
+            "errors_this_hour": raw.get("errors_by_hour", {}).get(hour_key, 0),
+            "max_escalations_per_hour": config.max_escalations_per_hour,
+            "max_escalations_per_day": config.max_escalations_per_day,
+            "max_classifier_errors_per_hour": config.max_classifier_errors_per_hour,
+            "block_reason": self.block_reason(config),
+        }
+
+    def _increment(self, bucket: str, key: str) -> None:
+        raw = self._read()
+        values = raw.setdefault(bucket, {})
+        values[key] = int(values.get(key, 0)) + 1
+        self._write(raw)
+
+    def _read(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {}
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+
+    def _write(self, raw: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(raw, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _hour_key(now: datetime) -> str:
+        return now.strftime("%Y%m%d%H")
+
+    @staticmethod
+    def _day_key(now: datetime) -> str:
+        return now.strftime("%Y%m%d")
+
+
 class IranProtectionBot:
     def __init__(
         self,
@@ -301,6 +389,7 @@ class IranProtectionBot:
         self.article_store = ArticleStore(config.logs_dir / "articles.jsonl")
         self.notifier = TelegramNotifier()
         self.classifier = build_classifier(config.classifier, config.sources)
+        self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
         self.executor = FlipExecutor(config, self.store, self.notifier, adapter)
         self.operator_gate = operator_gate
         self.live_requested = live_requested
@@ -359,18 +448,25 @@ class IranProtectionBot:
             decision = Decision("ALERT_ONLY", "3", f"article_stale_skipped_classification:{age_hours:.0f}h")
             self._log_decision(article, decision, gate=gate.__dict__)
             return decision
+        if _is_feed_summary(article) and not self.config.classifier.classify_feed_summaries:
+            decision = Decision("ALERT_ONLY", "3", "feed_summary_classification_disabled")
+            self._log_decision(article, decision, gate=gate.__dict__)
+            self.notifier.notify("Iran protection feed summary skipped classifier", reason=decision.reason, url=article.url)
+            return decision
+        block_reason = self.classifier_budget.block_reason(self.config.classifier)
+        if block_reason is not None:
+            decision = Decision("ALERT_ONLY", "3", block_reason)
+            self._log_decision(article, decision, gate=gate.__dict__)
+            self._notify_classifier_budget_block_once(block_reason)
+            return decision
         try:
-            passes = run_classifier_passes(
-                self.classifier,
-                article,
-                self._classifier_context(),
-                self.config.classifier.passes,
-            )
+            passes = [self._classify_with_budget(article, index) for index in range(max(1, self.config.classifier.passes))]
             if self.config.classifier.require_pass_agreement:
                 decision = classify_agreement(passes, held_side=self.config.market.held_side)
             else:
                 decision = final_decision(passes[0], held_side=self.config.market.held_side)
         except Exception as exc:
+            self.classifier_budget.record_error()
             decision = Decision("ALERT_ONLY", "3", f"classifier_error:{exc}")
             self.notifier.notify("Classifier unavailable or failed; no trade", error=str(exc))
             self._log_decision(article, decision, gate=gate.__dict__)
@@ -537,6 +633,35 @@ class IranProtectionBot:
             },
         )
 
+    def _classify_with_budget(self, article: Article, pass_index: int):
+        context = self._classifier_context()
+        input_chars = len(article.title) + len(article.raw_text) + len(context)
+        telemetry = {
+            "provider": self.config.classifier.provider,
+            "model": self.config.classifier.model,
+            "pass_index": pass_index,
+            "article_hash": article.hash,
+            "source_kind": article.source_kind,
+            "domain": article.domain,
+            "input_char_count": input_chars,
+            "estimated_input_tokens": max(1, input_chars // 4),
+        }
+        self.classifier_budget.record_attempt()
+        log_event("iran_classifier_attempt", **telemetry)
+        if hasattr(self.classifier, "last_usage"):
+            setattr(self.classifier, "last_usage", None)
+        factors = self.classifier.classify(article, context)
+        usage = getattr(self.classifier, "last_usage", None)
+        if isinstance(usage, dict):
+            telemetry["usage"] = usage
+        log_event("iran_classifier_result", **telemetry)
+        return factors
+
+    def _notify_classifier_budget_block_once(self, reason: str) -> None:
+        window = "hour" if reason in {"classifier_budget_exhausted_hourly", "classifier_error_cap_exceeded"} else "day"
+        if self.classifier_budget.mark_notified_once(reason, window):
+            self.notifier.notify("Iran protection classifier budget blocked classification", reason=reason)
+
     def _classifier_context(self) -> str:
         return _classifier_context_for(self.config, self.market_rule_text)
 
@@ -545,6 +670,10 @@ def _classifier_context_for(config: IranBotConfig, market_rule_text: str) -> str
     if not config.classifier.include_market_rule_text:
         return f"Target leg: {config.market.target_leg}"
     return f"{market_rule_text}\nTarget leg: {config.market.target_leg}"
+
+
+def _is_feed_summary(article: Article) -> bool:
+    return article.source_kind in {"feed", "feed_item", "promoted_feed_summary"}
 
 
 def _article_age_hours(article: Article) -> float | None:

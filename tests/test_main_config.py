@@ -111,3 +111,44 @@ def test_main_dispatches_smoke_iran_classifier(monkeypatch, tmp_path) -> None:
 
     assert main_module.main(["smoke-iran-classifier", "--config", str(tmp_path / "iran.yaml"), "--text", "hello", "--domain", "apnews.com"]) == 0
     assert called == {"path": tmp_path / "iran.yaml", "url": None, "text": "hello", "title": "classifier smoke", "domain": "apnews.com"}
+
+
+def test_iran_classifier_config_low_cost_defaults_and_overrides(tmp_path) -> None:
+    from polybot.iran.config import load_iran_config
+
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text("market:\n  slug: iran-event\nclassifier:\n  provider: anthropic\n", encoding="utf-8")
+    default_cfg = load_iran_config(default_path)
+    assert default_cfg.classifier.model == "claude-sonnet-4-6"
+    assert default_cfg.classifier.passes == 1
+    assert default_cfg.classifier.require_pass_agreement is False
+    assert default_cfg.classifier.max_escalations_per_hour == 4
+    assert default_cfg.classifier.max_escalations_per_day == 20
+    assert default_cfg.classifier.max_classifier_errors_per_hour == 3
+    assert default_cfg.classifier.classify_feed_summaries is False
+
+    override_path = tmp_path / "override.yaml"
+    override_path.write_text(
+        "\n".join(
+            [
+                "market:",
+                "  slug: iran-event",
+                "classifier:",
+                "  provider: anthropic",
+                "  model: claude-sonnet-4-6",
+                "  passes: 1",
+                "  require_pass_agreement: false",
+                "  max_escalations_per_hour: 2",
+                "  max_escalations_per_day: 7",
+                "  max_classifier_errors_per_hour: 1",
+                "  classify_feed_summaries: true",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    override_cfg = load_iran_config(override_path)
+    assert override_cfg.classifier.max_escalations_per_hour == 2
+    assert override_cfg.classifier.max_escalations_per_day == 7
+    assert override_cfg.classifier.max_classifier_errors_per_hour == 1
+    assert override_cfg.classifier.classify_feed_summaries is True

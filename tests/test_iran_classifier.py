@@ -4,7 +4,7 @@ from polybot.iran.classifier import RuleBasedFixtureClassifier
 from polybot.gamma import MarketMeta
 from datetime import date
 
-from polybot.iran.config import IranBotConfig, MarketConfig, SourcesConfig, TimeDecayConfig, TriggerConfig
+from polybot.iran.config import ClassifierConfig, IranBotConfig, MarketConfig, SourcesConfig, TimeDecayConfig, TriggerConfig
 from polybot.iran.decision import Decision, classify_agreement, final_decision, time_decay_decision, verify_quote_or_alert
 from polybot.iran.executor import DryRunTradingAdapter
 from polybot.iran.runner import IranProtectionBot, _active_scheduled_hold
@@ -278,6 +278,16 @@ class ScheduledHoldClassifier:
         )
 
 
+class FailingClassifier:
+    def classify(self, article: Article, market_rule_text: str) -> SignalFactors:
+        raise AssertionError("classifier should not be called")
+
+
+class ErrorClassifier:
+    def classify(self, article: Article, market_rule_text: str) -> SignalFactors:
+        raise RuntimeError("classifier down")
+
+
 class RecordingAdapter(DryRunTradingAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -327,7 +337,7 @@ def test_alert_only_domain_cannot_execute_even_if_classifier_claims_trusted(tmp_
 def test_feed_item_does_not_auto_trade_by_default(tmp_path) -> None:
     adapter = RecordingAdapter()
     bot = source_policy_bot(tmp_path, adapter)
-    bot.classifier = TrustingClassifier()
+    bot.classifier = FailingClassifier()
     feed_article = Article(
         url="https://news.google.com/rss/articles/example",
         domain="reuters.com",
@@ -342,14 +352,14 @@ def test_feed_item_does_not_auto_trade_by_default(tmp_path) -> None:
     decision = bot.process_article(feed_article)
 
     assert decision.action == "ALERT_ONLY"
-    assert decision.reason == "feed_item_auto_trade_disabled"
+    assert decision.reason == "feed_summary_classification_disabled"
     assert adapter.calls == []
 
 
 def test_promoted_feed_summary_does_not_auto_trade(tmp_path) -> None:
     adapter = RecordingAdapter()
     bot = source_policy_bot(tmp_path, adapter)
-    bot.classifier = TrustingClassifier()
+    bot.classifier = FailingClassifier()
     promoted_summary = Article(
         url="https://www.reuters.com/world/middle-east/story",
         domain="reuters.com",
@@ -364,13 +374,34 @@ def test_promoted_feed_summary_does_not_auto_trade(tmp_path) -> None:
     decision = bot.process_article(promoted_summary)
 
     assert decision.action == "ALERT_ONLY"
-    assert decision.reason == "promoted_feed_summary_auto_trade_disabled"
+    assert decision.reason == "feed_summary_classification_disabled"
     assert adapter.calls == []
 
 
-def test_feed_scheduled_hold_can_suspend_yes_time_decay(tmp_path) -> None:
+def test_feed_summary_skip_does_not_increment_classifier_budget(tmp_path) -> None:
     adapter = RecordingAdapter()
-    bot = source_policy_bot(tmp_path, adapter, held_side="YES")
+    bot = source_policy_bot(tmp_path, adapter)
+    bot.classifier = FailingClassifier()
+    feed_article = Article(
+        url="https://news.google.com/rss/articles/example",
+        domain="reuters.com",
+        title="Araghchi and Witkoff to meet in Doha on July 14.",
+        published_at=None,
+        fetched_at="2026-07-03T00:00:00Z",
+        raw_text="Araghchi and Witkoff to meet in Doha on July 14.",
+        hash="feed-budget-h",
+        source_kind="feed",
+    )
+
+    decision = bot.process_article(feed_article)
+
+    assert decision.reason == "feed_summary_classification_disabled"
+    assert not (bot.store.data_dir / "classifier_budget.json").exists()
+
+
+def test_feed_scheduled_hold_can_suspend_yes_time_decay_when_enabled(tmp_path) -> None:
+    adapter = RecordingAdapter()
+    bot = source_policy_bot(tmp_path, adapter, held_side="YES", classifier=ClassifierConfig(classify_feed_summaries=True))
     bot.classifier = ScheduledHoldClassifier()
     feed_article = Article(
         url="https://news.google.com/rss/articles/example",
@@ -394,7 +425,7 @@ def test_feed_scheduled_hold_can_suspend_yes_time_decay(tmp_path) -> None:
 
 def test_feed_scheduled_hold_does_not_overwrite_terminal_state(tmp_path) -> None:
     adapter = RecordingAdapter()
-    bot = source_policy_bot(tmp_path, adapter, held_side="YES")
+    bot = source_policy_bot(tmp_path, adapter, held_side="YES", classifier=ClassifierConfig(classify_feed_summaries=True))
     bot.classifier = ScheduledHoldClassifier()
     bot.store.write("EXITED", reason="already_exited")
     feed_article = Article(
@@ -426,6 +457,93 @@ def test_require_two_sources_downgrades_execution_to_alert(tmp_path) -> None:
     assert decision.action == "ALERT_ONLY"
     assert decision.reason == "two_source_confirmation_not_implemented"
     assert adapter.calls == []
+
+
+def test_classifier_hourly_cap_persists_across_bot_instances(tmp_path) -> None:
+    classifier_config = ClassifierConfig(max_escalations_per_hour=1, max_escalations_per_day=10, max_classifier_errors_per_hour=10)
+    trigger = TriggerConfig(require_two_sources=True)
+    first = source_policy_bot(tmp_path, RecordingAdapter(), trigger=trigger, classifier=classifier_config)
+    first.classifier = TrustingClassifier()
+
+    first_decision = first.process_article(article("Araghchi and Witkoff to meet in Doha on July 14."))
+
+    assert first_decision.reason == "two_source_confirmation_not_implemented"
+    second = source_policy_bot(tmp_path, RecordingAdapter(), trigger=trigger, classifier=classifier_config)
+    second.classifier = FailingClassifier()
+    second_decision = second.process_article(article("Araghchi and Witkoff to meet in Doha on July 14. New item."))
+    assert second_decision.action == "ALERT_ONLY"
+    assert second_decision.reason == "classifier_budget_exhausted_hourly"
+
+
+def test_classifier_daily_cap_persists_across_bot_instances(tmp_path) -> None:
+    classifier_config = ClassifierConfig(max_escalations_per_hour=10, max_escalations_per_day=1, max_classifier_errors_per_hour=10)
+    trigger = TriggerConfig(require_two_sources=True)
+    first = source_policy_bot(tmp_path, RecordingAdapter(), trigger=trigger, classifier=classifier_config)
+    first.classifier = TrustingClassifier()
+    first.process_article(article("Araghchi and Witkoff to meet in Doha on July 14."))
+
+    second = source_policy_bot(tmp_path, RecordingAdapter(), trigger=trigger, classifier=classifier_config)
+    second.classifier = FailingClassifier()
+    second_decision = second.process_article(article("Araghchi and Witkoff to meet in Doha on July 14. Another item."))
+
+    assert second_decision.action == "ALERT_ONLY"
+    assert second_decision.reason == "classifier_budget_exhausted_daily"
+
+
+def test_classifier_error_cap_blocks_later_attempts(tmp_path) -> None:
+    classifier_config = ClassifierConfig(max_escalations_per_hour=10, max_escalations_per_day=10, max_classifier_errors_per_hour=1)
+    first = source_policy_bot(tmp_path, RecordingAdapter(), classifier=classifier_config)
+    first.classifier = ErrorClassifier()
+
+    first_decision = first.process_article(article("Araghchi and Witkoff to meet in Doha on July 14."))
+
+    assert first_decision.reason.startswith("classifier_error:")
+    second = source_policy_bot(tmp_path, RecordingAdapter(), classifier=classifier_config)
+    second.classifier = FailingClassifier()
+    second_decision = second.process_article(article("Araghchi and Witkoff to meet in Doha on July 14. Error cap item."))
+    assert second_decision.action == "ALERT_ONLY"
+    assert second_decision.reason == "classifier_error_cap_exceeded"
+
+
+def test_one_pass_sonnet_mode_does_not_call_pass_agreement(tmp_path, monkeypatch) -> None:
+    def fail_agreement(*args, **kwargs):
+        raise AssertionError("classify_agreement should not be called")
+
+    monkeypatch.setattr("polybot.iran.runner.classify_agreement", fail_agreement)
+    classifier_config = ClassifierConfig(
+        model="claude-sonnet-4-6",
+        passes=1,
+        require_pass_agreement=False,
+        max_escalations_per_hour=10,
+        max_escalations_per_day=10,
+    )
+    bot = source_policy_bot(tmp_path, RecordingAdapter(), held_side="YES", classifier=classifier_config)
+    bot.classifier = ScheduledHoldClassifier()
+
+    decision = bot.process_article(article("Araghchi and Witkoff to meet in Doha on July 14."))
+
+    assert decision.action == "NO_ACTION"
+    assert decision.reason == "senior_round_scheduled_hold_not_resolved"
+
+
+def test_stale_article_skips_classifier_before_budget_increment(tmp_path) -> None:
+    bot = source_policy_bot(tmp_path, RecordingAdapter())
+    bot.classifier = FailingClassifier()
+    stale = Article(
+        url="https://apnews.com/old-strikes-story",
+        domain="apnews.com",
+        title="Iran attacks following US strikes",
+        published_at="Mon, 29 Jun 2026 05:15:00 GMT",
+        fetched_at="2026-07-05T12:00:00Z",
+        raw_text="Iran attacked following US strikes.",
+        hash="stale-budget-h",
+        source_kind="article",
+    )
+
+    decision = bot.process_article(stale)
+
+    assert decision.reason.startswith("article_stale_skipped_classification")
+    assert not (bot.store.data_dir / "classifier_budget.json").exists()
 
 
 def test_fetch_feed_articles_uses_rss_source_domain(monkeypatch) -> None:
@@ -549,7 +667,7 @@ def test_run_once_promotes_feed_item_to_full_article_hold_signal(tmp_path, monke
     decisions = bot.run_once()
 
     assert [decision.reason for decision in decisions] == [
-        "senior_round_scheduled_hold_not_resolved",
+        "feed_summary_classification_disabled",
         "senior_round_scheduled_hold_not_resolved",
     ]
     assert adapter.calls == []
@@ -563,10 +681,12 @@ def source_policy_bot(
     adapter: RecordingAdapter,
     trigger: TriggerConfig | None = None,
     held_side: str = "NO",
+    classifier: ClassifierConfig | None = None,
 ) -> IranProtectionBot:
     cfg = IranBotConfig(
         market=MarketConfig(slug="iran-event", held_side=held_side),
         trigger=trigger or TriggerConfig(),
+        classifier=classifier or ClassifierConfig(),
         sources=SourcesConfig(auto_trade_domains=["reuters.com"], alert_only_domains=["x.com", "twitter.com", "t.me"]),
         data_dir=tmp_path / "data",
         logs_dir=tmp_path / "logs",

@@ -195,8 +195,10 @@ class LLMClassifier:
         self.config = config
         self.sources = sources
         self._anthropic_client = anthropic_client
+        self.last_usage: dict[str, Any] | None = None
 
     def classify(self, article: Article, market_rule_text: str) -> SignalFactors:
+        self.last_usage = None
         provider = self.config.provider.lower()
         prompt = _prompt(article, market_rule_text, self.sources)
         if provider == "openai":
@@ -245,6 +247,7 @@ class LLMClassifier:
             output_config={"format": {"type": "json_schema", "schema": _ANTHROPIC_OUTPUT_SCHEMA}},
             messages=[{"role": "user", "content": prompt}],
         )
+        self.last_usage = _usage_dict(getattr(response, "usage", None))
         if response.stop_reason == "refusal":
             raise RuntimeError("anthropic classifier refused the request; no trade")
         text = "".join(block.text for block in response.content if block.type == "text")
@@ -271,6 +274,25 @@ def build_classifier(config: ClassifierConfig, sources: SourcesConfig) -> Factor
 
 def run_classifier_passes(classifier: FactorClassifier, article: Article, market_rule_text: str, passes: int) -> list[SignalFactors]:
     return [classifier.classify(article, market_rule_text) for _ in range(max(1, passes))]
+
+
+def _usage_dict(usage: Any) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return dict(usage)
+    fields = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "server_tool_use",
+        "service_tier",
+    ):
+        if hasattr(usage, key):
+            fields[key] = getattr(usage, key)
+    return fields or None
 
 
 def _domain_allowed(domain: str, allowed: list[str]) -> bool:

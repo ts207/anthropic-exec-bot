@@ -52,13 +52,17 @@ class TriggerConfig:
 @dataclass(frozen=True)
 class ClassifierConfig:
     provider: str = "rule_based"
-    model: str = "rule_based_v1"
+    model: str = "claude-sonnet-4-6"
     temperature: float = 0.0
-    passes: int = 2
-    require_pass_agreement: bool = True
+    passes: int = 1
+    require_pass_agreement: bool = False
     require_verbatim_quote: bool = True
     include_market_rule_text: bool = True
     if_api_down: str = "urgent_alert_no_trade"
+    max_escalations_per_hour: int = 4
+    max_escalations_per_day: int = 20
+    max_classifier_errors_per_hour: int = 3
+    classify_feed_summaries: bool = False
 
 
 @dataclass(frozen=True)

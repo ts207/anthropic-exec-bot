@@ -19,12 +19,16 @@ trigger:
 
 classifier:
   provider: "anthropic"
-  model: "claude-opus-4-8"
-  passes: 2
-  require_pass_agreement: true
+  model: "claude-sonnet-4-6"
+  passes: 1
+  require_pass_agreement: false
   require_verbatim_quote: true
   include_market_rule_text: true
   if_api_down: "urgent_alert_no_trade"
+  max_escalations_per_hour: 4
+  max_escalations_per_day: 20
+  max_classifier_errors_per_hour: 3
+  classify_feed_summaries: false
 
 time_decay:
   enabled: true
