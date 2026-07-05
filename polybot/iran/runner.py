@@ -265,7 +265,10 @@ def run_iran_command(config_path: Path, live_flag: bool) -> int:
             bot.run_once()
         except Exception as exc:
             log_event("iran_run_once_error", error=str(exc))
-            bot.notifier.notify("Iran protection polling cycle failed; continuing", error=str(exc))
+            try:
+                bot.notifier.notify("Iran protection polling cycle failed; continuing", error=str(exc))
+            except Exception as notify_exc:  # never let alerting kill the loop
+                log_event("iran_notify_failed", error=str(notify_exc))
         time.sleep(config.safety.poll_seconds)
 
 

@@ -874,3 +874,19 @@ def test_text_extractor_falls_back_without_main_region() -> None:
     parser = _TextExtractor()
     parser.feed("<html><body><div>Short piece about talks.</div></body></html>")
     assert "Short piece about talks." in parser.text()
+
+
+def test_telegram_notifier_never_raises_on_error_field_collision(monkeypatch) -> None:
+    import requests as requests_module
+    from polybot.iran.notifier import TelegramNotifier
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+
+    def failing_post(*args, **kwargs):
+        raise requests_module.RequestException("400 Bad Request: chat not found")
+
+    monkeypatch.setattr("polybot.iran.notifier.requests.post", failing_post)
+    notifier = TelegramNotifier()
+    # Caller passes error= (as runner does) while delivery fails: must not raise.
+    notifier.notify("cycle failed; continuing", error="boom", event="collide")

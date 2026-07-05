@@ -19,7 +19,12 @@ class TelegramNotifier(Notifier):
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_ID")
 
     def notify(self, message: str, **fields: Any) -> None:
-        super().notify(message, **fields)
+        # Notification must never take down the polling loop, whatever the
+        # delivery failure or field names the caller passed.
+        try:
+            super().notify(message, **fields)
+        except Exception:
+            pass
         if not self.token or not self.chat_id:
             return
         try:
@@ -28,5 +33,9 @@ class TelegramNotifier(Notifier):
                 json={"chat_id": self.chat_id, "text": message},
                 timeout=15,
             ).raise_for_status()
-        except requests.RequestException as exc:
-            log_event("iran_notify_error", message=message, error=str(exc), **fields)
+        except Exception as exc:
+            try:
+                safe_fields = {f"field_{key}" if key in {"message", "error", "event"} else key: value for key, value in fields.items()}
+                log_event("iran_notify_error", message=message, error=str(exc), **safe_fields)
+            except Exception:
+                pass
