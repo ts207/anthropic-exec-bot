@@ -11,6 +11,7 @@
     "polymarket-beta-bridge": "tsx src/polymarketBetaBridge.ts",
     "deposit-wallet": "tsx src/depositWallet.ts",
     "migrate-iran-yes": "tsx src/migrateIranYesToBetaWallet.ts",
+    "valuation-strategy": "tsx src/valuationStrategy.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

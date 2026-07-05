@@ -1,0 +1,94 @@
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
+
+export async function writeJson(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export async function readJson(path: string): Promise<unknown | null> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export function candidateLockPath(config: StrategyConfig, candidate: ValuationCandidate): string {
+  return join(
+    config.stateDir,
+    "locks",
+    safe(candidate.eventSlug),
+    `${safe(candidate.marketSlug)}-BUY_YES.json`,
+  );
+}
+
+export async function isCandidateLocked(config: StrategyConfig, candidate: ValuationCandidate): Promise<boolean> {
+  return (await readJson(candidateLockPath(config, candidate))) !== null;
+}
+
+export async function lockCandidate(config: StrategyConfig, candidate: ValuationCandidate, order: unknown): Promise<void> {
+  await writeJson(candidateLockPath(config, candidate), {
+    lockedAt: new Date().toISOString(),
+    eventSlug: candidate.eventSlug,
+    marketSlug: candidate.marketSlug,
+    signalType: candidate.signalType,
+    orderUsd: candidate.orderUsd,
+    maxPrice: candidate.maxPrice,
+    order,
+  });
+}
+
+export function liveAckPath(config: StrategyConfig, configHash: string): string {
+  return join(config.stateDir, "live_ack", `${configHash}.json`);
+}
+
+export function probePath(config: StrategyConfig, marketSlug: string): string {
+  return join(config.stateDir, "probe", `${safe(marketSlug)}.json`);
+}
+
+export async function hasLiveAck(config: StrategyConfig, configHash: string): Promise<boolean> {
+  return (await readJson(liveAckPath(config, configHash))) !== null;
+}
+
+export async function writeLiveAck(config: StrategyConfig, configHash: string): Promise<string> {
+  const path = liveAckPath(config, configHash);
+  await writeJson(path, { acknowledgedAt: new Date().toISOString(), configHash });
+  return path;
+}
+
+export async function listLocks(config: StrategyConfig): Promise<Array<{ eventSlug: string; marketSlug: string; orderUsd: number }>> {
+  const root = join(config.stateDir, "locks");
+  const entries: Array<{ eventSlug: string; marketSlug: string; orderUsd: number }> = [];
+  let events: string[] = [];
+  try {
+    events = await readdir(root);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return entries;
+    throw error;
+  }
+  for (const eventSlug of events) {
+    const files = await readdir(join(root, eventSlug));
+    for (const file of files) {
+      const raw = await readJson(join(root, eventSlug, file));
+      const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      entries.push({
+        eventSlug,
+        marketSlug: String(record.marketSlug ?? file.replace(/-BUY_YES\.json$/, "")),
+        orderUsd: Number(record.orderUsd ?? 0),
+      });
+    }
+  }
+  return entries;
+}
+
+function safe(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+
+function dirname(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "." : path.slice(0, index);
+}
