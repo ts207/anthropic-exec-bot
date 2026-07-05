@@ -13,10 +13,10 @@ import { calendarDominanceCandidates } from "./strategy/calendarArbitrage.ts";
 import { rankingAlertCandidates } from "./strategy/rankingSimulator.ts";
 import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
 import { executeCandidate, postedProbe } from "./strategy/betaExecution.ts";
-import { candidateLockPath, isCandidateLocked, listLocks, liveAckPath, probePath, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
+import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -37,6 +37,9 @@ async function main(): Promise<void> {
   }
   if (command === "probe") {
     return print(await runProbe(loaded, args));
+  }
+  if (command === "audit") {
+    return print(await auditCandidates(loaded, args));
   }
   if (command === "run") {
     for (;;) {
@@ -140,6 +143,76 @@ function compactCandidate(candidate: ValuationCandidate): Record<string, unknown
   };
 }
 
+export async function auditCandidates(
+  loaded: LoadedStrategyConfig,
+  args: Map<string, string> = new Map(),
+): Promise<Record<string, unknown>> {
+  const refresh = args.get("refresh") === "true" || args.get("refresh") === "1";
+  const top = Math.max(1, Number(args.get("top") ?? 20));
+  const lastCandidatesPath = join(loaded.config.stateDir, "last_candidates.json");
+  let source = "last_candidates";
+  let candidates: ValuationCandidate[] | null = null;
+  if (!refresh) {
+    const raw = await readJson(lastCandidatesPath);
+    candidates = parseCandidateArray(raw);
+  }
+  if (!candidates) {
+    source = "fresh_scan";
+    candidates = (await scanOnce(loaded)).candidates;
+  }
+  const audited = [];
+  for (const candidate of candidates.slice(0, top)) {
+    const blockers = await liveBlockers(candidate, loaded.config, loaded.hash);
+    audited.push({
+      candidate: candidateLabel(candidate),
+      signalType: candidate.signalType,
+      status: candidate.status,
+      company: candidate.company,
+      eventSlug: candidate.eventSlug,
+      marketSlug: candidate.marketSlug,
+      sourceEvidence: {
+        valuation: candidate.sourceValuation,
+        sourceDate: candidate.sourceDate,
+        maxEligibleValuation: candidate.maxEligibleValuation,
+        maxEligibleDate: candidate.maxEligibleDate,
+      },
+      ruleEvidence: {
+        ruleHash: candidate.ruleHash,
+        threshold: candidate.threshold,
+        deadline: candidate.deadline,
+      },
+      market: {
+        yesAsk: candidate.yesAsk,
+        bestBid: candidate.bestBid,
+        spread: candidate.spread,
+        liquidity: candidate.liquidity,
+        cap: candidate.maxPrice,
+      },
+      scores: {
+        distancePct: candidate.distancePct,
+        confidenceScore: candidate.confidenceScore,
+        edgeScore: candidate.edgeScore,
+        fairPrice: candidate.fairPrice,
+        edge: candidate.edge,
+      },
+      orderTemplate: candidate.orderTemplate ?? null,
+      live: blockers.length === 0 ? "ALLOWED" : "BLOCKED",
+      liveBlockers: blockers,
+      reason: candidate.reason,
+    });
+  }
+  return {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    source,
+    configHash: loaded.hash,
+    mode: loaded.config.mode,
+    top,
+    candidateCount: candidates.length,
+    candidates: audited,
+  };
+}
+
 async function loadEvidence(config: StrategyConfig): Promise<Map<string, NpmEvidence>> {
   const evidenceByCompany = new Map<string, NpmEvidence>();
   for (const company of config.companies) {
@@ -180,6 +253,33 @@ async function preflight(loaded: LoadedStrategyConfig): Promise<Record<string, u
       deadlineIso: event.deadlineIso,
     })),
   };
+}
+
+export async function liveBlockers(
+  candidate: ValuationCandidate,
+  config: StrategyConfig,
+  configHash: string,
+): Promise<string[]> {
+  const blockers: string[] = [];
+  if (candidate.status !== "candidate") blockers.push(`candidate_status_${candidate.status}`);
+  if (config.mode !== "live") blockers.push(`operator_mode_${config.mode}`);
+  if (candidate.signalType === "NPM_DRIFT_MODEL_YES") blockers.push("drift_model_alert_only");
+  if (candidate.signalType === "RANKING_INCONSISTENCY_ALERT") blockers.push("ranking_market_alert_only");
+  if (!["SOURCE_CONFIRMED_YES", "CURVE_MONOTONICITY_YES", "CALENDAR_DOMINANCE_YES"].includes(candidate.signalType)) {
+    blockers.push("signal_not_live_enabled");
+  }
+  if (!candidate.yesTokenId) blockers.push("missing_yes_token");
+  if (!candidate.orderTemplate) blockers.push("missing_order_template");
+  if (candidate.yesAsk === null || candidate.yesAsk === undefined) blockers.push("missing_yes_ask");
+  if (candidate.status === "candidate" && candidate.yesAsk !== null && candidate.yesAsk !== undefined && candidate.yesAsk > candidate.maxPrice) {
+    blockers.push("best_ask_above_cap");
+  }
+  if (candidate.orderUsd <= 0) blockers.push("zero_order_usd");
+  if (!await hasLiveAck(config, configHash)) blockers.push("missing_live_config_ack");
+  if (await isCandidateLocked(config, candidate)) blockers.push("duplicate_lock");
+  if (!await readJson(probePath(config, candidate.marketSlug))) blockers.push("missing_posted_probe_success");
+  if (process.env.POLYBOT_TS_BRIDGE_ALLOW_POST !== "1") blockers.push("posting_env_not_armed");
+  return [...new Set(blockers)];
 }
 
 async function runProbe(loaded: LoadedStrategyConfig, args: Map<string, string>): Promise<Record<string, unknown>> {
@@ -304,8 +404,29 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
+}
+
+function parseCandidateArray(value: unknown): ValuationCandidate[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is ValuationCandidate => Boolean(item && typeof item === "object" && "marketSlug" in item));
+}
+
+function candidateLabel(candidate: ValuationCandidate): string {
+  const threshold = candidate.threshold === undefined ? "" : ` ${formatUsd(candidate.threshold)}`;
+  return `${candidate.company}${threshold} ${candidate.deadline.slice(0, 10)}`.trim();
+}
+
+function formatUsd(value: number): string {
+  if (value >= 1_000_000_000_000) return `$${trimNumber(value / 1_000_000_000_000)}T`;
+  if (value >= 1_000_000_000) return `$${trimNumber(value / 1_000_000_000)}B`;
+  if (value >= 1_000_000) return `$${trimNumber(value / 1_000_000)}M`;
+  return `$${value}`;
+}
+
+function trimNumber(value: number): string {
+  return value.toFixed(3).replace(/\.?0+$/, "");
 }
 
 function requiredArg(args: Map<string, string>, name: string): string {

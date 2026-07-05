@@ -8,6 +8,7 @@ import { curveMonotonicityCandidates } from "../src/strategy/curveArbitrage.ts";
 import { calendarDominanceCandidates } from "../src/strategy/calendarArbitrage.ts";
 import { rankingAlertCandidates } from "../src/strategy/rankingSimulator.ts";
 import type { BookQuote, CurvePoint, EventConfig, StrategyConfig, ValuationLeg } from "../src/strategy/signalTypes.ts";
+import { liveBlockers } from "../src/valuationStrategy.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -162,6 +163,20 @@ test("ranking market inconsistency is alert-only", () => {
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0]?.signalType, "RANKING_INCONSISTENCY_ALERT");
   assert.equal(candidates[0]?.liveAllowed, false);
+});
+
+test("live blocker audit explains why candidate is not live-eligible", async () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_100_000_000_000 });
+  const evidence = parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-01", implied_valuation: 1_101_000_000_000 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" });
+  const candidate = decideThresholdLeg(leg, evidence, quoteFixture(0.81), config);
+  const blockers = await liveBlockers(candidate, config, "test-config-hash");
+  assert.equal(blockers.includes("operator_mode_alert_only"), true);
+  assert.equal(blockers.includes("missing_live_config_ack"), true);
+  assert.equal(blockers.includes("missing_posted_probe_success"), true);
+  assert.equal(blockers.includes("posting_env_not_armed"), true);
 });
 
 function testConfig(): StrategyConfig {

@@ -12,6 +12,9 @@
     "deposit-wallet": "tsx src/depositWallet.ts",
     "migrate-iran-yes": "tsx src/migrateIranYesToBetaWallet.ts",
     "valuation-strategy": "tsx src/valuationStrategy.ts",
+    "valuation:scan": "tsx src/valuationStrategy.ts scan --config configs/private-valuations-july31.json",
+    "valuation:preflight": "tsx src/valuationStrategy.ts preflight --config configs/private-valuations-july31.json",
+    "valuation:audit": "tsx src/valuationStrategy.ts audit --config configs/private-valuations-july31.json",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
