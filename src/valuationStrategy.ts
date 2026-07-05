@@ -14,14 +14,24 @@ import { rankingAlertCandidates } from "./strategy/rankingSimulator.ts";
 import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
 import { executeCandidate, postedProbe } from "./strategy/betaExecution.ts";
 import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
+import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
+import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit";
 
 type ScanResult = {
   evidence: NpmEvidence[];
   legs: ValuationLeg[];
   candidates: ValuationCandidate[];
+};
+
+type ValuationState = {
+  evidenceByCompany: Map<string, NpmEvidence>;
+  allLegs: ValuationLeg[];
+  quotes: Map<string, BookQuote>;
+  curvePoints: CurvePoint[];
+  thresholdCandidates: ValuationCandidate[];
 };
 
 async function main(): Promise<void> {
@@ -41,6 +51,9 @@ async function main(): Promise<void> {
   if (command === "audit") {
     return print(await auditCandidates(loaded, args));
   }
+  if (command === "curve-audit") {
+    return print(await curveAudit(loaded));
+  }
   if (command === "run") {
     for (;;) {
       await scanOnce(loaded);
@@ -52,6 +65,33 @@ async function main(): Promise<void> {
 
 export async function scanOnce(loaded: LoadedStrategyConfig): Promise<ScanResult> {
   const { config } = loaded;
+  const state = await collectValuationState(config);
+
+  const rankingLegs = state.allLegs.filter((leg) => leg.eventKind === "ranking");
+  const rawCandidates = rankCandidates([
+    ...state.thresholdCandidates,
+    ...curveMonotonicityCandidates(state.curvePoints, state.quotes, config),
+    ...calendarDominanceCandidates(state.curvePoints, state.quotes, config),
+    ...rankingAlertCandidates(rankingLegs, state.evidenceByCompany, state.quotes, config, buildImpliedCurves(state.curvePoints)),
+  ]);
+  const candidates = rankCandidates(applyCaps(config, rawCandidates, await listLocks(config)));
+
+  const ranked = rankCandidates(candidates);
+  for (const candidate of ranked) {
+    await appendJsonl(join(config.logsDir, "decisions.jsonl"), candidate);
+    if (candidate.status === "candidate" || candidate.status === "alert") {
+      const execution = await executeCandidate(candidate, config, loaded.hash);
+      await appendJsonl(join(config.logsDir, "orders.jsonl"), {
+        candidate,
+        execution,
+      });
+    }
+  }
+  await writeJson(join(config.stateDir, "last_candidates.json"), ranked);
+  return { evidence: [...state.evidenceByCompany.values()], legs: state.allLegs, candidates: ranked };
+}
+
+async function collectValuationState(config: StrategyConfig): Promise<ValuationState> {
   const evidenceByCompany = await loadEvidence(config);
   const allLegs: ValuationLeg[] = [];
   const quotes = new Map<string, BookQuote>();
@@ -85,28 +125,7 @@ export async function scanOnce(loaded: LoadedStrategyConfig): Promise<ScanResult
     }
   }
 
-  const rankingLegs = allLegs.filter((leg) => leg.eventKind === "ranking");
-  const rawCandidates = rankCandidates([
-    ...thresholdCandidates,
-    ...curveMonotonicityCandidates(curvePoints, quotes, config),
-    ...calendarDominanceCandidates(curvePoints, quotes, config),
-    ...rankingAlertCandidates(rankingLegs, evidenceByCompany, quotes, config, buildImpliedCurves(curvePoints)),
-  ]);
-  const candidates = rankCandidates(applyCaps(config, rawCandidates, await listLocks(config)));
-
-  const ranked = rankCandidates(candidates);
-  for (const candidate of ranked) {
-    await appendJsonl(join(config.logsDir, "decisions.jsonl"), candidate);
-    if (candidate.status === "candidate" || candidate.status === "alert") {
-      const execution = await executeCandidate(candidate, config, loaded.hash);
-      await appendJsonl(join(config.logsDir, "orders.jsonl"), {
-        candidate,
-        execution,
-      });
-    }
-  }
-  await writeJson(join(config.stateDir, "last_candidates.json"), ranked);
-  return { evidence: [...evidenceByCompany.values()], legs: allLegs, candidates: ranked };
+  return { evidenceByCompany, allLegs, quotes, curvePoints, thresholdCandidates };
 }
 
 function scanSummary(result: ScanResult): Record<string, unknown> {
@@ -140,6 +159,85 @@ function compactCandidate(candidate: ValuationCandidate): Record<string, unknown
     orderTemplate: candidate.orderTemplate,
     liveAllowed: candidate.liveAllowed,
     reason: candidate.reason,
+  };
+}
+
+export async function curveAudit(loaded: LoadedStrategyConfig): Promise<Record<string, unknown>> {
+  const config = loaded.config;
+  const state = await collectValuationState(config);
+  const curves = buildImpliedCurves(state.curvePoints);
+  const rankingLegs = state.allLegs.filter((leg) => leg.eventKind === "ranking");
+  const monotonicity = curveMonotonicityCandidates(state.curvePoints, state.quotes, config);
+  const calendar = calendarDominanceCandidates(state.curvePoints, state.quotes, config);
+  const ranking = rankingAlertCandidates(rankingLegs, state.evidenceByCompany, state.quotes, config, curves);
+  const crossed = state.thresholdCandidates.filter((candidate) => (
+    candidate.signalType === "SOURCE_CONFIRMED_YES" && candidate.status === "candidate"
+  ));
+  const report = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    mode: config.mode,
+    liveEligible: false,
+    livePolicy: "relative_value_audit_is_alert_only",
+    summary: {
+      curveCount: curves.length,
+      curvePointCount: state.curvePoints.length,
+      monotonicityViolationCount: monotonicity.length,
+      calendarViolationCount: calendar.length,
+      crossedLegOpportunityCount: crossed.length,
+      rankingContradictionCount: ranking.length,
+    },
+    curves: curves.map((curve) => curveAuditRow(curve, [...monotonicity, ...calendar, ...crossed])),
+    monotonicityViolations: monotonicity.map(relativeCandidate),
+    calendarViolations: calendar.map(relativeCandidate),
+    crossedLegOpportunities: crossed.map(relativeCandidate),
+    rankingContradictions: ranking.map(relativeCandidate),
+  };
+  await appendJsonl(join(config.logsDir, "curve_audit.jsonl"), report);
+  await writeJson(join(config.stateDir, "last_curve_audit.json"), report);
+  return report;
+}
+
+function curveAuditRow(curve: ImpliedCurve, candidates: ValuationCandidate[]): Record<string, unknown> {
+  const curveCandidates = candidates
+    .filter((candidate) => candidate.company === curve.company && candidate.deadline === curve.deadlineIso)
+    .sort((left, right) => right.edge - left.edge);
+  return {
+    company: curve.company,
+    deadline: curve.deadlineIso,
+    medianValuation: curve.medianValuation,
+    expectedValuation: curve.expectedValuation,
+    curvePoints: curve.points.map((point) => ({
+      threshold: point.leg.threshold,
+      yesAsk: point.yesAsk,
+      marketSlug: point.leg.marketSlug,
+      label: point.leg.label,
+    })),
+    monotonicityViolations: curveCandidates.filter((candidate) => candidate.signalType === "CURVE_MONOTONICITY_YES").map(relativeCandidate),
+    calendarViolations: curveCandidates.filter((candidate) => candidate.signalType === "CALENDAR_DOMINANCE_YES").map(relativeCandidate),
+    crossedLegs: curveCandidates.filter((candidate) => candidate.signalType === "SOURCE_CONFIRMED_YES").map(relativeCandidate),
+    bestUnderpricedYesLeg: curveCandidates[0] ? relativeCandidate(curveCandidates[0]) : null,
+    liveEligible: false,
+  };
+}
+
+function relativeCandidate(candidate: ValuationCandidate): Record<string, unknown> {
+  return {
+    signalType: candidate.signalType,
+    company: candidate.company,
+    eventSlug: candidate.eventSlug,
+    marketSlug: candidate.marketSlug,
+    deadline: candidate.deadline,
+    threshold: candidate.threshold,
+    yesAsk: candidate.yesAsk,
+    fairPrice: candidate.fairPrice,
+    edgeEstimate: candidate.edge,
+    confidence: candidate.confidenceScore,
+    reason: candidate.reason,
+    pairedMarketSlug: candidate.pairedMarketSlug,
+    pairedYesAsk: candidate.pairedYesAsk,
+    orderTemplate: candidate.orderTemplate ?? null,
+    liveEligible: false,
   };
 }
 
@@ -277,7 +375,8 @@ export async function liveBlockers(
   if (candidate.orderUsd <= 0) blockers.push("zero_order_usd");
   if (!await hasLiveAck(config, configHash)) blockers.push("missing_live_config_ack");
   if (await isCandidateLocked(config, candidate)) blockers.push("duplicate_lock");
-  if (!await readJson(probePath(config, candidate.marketSlug))) blockers.push("missing_posted_probe_success");
+  const probe = await validatePostedProbeForCandidate(config, candidate);
+  if (!probe.ok) blockers.push(...probe.blockers);
   if (process.env.POLYBOT_TS_BRIDGE_ALLOW_POST !== "1") blockers.push("posting_env_not_armed");
   return [...new Set(blockers)];
 }
@@ -404,7 +503,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 

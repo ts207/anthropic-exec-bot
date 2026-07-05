@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { normalizeConfig } from "../src/strategy/valuationConfig.ts";
 import { parseNpmEvidence, withEligibleMax } from "../src/strategy/npmValuationSource.ts";
@@ -9,6 +12,8 @@ import { calendarDominanceCandidates } from "../src/strategy/calendarArbitrage.t
 import { rankingAlertCandidates } from "../src/strategy/rankingSimulator.ts";
 import type { BookQuote, CurvePoint, EventConfig, StrategyConfig, ValuationLeg } from "../src/strategy/signalTypes.ts";
 import { liveBlockers } from "../src/valuationStrategy.ts";
+import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/strategy/probeValidation.ts";
+import { probePath, writeJson } from "../src/strategy/stateStore.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -177,6 +182,60 @@ test("live blocker audit explains why candidate is not live-eligible", async () 
   assert.equal(blockers.includes("missing_live_config_ack"), true);
   assert.equal(blockers.includes("missing_posted_probe_success"), true);
   assert.equal(blockers.includes("posting_env_not_armed"), true);
+});
+
+test("posted probe validation rejects malformed probe files", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "valuation-probe-test-"));
+  const config = normalizeConfig({
+    mode: "live",
+    stateDir,
+    events: [thresholdEvent("Anthropic")],
+    companies: [{ name: "Anthropic", npmCompanyId: "company-a" }],
+  });
+  const candidate = decideThresholdLeg(
+    legFixture({ threshold: 1_100_000_000_000 }),
+    parseNpmEvidence({ latest_tape_d: { date: "2026-07-01", implied_valuation: 1_101_000_000_000 } }, { name: "Anthropic", npmCompanyId: "company-a" }),
+    quoteFixture(0.81),
+    config,
+  );
+  await writeJson(probePath(config, candidate.marketSlug), {
+    ok: true,
+    marketSlug: candidate.marketSlug,
+    tokenId: "wrong-token",
+    timestamp: new Date().toISOString(),
+  });
+  const validation = await validatePostedProbeForCandidate(config, candidate);
+  assert.equal(validation.ok, false);
+  assert.equal(validation.blockers.includes("probe_token_mismatch"), true);
+  assert.equal(validation.blockers.includes("probe_side_mismatch"), true);
+  assert.equal(validation.blockers.includes("probe_order_type_mismatch"), true);
+  assert.equal(validation.blockers.includes("probe_sdk_mismatch"), true);
+});
+
+test("posted probe validation accepts current beta BUY FAK probe metadata", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "valuation-probe-test-"));
+  const config = normalizeConfig({
+    mode: "live",
+    stateDir,
+    events: [thresholdEvent("Anthropic")],
+    companies: [{ name: "Anthropic", npmCompanyId: "company-a" }],
+  });
+  const candidate = decideThresholdLeg(
+    legFixture({ threshold: 1_100_000_000_000 }),
+    parseNpmEvidence({ latest_tape_d: { date: "2026-07-01", implied_valuation: 1_101_000_000_000 } }, { name: "Anthropic", npmCompanyId: "company-a" }),
+    quoteFixture(0.81),
+    config,
+  );
+  await writeJson(probePath(config, candidate.marketSlug), {
+    ok: true,
+    marketSlug: candidate.marketSlug,
+    tokenId: candidate.yesTokenId,
+    timestamp: new Date().toISOString(),
+    ...betaProbeMetadata(),
+  });
+  const validation = await validatePostedProbeForCandidate(config, candidate);
+  assert.equal(validation.ok, true);
+  assert.deepEqual(validation.blockers, []);
 });
 
 function testConfig(): StrategyConfig {

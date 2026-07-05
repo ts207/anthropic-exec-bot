@@ -7,7 +7,8 @@ import { type ApiKeyCreds } from "@polymarket/bindings/clob";
 import { http, type Hex } from "viem";
 import { polygon } from "viem/chains";
 import type { BookQuote, StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
-import { hasLiveAck, isCandidateLocked, lockCandidate, probePath, readJson, writeJson } from "./stateStore.ts";
+import { hasLiveAck, isCandidateLocked, lockCandidate, probePath, writeJson } from "./stateStore.ts";
+import { betaProbeMetadata, validatePostedProbeForCandidate } from "./probeValidation.ts";
 
 export type ExecutionResult = {
   posted: boolean;
@@ -30,9 +31,8 @@ export async function executeCandidate(
   if (mode === "dry_run") return { posted: false, skipped: true, reason: "operator_mode_dry_run" };
   if (!await hasLiveAck(config, configHash)) return { posted: false, skipped: true, reason: "missing_live_config_ack" };
   if (await isCandidateLocked(config, candidate)) return { posted: false, skipped: true, reason: "duplicate_lock" };
-  if (!candidate.marketSlug || !await readJson(probePath(config, candidate.marketSlug))) {
-    return { posted: false, skipped: true, reason: "missing_posted_probe_success" };
-  }
+  const probe = await validatePostedProbeForCandidate(config, candidate);
+  if (!probe.ok) return { posted: false, skipped: true, reason: probe.blockers.join(",") };
   requireMutationAllowed();
   if (!candidate.yesAsk || candidate.yesAsk > candidate.maxPrice) {
     return { posted: false, skipped: true, reason: "best_ask_above_max_price" };
@@ -56,8 +56,12 @@ export async function postedProbe(
   }
   const response = await placeFakBuy(tokenId, amountUsd, price);
   const result = { posted: true, response };
+  const timestamp = new Date().toISOString();
   await writeJson(probePath(config, marketSlug), {
-    probedAt: new Date().toISOString(),
+    ok: true,
+    timestamp,
+    probedAt: timestamp,
+    ...betaProbeMetadata(),
     tokenId,
     marketSlug,
     price,
