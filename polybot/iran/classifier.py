@@ -367,5 +367,11 @@ def _prompt(article: Article, market_rule_text: str, sources: SourcesConfig) -> 
         "Scheduled senior rounds before the deadline are hold signals, not resolution-safe. Only underway/resumed/held/begun senior rounds reset occurrence risk.\n"
         f"Schema: {json.dumps(schema, sort_keys=True)}\n"
         f"Market rule text:\n{market_rule_text}\n"
-        f"Article domain: {article.domain}\nTitle: {article.title}\nArticle text:\n{article.raw_text}\n"
+        f"Article domain: {article.domain}\nTitle: {article.title}\nArticle text:\n{_bounded_article_text(article.raw_text)}\n"
     )
+
+
+def _bounded_article_text(text: str, limit: int = 12000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[article text truncated]"

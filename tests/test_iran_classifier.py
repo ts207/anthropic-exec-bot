@@ -846,3 +846,31 @@ def test_source_policy_blocks_stale_trade_actions(tmp_path) -> None:
     )
     decision = bot._enforce_source_policy(fresh, Decision("EXIT_YES_OPTIONAL_BUY_NO", "4B", "strikes_or_breakdown"))
     assert decision.action == "EXIT_YES_OPTIONAL_BUY_NO"
+
+
+def test_text_extractor_prefers_article_body_over_chrome() -> None:
+    from polybot.iran.source_fetcher import _TextExtractor
+
+    body = "Doha talks between senior negotiators resumed on Thursday. " * 12
+    html_page = (
+        "<html><head><title>Talks resume | AP News</title></head><body>"
+        "<nav>Menu World SECTIONS Iran war Movies Fashion Television</nav>"
+        "<header>Newsletters The Morning Wire</header>"
+        f"<main><article><p>{body}</p></article></main>"
+        "<footer>See All Newsletters Entertainment SECTIONS</footer>"
+        "</body></html>"
+    )
+    parser = _TextExtractor()
+    parser.feed(html_page)
+    text = parser.text()
+    assert "Doha talks between senior negotiators" in text
+    assert "Movies Fashion" not in text
+    assert "Newsletters" not in text
+
+
+def test_text_extractor_falls_back_without_main_region() -> None:
+    from polybot.iran.source_fetcher import _TextExtractor
+
+    parser = _TextExtractor()
+    parser.feed("<html><body><div>Short piece about talks.</div></body></html>")
+    assert "Short piece about talks." in parser.text()

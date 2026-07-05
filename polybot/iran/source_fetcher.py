@@ -16,27 +16,40 @@ from .storage import append_jsonl
 from .types import Article
 
 
+_SKIP_TAGS = {"script", "style", "noscript", "nav", "header", "footer", "aside", "form", "button", "figure", "figcaption"}
+_MAIN_TAGS = {"article", "main"}
+_MIN_MAIN_TEXT_CHARS = 400
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.title = ""
         self._in_title = False
         self.parts: list[str] = []
+        self.main_parts: list[str] = []
         self._skip_depth = 0
+        self._main_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"script", "style", "noscript"}:
+        if tag in _SKIP_TAGS:
             self._skip_depth += 1
+        if tag in _MAIN_TAGS:
+            self._main_depth += 1
         if tag == "title":
             self._in_title = True
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript"} and self._skip_depth:
+        if tag in _SKIP_TAGS and self._skip_depth:
             self._skip_depth -= 1
+        if tag in _MAIN_TAGS and self._main_depth:
+            self._main_depth -= 1
         if tag == "title":
             self._in_title = False
         if tag in {"p", "div", "br", "li", "h1", "h2", "h3"}:
             self.parts.append("\n")
+            if self._main_depth:
+                self.main_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth:
@@ -47,8 +60,15 @@ class _TextExtractor(HTMLParser):
         if self._in_title:
             self.title += (" " if self.title else "") + text
         self.parts.append(text)
+        if self._main_depth:
+            self.main_parts.append(text)
 
     def text(self) -> str:
+        # News pages bury the story in nav/menu chrome; prefer the
+        # <article>/<main> region when it carries a real body.
+        main = re.sub(r"\n{3,}", "\n\n", " ".join(self.main_parts)).strip()
+        if len(main) >= _MIN_MAIN_TEXT_CHARS:
+            return main
         return re.sub(r"\n{3,}", "\n\n", " ".join(self.parts)).strip()
 
 
