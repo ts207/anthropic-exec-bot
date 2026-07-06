@@ -948,6 +948,66 @@ test("ladder paper cancels stale passive bids before NPM fixing", () => {
   assert.equal(cancelled.opened.length, 0);
 });
 
+test("ladder paper cancels and requotes when model fair reprices lower", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const baseInput = {
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["paper-maker", quoteFixture(0.97, 0.4)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "paper-maker", state: "NEAR_BOUNDARY" })],
+    monotonicity: [],
+    config,
+  };
+  const highFairPlans = buildLadderEntryPlans({
+    ...baseInput,
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "paper-maker",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      modelFairPrice: 0.68,
+    })],
+  });
+  const opened = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans: highFairPlans,
+    now: new Date("2026-07-06T12:00:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(opened.opened[0]?.passiveBidPrice, 0.56);
+
+  const lowerFairPlans = buildLadderEntryPlans({
+    ...baseInput,
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "paper-maker",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      modelFairPrice: 0.62,
+    })],
+  });
+  const repriced = updateLadderPaperOrders({
+    previous: opened.state,
+    plans: lowerFairPlans,
+    now: new Date("2026-07-06T12:05:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(repriced.updated[0]?.status, "cancelled");
+  assert.equal(repriced.updated[0]?.cancelReason, "model_fair_repriced_passive_bid");
+  assert.equal(repriced.opened[0]?.status, "working");
+  assert.equal(repriced.opened[0]?.passiveBidPrice, 0.5);
+});
+
 test("ladder paper proof summarizes passive-fill evidence without enabling live", () => {
   const orders = Array.from({ length: 30 }, (_, index) => ladderPaperOrderFixture({
     id: `near-${index}`,

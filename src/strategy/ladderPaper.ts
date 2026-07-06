@@ -110,6 +110,7 @@ export function updateLadderPaperOrders(input: {
   const now = input.now ?? new Date();
   const sizeUsd = input.sizeUsd ?? 1;
   const plansByKey = new Map(input.plans.map((plan) => [planKey(plan), plan]));
+  const plansByStableKey = new Map(input.plans.map((plan) => [stablePlanKey(plan), plan]));
   const orders = dedupeOrders(input.previous.orders).map((order) => ({ ...order }));
   const updated: LadderPaperOrder[] = [];
   const filled: LadderPaperOrder[] = [];
@@ -118,10 +119,12 @@ export function updateLadderPaperOrders(input: {
     const order = orders[index];
     if (!order || order.status === "resolved" || order.status === "cancelled") continue;
     const plan = plansByKey.get(order.id);
+    const replacementPlan = plansByStableKey.get(orderStableKey(order));
     const next = updateOpenOrder(order, plan, {
       now,
       nextFixingAt: input.nextFixingAt,
       cancelBeforeFixingMs: input.cancelBeforeFixingMs,
+      replacementPlan,
     });
     orders[index] = next;
     if (next !== order) {
@@ -203,10 +206,15 @@ function openOrder(plan: EntryPlan, now: Date, sizeUsd: number): LadderPaperOrde
 function updateOpenOrder(
   order: LadderPaperOrder,
   plan: EntryPlan | undefined,
-  timing: { now: Date; nextFixingAt?: Date; cancelBeforeFixingMs?: number },
+  timing: { now: Date; nextFixingAt?: Date; cancelBeforeFixingMs?: number; replacementPlan?: EntryPlan },
 ): LadderPaperOrder {
   const { now } = timing;
-  if (!plan) return cancelOrder(order, "entry_plan_no_longer_available");
+  if (!plan) {
+    if (timing.replacementPlan && timing.replacementPlan.passiveBidPrice !== order.passiveBidPrice) {
+      return cancelOrder(order, "model_fair_repriced_passive_bid");
+    }
+    return cancelOrder(order, "entry_plan_no_longer_available");
+  }
   if (plan.blockers.some((blocker) => blocker === "direction_semantics_unknown" || blocker === "market_not_accepting_orders" || blocker === "malformed_or_unsupported_leg")) {
     return cancelOrder(order, `cancelled_by_blocker:${plan.blockers.join(",")}`);
   }
@@ -359,6 +367,26 @@ function planKey(plan: EntryPlan): string {
     plan.pairedMarketSlug ?? "single",
     plan.sourceDate ?? "unknown-source-date",
     plan.passiveBidPrice ?? "no-bid",
+  ].join(":");
+}
+
+function stablePlanKey(plan: EntryPlan): string {
+  return [
+    plan.entryMode,
+    plan.company,
+    plan.marketSlug,
+    plan.pairedMarketSlug ?? "single",
+    plan.sourceDate ?? "unknown-source-date",
+  ].join(":");
+}
+
+function orderStableKey(order: LadderPaperOrder): string {
+  return [
+    order.entryMode,
+    order.company,
+    order.marketSlug,
+    order.pairedMarketSlug ?? "single",
+    order.sourceDate ?? "unknown-source-date",
   ].join(":");
 }
 
