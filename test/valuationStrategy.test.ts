@@ -1308,6 +1308,62 @@ test("daily report exposes discovery coverage and crawl completeness", () => {
   assert.deepEqual(discovery.accessIssues, ["quote_failed"]);
 });
 
+test("daily report preserves ladder source-confirmed state and activation triggers", () => {
+  const report = buildDailyReport({
+    generatedAt: "2026-07-06T00:00:00Z",
+    entryAudit: {
+      summary: { liveEligibleCount: 0 },
+      actionablePlans: [{
+        company: "Stripe",
+        marketSlug: "stripe-175",
+        threshold: 175_000_000_000,
+        entryMode: "MAKER_NEAR_BOUNDARY_BID",
+        direction: "UP",
+        sourceConfirmed: false,
+        distancePct: 0.006,
+        yesAsk: 0.97,
+        yesBid: 0.4,
+        modelFair: 0.68,
+        passiveBidPrice: 0.56,
+        paperEligible: true,
+        liveEligible: false,
+        activation: {
+          forecastActiveAt: 172_375_000_000,
+          sourceConfirmedAt: 175_000_000_000,
+          alertIfAskBelow: 0.94,
+        },
+        blockers: [],
+        reason: "near_boundary_passive_bid_paper_only",
+      }],
+    },
+    ladderPaper: {
+      summary: {},
+      workingOrders: [{
+        company: "Stripe",
+        marketSlug: "stripe-175",
+        threshold: 175_000_000_000,
+        entryMode: "MAKER_NEAR_BOUNDARY_BID",
+        sourceConfirmed: false,
+        passiveBidPrice: 0.56,
+        modelFair: 0.68,
+        status: "working",
+        reason: "near_boundary_passive_bid_paper_only",
+      }],
+    },
+  });
+  const ladderEntries = report.ladderEntries as Record<string, unknown>;
+  const plans = ladderEntries.actionablePlans as Record<string, unknown>[];
+  assert.equal(plans[0]?.sourceConfirmed, false);
+  assert.deepEqual(plans[0]?.activation, {
+    forecastActiveAt: 172_375_000_000,
+    sourceConfirmedAt: 175_000_000_000,
+    alertIfAskBelow: 0.94,
+  });
+  const ladderPaper = report.ladderPaper as Record<string, unknown>;
+  const workingOrders = ladderPaper.workingOrders as Record<string, unknown>[];
+  assert.equal(workingOrders[0]?.sourceConfirmed, false);
+});
+
 test("automation schedule resolves expected NPM fixing phases", () => {
   const expected = new Date("2026-07-06T17:00:00Z");
   assert.equal(phaseForNow(new Date("2026-07-06T16:15:00Z"), expected), "PRE_FIXING_PREP");
