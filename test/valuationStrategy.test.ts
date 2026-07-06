@@ -594,6 +594,58 @@ test("ladder entry planner creates near-boundary passive maker bid without cross
   assert.equal(plans[0]?.liveEligible, false);
 });
 
+test("ladder entry planner annotates market shape and nearest ladder thresholds", () => {
+  const config = testConfig();
+  const lower = legFixture({ threshold: 900, marketSlug: "lower-900" });
+  const target = legFixture({ threshold: 1_000, marketSlug: "target-1000" });
+  const higher = legFixture({ threshold: 1_100, marketSlug: "higher-1100" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+    tape_d_prices: [
+      { date: "2026-07-05", implied_valuation: 980 },
+      { date: "2026-07-06", implied_valuation: 993 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [lower, target, higher],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([
+      ["lower-900", quoteFixture(0.98, 0.95)],
+      ["target-1000", quoteFixture(0.97, 0.4)],
+      ["higher-1100", quoteFixture(0.22, 0.18)],
+    ]),
+    marketRows: [
+      marketAuditRowFixture({ marketSlug: "lower-900", state: "PREVIOUSLY_CROSSED", crossedQuality: "SOURCE_CONFIRMED_BUT_ALREADY_PRICED" }),
+      marketAuditRowFixture({ marketSlug: "target-1000", state: "NEAR_BOUNDARY", yesAsk: 0.97, yesBid: 0.4 }),
+      marketAuditRowFixture({ marketSlug: "higher-1100", state: "UNCROSSED", yesAsk: 0.22, yesBid: 0.18 }),
+    ],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "target-1000",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      yesAsk: 0.97,
+      yesBid: 0.4,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  const plan = plans.find((item) => item.marketSlug === "target-1000");
+  assert.equal(plan?.ladderContext?.marketShape.thresholdCount, 3);
+  assert.equal(plan?.ladderContext?.marketShape.minThreshold, 900);
+  assert.equal(plan?.ladderContext?.marketShape.maxThreshold, 1_100);
+  assert.equal(plan?.ladderContext?.marketShape.currentValuation, 993);
+  assert.equal(plan?.ladderContext?.nearestLower?.marketSlug, "lower-900");
+  assert.equal(plan?.ladderContext?.nearestLower?.threshold, 900);
+  assert.equal(plan?.ladderContext?.nearestUpper?.marketSlug, "target-1000");
+  assert.equal(plan?.ladderContext?.nearestUpper?.threshold, 1_000);
+  assert.equal(plan?.ladderContext?.nearestUpper?.yesAsk, 0.97);
+});
+
 test("ladder entry planner allows source-confirmed taker only for strict stale legs", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_000, marketSlug: "crossed" });

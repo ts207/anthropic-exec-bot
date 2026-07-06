@@ -105,6 +105,7 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
         passiveBidPrice: row.passiveBidPrice,
         paperEligible: row.paperEligible,
         liveEligible: row.liveEligible,
+        ladderContext: row.ladderContext,
         blockers: row.blockers,
         reason: row.reason,
       })),

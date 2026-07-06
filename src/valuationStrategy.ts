@@ -832,6 +832,7 @@ function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
     blockers: plan.blockers,
     reason: plan.reason,
     pairedMarketSlug: plan.pairedMarketSlug,
+    ladderContext: plan.ladderContext,
     range: plan.range,
   };
 }

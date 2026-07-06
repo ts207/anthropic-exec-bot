@@ -14,6 +14,31 @@ export type EntryMode =
 
 export type LadderDirection = "UP" | "DOWN" | "UNKNOWN";
 
+export type LadderNeighbor = {
+  marketSlug: string;
+  threshold: number;
+  direction: LadderDirection;
+  distancePct?: number;
+  yesAsk: number | null;
+  yesBid: number | null;
+};
+
+export type LadderContext = {
+  marketShape: {
+    company: string;
+    eventSlug: string;
+    deadline: string;
+    thresholdCount: number;
+    directionCounts: Record<LadderDirection, number>;
+    minThreshold?: number;
+    maxThreshold?: number;
+    currentValuation?: number;
+    maxEligibleValuation?: number;
+  };
+  nearestLower?: LadderNeighbor;
+  nearestUpper?: LadderNeighbor;
+};
+
 export type EntryPlan = {
   company: string;
   eventSlug: string;
@@ -45,6 +70,7 @@ export type EntryPlan = {
   blockers: string[];
   reason: string;
   pairedMarketSlug?: string;
+  ladderContext?: LadderContext;
   range?: {
     lowerMarketSlug: string;
     higherMarketSlug: string;
@@ -68,8 +94,9 @@ export function buildLadderEntryPlans(input: {
 }): EntryPlan[] {
   const rows = new Map(input.marketRows.map((row) => [row.marketSlug, row]));
   const forecasts = new Map(input.forecasts.map((row) => [row.marketSlug, row]));
-  const curvePlans = curveRepairPlans(input);
-  const rangePlans = rangeSpreadPlans(input);
+  const ladderContexts = buildLadderContexts(input.legs, input.evidenceByCompany, input.quotes);
+  const curvePlans = curveRepairPlans({ ...input, ladderContexts });
+  const rangePlans = rangeSpreadPlans({ ...input, ladderContexts });
   const replacementSlugs = new Set([...curvePlans, ...rangePlans].map((plan) => plan.marketSlug));
   const plans = input.legs
     .filter((leg) => leg.eventKind === "threshold")
@@ -79,6 +106,7 @@ export function buildLadderEntryPlans(input: {
       quote: input.quotes.get(leg.marketSlug),
       marketRow: rows.get(leg.marketSlug),
       forecast: forecasts.get(leg.marketSlug),
+      ladderContext: ladderContexts.get(leg.marketSlug),
       config: input.config,
     }))
     .filter((plan) => !replacementSlugs.has(plan.marketSlug));
@@ -101,6 +129,7 @@ function buildLegEntryPlan(input: {
   quote?: BookQuote;
   marketRow?: MarketAuditRow;
   forecast?: ForecastAuditRow;
+  ladderContext?: LadderContext;
   config: StrategyConfig;
 }): EntryPlan {
   const { leg, evidence, quote, marketRow, forecast, config } = input;
@@ -131,6 +160,7 @@ function buildLegEntryPlan(input: {
     modelFair,
     requiredEdge: 0.12,
     maxTakerPrice: config.maxYesPriceBySignal.SOURCE_CONFIRMED_YES ?? 0.94,
+    ladderContext: input.ladderContext,
   });
   const structuralBlockers = structuralBlockersFor({ leg, direction, evidence, quote, marketRow, config });
   const sourceTaker = sourceConfirmedTakerPlan(base, marketRow, structuralBlockers);
@@ -207,6 +237,7 @@ function curveRepairPlans(input: {
   quotes: Map<string, BookQuote>;
   marketRows: MarketAuditRow[];
   monotonicity: MonotonicityAudit[];
+  ladderContexts: Map<string, LadderContext>;
   config: StrategyConfig;
 }): EntryPlan[] {
   const legs = new Map(input.legs.map((leg) => [leg.marketSlug, leg]));
@@ -229,6 +260,7 @@ function curveRepairPlans(input: {
         quote,
         marketRow: rows.get(leg.marketSlug),
         forecast: undefined,
+        ladderContext: input.ladderContexts.get(leg.marketSlug),
         config: input.config,
       });
       return [{
@@ -254,6 +286,7 @@ function rangeSpreadPlans(input: {
   marketRows: MarketAuditRow[];
   forecasts: ForecastAuditRow[];
   monotonicity: MonotonicityAudit[];
+  ladderContexts: Map<string, LadderContext>;
   config: StrategyConfig;
 }): EntryPlan[] {
   const forecastBySlug = new Map(input.forecasts.map((forecast) => [forecast.marketSlug, forecast]));
@@ -286,6 +319,7 @@ function rangeSpreadPlans(input: {
         quote: lowerQuote,
         marketRow: rows.get(lower.marketSlug),
         forecast: lowerForecast,
+        ladderContext: input.ladderContexts.get(lower.marketSlug),
         config: input.config,
       });
       plans.push({
@@ -364,6 +398,7 @@ function planBase(input: {
   modelFair: number;
   requiredEdge: number;
   maxTakerPrice: number | null;
+  ladderContext?: LadderContext;
 }): EntryPlan {
   return {
     company: input.leg.company,
@@ -400,6 +435,75 @@ function planBase(input: {
     ],
     blockers: [],
     reason: "not_classified",
+    ladderContext: input.ladderContext,
+  };
+}
+
+function buildLadderContexts(
+  legs: ValuationLeg[],
+  evidenceByCompany: Map<string, NpmEvidence>,
+  quotes: Map<string, BookQuote>,
+): Map<string, LadderContext> {
+  const result = new Map<string, LadderContext>();
+  const groups = groupBy(
+    legs.filter((leg) => leg.eventKind === "threshold" && leg.threshold !== undefined),
+    (leg) => `${leg.company}\u0000${leg.eventSlug}\u0000${leg.deadlineIso}`,
+  );
+  for (const group of groups.values()) {
+    const sorted = [...group].sort((left, right) => (left.threshold ?? 0) - (right.threshold ?? 0));
+    const first = sorted[0];
+    if (!first) continue;
+    const evidence = evidenceByCompany.get(first.company);
+    const currentValuation = evidence?.latestValuation;
+    const thresholds = sorted.flatMap((leg) => leg.threshold === undefined ? [] : [leg.threshold]);
+    const directionCounts = sorted.reduce<Record<LadderDirection, number>>((counts, leg) => {
+      counts[ladderDirection(leg)] += 1;
+      return counts;
+    }, { UP: 0, DOWN: 0, UNKNOWN: 0 });
+    const marketShape = {
+      company: first.company,
+      eventSlug: first.eventSlug,
+      deadline: first.deadlineIso,
+      thresholdCount: sorted.length,
+      directionCounts,
+      minThreshold: thresholds[0],
+      maxThreshold: thresholds[thresholds.length - 1],
+      currentValuation,
+      maxEligibleValuation: evidence?.maxEligibleValuation ?? currentValuation,
+    };
+    for (const leg of sorted) {
+      if (leg.threshold === undefined) continue;
+      result.set(leg.marketSlug, {
+        marketShape,
+        nearestLower: nearestNeighbor(sorted, quotes, currentValuation, "lower"),
+        nearestUpper: nearestNeighbor(sorted, quotes, currentValuation, "upper"),
+      });
+    }
+  }
+  return result;
+}
+
+function nearestNeighbor(
+  sorted: ValuationLeg[],
+  quotes: Map<string, BookQuote>,
+  currentValuation: number | undefined,
+  side: "lower" | "upper",
+): LadderNeighbor | undefined {
+  if (currentValuation === undefined) return undefined;
+  const candidates = sorted.filter((leg) => (
+    leg.threshold !== undefined
+    && (side === "lower" ? leg.threshold <= currentValuation : leg.threshold >= currentValuation)
+  ));
+  const leg = side === "lower" ? candidates[candidates.length - 1] : candidates[0];
+  if (!leg || leg.threshold === undefined) return undefined;
+  const quote = quotes.get(leg.marketSlug);
+  return {
+    marketSlug: leg.marketSlug,
+    threshold: leg.threshold,
+    direction: ladderDirection(leg),
+    distancePct: (leg.threshold - currentValuation) / leg.threshold,
+    yesAsk: quote?.bestAsk ?? null,
+    yesBid: quote?.bestBid ?? null,
   };
 }
 
