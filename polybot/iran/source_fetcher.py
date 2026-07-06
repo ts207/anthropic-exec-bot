@@ -5,71 +5,90 @@ import html
 import json
 import re
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import requests
+from bs4 import BeautifulSoup
 
 from .storage import append_jsonl
 from .types import Article
 
 
-_SKIP_TAGS = {"script", "style", "noscript", "nav", "header", "footer", "aside", "form", "button", "figure", "figcaption"}
-_MAIN_TAGS = {"article", "main"}
+_ALWAYS_CHROME_TAGS = ["script", "style", "noscript", "nav", "aside", "form", "button", "figure", "figcaption"]
+# Some article templates (e.g. Al Jazeera liveblogs) put the real headline/lede
+# copy inside a per-article <header> nested under <main>/<article>. Only strip
+# <header>/<footer> when they sit outside the chosen main content region, so
+# site-wide nav/footer chrome is removed without eating legitimate lede text.
+_SITE_CHROME_TAGS = ["header", "footer"]
+_MAIN_TAGS = ["article", "main"]
 _MIN_MAIN_TEXT_CHARS = 400
 
 
-class _TextExtractor(HTMLParser):
+class _TextExtractor:
+    """Extracts title/body text from HTML using a real, lenient HTML parser.
+
+    Real-world news markup (inline SVG icons, hydration scaffolding, etc.) is
+    routinely technically malformed. A hand-rolled stdlib html.parser subclass
+    used to back this class and was observed to silently swallow large spans
+    of real article text (including whole liveblog updates) when it hit a
+    single mismatched/unbalanced tag or quote, with no error raised. lxml's
+    HTML parser (via BeautifulSoup) recovers from that kind of malformed
+    markup the way browsers do, so it is used here instead.
+    """
+
     def __init__(self) -> None:
-        super().__init__()
         self.title = ""
-        self._in_title = False
-        self.parts: list[str] = []
-        self.main_parts: list[str] = []
-        self._skip_depth = 0
-        self._main_depth = 0
+        self._text = ""
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _SKIP_TAGS:
-            self._skip_depth += 1
-        if tag in _MAIN_TAGS:
-            self._main_depth += 1
-        if tag == "title":
-            self._in_title = True
+    def feed(self, markup: str) -> None:
+        soup = BeautifulSoup(markup, "lxml")
+        title_tag = soup.find("title")
+        if title_tag is not None:
+            self.title = " ".join(title_tag.get_text().split())
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _SKIP_TAGS and self._skip_depth:
-            self._skip_depth -= 1
-        if tag in _MAIN_TAGS and self._main_depth:
-            self._main_depth -= 1
-        if tag == "title":
-            self._in_title = False
-        if tag in {"p", "div", "br", "li", "h1", "h2", "h3"}:
-            self.parts.append("\n")
-            if self._main_depth:
-                self.main_parts.append("\n")
+        # Locate the main content region before removing anything, so we know
+        # what's safe to protect from the header/footer chrome pass below.
+        main = None
+        for name in _MAIN_TAGS:
+            main = soup.find(name)
+            if main is not None:
+                break
 
-    def handle_data(self, data: str) -> None:
-        if self._skip_depth:
+        # Always-chrome elements (nav, scripts, share buttons, figures, ...)
+        # are never legitimate article body text, wherever they sit.
+        for tag in soup.find_all(_ALWAYS_CHROME_TAGS):
+            tag.decompose()
+
+        # header/footer are only chrome when they're site-level (outside the
+        # main content region); some templates nest the real lede inside a
+        # per-article <header> under <main>, which must survive this pass.
+        for tag in soup.find_all(_SITE_CHROME_TAGS):
+            if main is None or not _is_descendant(tag, main):
+                tag.decompose()
+
+        main_text = _clean_extracted_text(main.get_text(separator="\n")) if main is not None else ""
+        if len(main_text) >= _MIN_MAIN_TEXT_CHARS:
+            self._text = main_text
             return
-        text = html.unescape(data).strip()
-        if not text:
-            return
-        if self._in_title:
-            self.title += (" " if self.title else "") + text
-        self.parts.append(text)
-        if self._main_depth:
-            self.main_parts.append(text)
+
+        body = soup.find("body") or soup
+        self._text = _clean_extracted_text(body.get_text(separator="\n"))
 
     def text(self) -> str:
-        # News pages bury the story in nav/menu chrome; prefer the
-        # <article>/<main> region when it carries a real body.
-        main = re.sub(r"\n{3,}", "\n\n", " ".join(self.main_parts)).strip()
-        if len(main) >= _MIN_MAIN_TEXT_CHARS:
-            return main
-        return re.sub(r"\n{3,}", "\n\n", " ".join(self.parts)).strip()
+        return self._text
+
+
+def _clean_extracted_text(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def _is_descendant(node, ancestor) -> bool:
+    for parent in node.parents:
+        if parent is ancestor:
+            return True
+    return False
 
 
 def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
