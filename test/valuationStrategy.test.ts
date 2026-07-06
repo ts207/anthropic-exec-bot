@@ -22,7 +22,7 @@ import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSche
 import { meaningfulAlerts, runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuationLadderEntries.ts";
-import { updateLadderPaperOrders } from "../src/strategy/ladderPaper.ts";
+import { updateLadderPaperOrders, type LadderPaperOrder } from "../src/strategy/ladderPaper.ts";
 import { discoverValuationUniverse } from "../src/strategy/valuationUniverseDiscovery.ts";
 import { buildDailyReport } from "../src/strategy/dailyReport.ts";
 
@@ -756,6 +756,45 @@ test("ladder paper opens passive orders and fills only when ask reaches bid", ()
   assert.equal(noDuplicate.state.orders.length, 1);
 });
 
+test("ladder paper proof summarizes passive-fill evidence without enabling live", () => {
+  const orders = Array.from({ length: 30 }, (_, index) => ladderPaperOrderFixture({
+    id: `near-${index}`,
+    hypotheticalPnl: 0.05,
+  }));
+  const update = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders },
+    plans: [],
+    now: new Date("2026-07-07T00:00:00Z"),
+  });
+  assert.equal(update.metrics.proofBeforeLive.currentFilledOrders, 30);
+  assert.equal(update.metrics.proofBeforeLive.currentResolvedOrders, 30);
+  assert.equal(update.metrics.proofBeforeLive.totalHypotheticalPnl, 1.5);
+  assert.equal(update.metrics.proofBeforeLive.readyForManualReview, true);
+  assert.equal(update.metrics.proofBeforeLive.readyForLive, false);
+  assert.equal(update.metrics.byModeProof[0]?.entryMode, "MAKER_NEAR_BOUNDARY_BID");
+  assert.equal(update.metrics.byModeProof[0]?.readyForManualReview, true);
+
+  const stale = updateLadderPaperOrders({
+    previous: {
+      version: 1,
+      updatedAt: "2026-07-06T00:00:00Z",
+      orders: [
+        ...orders,
+        ladderPaperOrderFixture({
+          id: "stale-source-cancel",
+          status: "cancelled",
+          cancelReason: "cancelled_by_blocker:stale_source",
+          hypotheticalPnl: null,
+        }),
+      ],
+    },
+    plans: [],
+    now: new Date("2026-07-07T00:00:00Z"),
+  });
+  assert.equal(stale.metrics.proofBeforeLive.staleSourceErrorCount, 1);
+  assert.equal(stale.metrics.proofBeforeLive.readyForManualReview, false);
+});
+
 test("ladder direction rejects ambiguous down-arrow reaches-or-exceeds legs", () => {
   const leg = legFixture({
     question: "Will Stripe's valuation hit ↓$170B by July 31?",
@@ -1068,6 +1107,36 @@ function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): B
       { price: bestAsk, size: 100 },
       { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
     ],
+  };
+}
+
+function ladderPaperOrderFixture(overrides: Partial<LadderPaperOrder> = {}): LadderPaperOrder {
+  return {
+    id: "paper-order",
+    company: "Anthropic",
+    eventSlug: "event",
+    marketSlug: "paper-maker",
+    threshold: 1_000,
+    deadline: "2026-08-01T03:59:59Z",
+    entryMode: "MAKER_NEAR_BOUNDARY_BID",
+    openedAt: "2026-07-06T00:00:00Z",
+    sourceDate: "2026-07-06",
+    currentValuation: 1_010,
+    maxEligibleValuation: 1_010,
+    distancePct: -0.01,
+    passiveBidPrice: 0.56,
+    modelFair: 0.68,
+    requiredEdge: 0.12,
+    sizeUsd: 1,
+    status: "resolved",
+    filledAt: "2026-07-06T00:05:00Z",
+    fillPrice: 0.56,
+    currentMarkPrice: 1,
+    finalResolution: true,
+    hypotheticalPnl: 0.05,
+    cancelReason: null,
+    reason: "near_boundary_passive_bid_paper_only",
+    ...overrides,
   };
 }
 

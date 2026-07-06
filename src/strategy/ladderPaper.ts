@@ -58,10 +58,25 @@ export type LadderPaperMetrics = {
   updatedThisRun: number;
   totalHypotheticalPnl: number;
   byMode: Record<string, number>;
+  byModeProof: Array<{
+    entryMode: string;
+    totalOrders: number;
+    filledOrResolvedOrders: number;
+    resolvedOrders: number;
+    cancelledOrders: number;
+    totalHypotheticalPnl: number;
+    averageHypotheticalPnl: number | null;
+    staleSourceErrorCount: number;
+    readyForManualReview: boolean;
+  }>;
   proofBeforeLive: {
     minimumFilledOrders: 30;
     currentFilledOrders: number;
+    currentResolvedOrders: number;
+    totalHypotheticalPnl: number;
     positivePnlRequired: true;
+    staleSourceErrorCount: number;
+    readyForManualReview: boolean;
     readyForLive: false;
     requirements: string[];
   };
@@ -258,21 +273,30 @@ function ladderPaperMetrics(
     return counts;
   }, {});
   const filledOrResolved = orders.filter((order) => order.status === "filled" || order.status === "resolved");
+  const resolved = orders.filter((order) => order.status === "resolved");
+  const totalHypotheticalPnl = round4(orders.reduce((sum, order) => sum + (order.hypotheticalPnl ?? 0), 0));
+  const staleSourceErrorCount = orders.filter(hasStaleSourceError).length;
+  const readyForManualReview = filledOrResolved.length >= 30 && totalHypotheticalPnl > 0 && staleSourceErrorCount === 0;
   return {
     totalOrders: orders.length,
     workingOrders: orders.filter((order) => order.status === "working").length,
     filledOrders: orders.filter((order) => order.status === "filled").length,
-    resolvedOrders: orders.filter((order) => order.status === "resolved").length,
+    resolvedOrders: resolved.length,
     cancelledOrders: orders.filter((order) => order.status === "cancelled").length,
     openedThisRun,
     filledThisRun,
     updatedThisRun,
-    totalHypotheticalPnl: round4(orders.reduce((sum, order) => sum + (order.hypotheticalPnl ?? 0), 0)),
+    totalHypotheticalPnl,
     byMode,
+    byModeProof: modeProofRows(orders),
     proofBeforeLive: {
       minimumFilledOrders: 30,
       currentFilledOrders: filledOrResolved.length,
+      currentResolvedOrders: resolved.length,
+      totalHypotheticalPnl,
       positivePnlRequired: true,
+      staleSourceErrorCount,
+      readyForManualReview,
       readyForLive: false,
       requirements: [
         "30+ filled passive ladder paper orders",
@@ -315,6 +339,33 @@ function planKey(plan: EntryPlan): string {
 function pnlUsd(entryPrice: number, markPrice: number, sizeUsd: number): number {
   if (entryPrice <= 0) return 0;
   return round4(((markPrice - entryPrice) * sizeUsd) / entryPrice);
+}
+
+function modeProofRows(orders: LadderPaperOrder[]): LadderPaperMetrics["byModeProof"] {
+  const modes = [...new Set(orders.map((order) => order.entryMode))].sort();
+  return modes.map((entryMode) => {
+    const rows = orders.filter((order) => order.entryMode === entryMode);
+    const filledOrResolved = rows.filter((order) => order.status === "filled" || order.status === "resolved");
+    const resolved = rows.filter((order) => order.status === "resolved");
+    const totalHypotheticalPnl = round4(rows.reduce((sum, order) => sum + (order.hypotheticalPnl ?? 0), 0));
+    const staleSourceErrorCount = rows.filter(hasStaleSourceError).length;
+    return {
+      entryMode,
+      totalOrders: rows.length,
+      filledOrResolvedOrders: filledOrResolved.length,
+      resolvedOrders: resolved.length,
+      cancelledOrders: rows.filter((order) => order.status === "cancelled").length,
+      totalHypotheticalPnl,
+      averageHypotheticalPnl: resolved.length ? round4(totalHypotheticalPnl / resolved.length) : null,
+      staleSourceErrorCount,
+      readyForManualReview: filledOrResolved.length >= 30 && totalHypotheticalPnl > 0 && staleSourceErrorCount === 0,
+    };
+  });
+}
+
+function hasStaleSourceError(order: LadderPaperOrder): boolean {
+  const reason = `${order.cancelReason ?? ""} ${order.reason}`.toLowerCase();
+  return reason.includes("stale-source") || reason.includes("stale_source");
 }
 
 function emptyState(): LadderPaperState {
