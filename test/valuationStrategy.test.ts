@@ -16,6 +16,7 @@ import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/strat
 import { probePath, writeJson } from "../src/strategy/stateStore.ts";
 import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketAudit.ts";
 import { updateFixingWatch } from "../src/strategy/fixingWatch.ts";
+import { buildNpmBarrierForecasts, monteCarloTouchProbability, pCrossTomorrow, tapeStats } from "../src/strategy/npmBarrierForecast.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -367,6 +368,99 @@ test("fixing watch baselines first run unless replay is explicit", () => {
     { replayExisting: true },
   );
   assert.equal(replay.newCrosses.length, 1);
+});
+
+test("barrier forecast computes NPM tape stats and crossing probability", () => {
+  const evidence = parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-04", implied_valuation: 995 },
+    tape_d_prices: [
+      { date: "2026-07-01", implied_valuation: 950 },
+      { date: "2026-07-02", implied_valuation: 970 },
+      { date: "2026-07-03", implied_valuation: 985 },
+      { date: "2026-07-04", implied_valuation: 995 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" });
+  const stats = tapeStats(evidence);
+  assert.equal(stats.returnCount, 3);
+  assert.equal(stats.recent3DayDrift > 0, true);
+  assert.equal(pCrossTomorrow(995, 1000, stats.meanDailyLogReturn, stats.dailyVol) > 0.5, true);
+  assert.equal(monteCarloTouchProbability({
+    latestValuation: 995,
+    threshold: 1000,
+    mu: stats.meanDailyLogReturn,
+    sigma: stats.dailyVol,
+    days: 10,
+    paths: 500,
+    seed: "forecast-test",
+  }) > 0.5, true);
+});
+
+test("barrier forecast creates alert-only near-boundary candidate", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "forecast-market" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-04", implied_valuation: 995 },
+    tape_d_prices: [
+      { date: "2026-07-01", implied_valuation: 950 },
+      { date: "2026-07-02", implied_valuation: 970 },
+      { date: "2026-07-03", implied_valuation: 985 },
+      { date: "2026-07-04", implied_valuation: 995 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const quote = quoteFixture(0.35, 0.33);
+  const row = marketAuditRowFixture({
+    marketSlug: "forecast-market",
+    threshold: 1_000,
+    state: "NEAR_BOUNDARY",
+    latestValuation: 995,
+    latestDate: "2026-07-04",
+    maxEligibleValuation: 995,
+    maxEligibleDate: "2026-07-04",
+    yesAsk: 0.35,
+    yesBid: 0.33,
+    depthUnderCap: 250,
+  });
+  const forecasts = buildNpmBarrierForecasts({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["forecast-market", quote]]),
+    marketRows: [row],
+    config,
+    now: new Date("2026-07-04T12:00:00Z"),
+    simulations: 800,
+  });
+  assert.equal(forecasts[0]?.signalType, "NPM_MULTI_DAY_BARRIER_FORECAST_YES");
+  assert.equal(forecasts[0]?.liveEligible, false);
+  assert.equal((forecasts[0]?.edge ?? 0) >= 0.12, true);
+});
+
+test("barrier forecast blocks stale source data", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "forecast-market" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-01", implied_valuation: 995 },
+    tape_d_prices: [
+      { date: "2026-06-29", implied_valuation: 950 },
+      { date: "2026-06-30", implied_valuation: 970 },
+      { date: "2026-07-01", implied_valuation: 995 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const forecasts = buildNpmBarrierForecasts({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["forecast-market", quoteFixture(0.35, 0.33)]]),
+    marketRows: [marketAuditRowFixture({
+      marketSlug: "forecast-market",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      depthUnderCap: 250,
+    })],
+    config,
+    now: new Date("2026-07-06T12:00:00Z"),
+    simulations: 200,
+  });
+  assert.equal(forecasts[0]?.signalType, "NO_FORECAST_EDGE");
+  assert.equal(forecasts[0]?.reason, "source_date_stale");
 });
 
 function testConfig(): StrategyConfig {

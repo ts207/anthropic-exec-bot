@@ -8,6 +8,11 @@ const SIGNALS: SignalType[] = [
   "CALENDAR_DOMINANCE_YES",
   "RANKING_INCONSISTENCY_ALERT",
   "NPM_DRIFT_MODEL_YES",
+  "NPM_NEAR_BOUNDARY_FORECAST_YES",
+  "NPM_MULTI_DAY_BARRIER_FORECAST_YES",
+  "CURVE_UNDERPRICED_FORECAST_YES",
+  "ORDERBOOK_CONFIRMED_FORECAST_YES",
+  "NO_FORECAST_EDGE",
   "STALE_SOURCE_ALERT",
   "NO_ACTION",
 ];
@@ -133,6 +138,8 @@ function defaultSignalMultiplier(signal: SignalType): number {
   if (signal === "CALENDAR_DOMINANCE_YES") return 0.5;
   if (signal === "CURVE_MONOTONICITY_YES") return 0.4;
   if (signal === "NPM_DRIFT_MODEL_YES") return 0.15;
+  if (signal === "NPM_NEAR_BOUNDARY_FORECAST_YES") return 0.15;
+  if (signal === "NPM_MULTI_DAY_BARRIER_FORECAST_YES") return 0.1;
   return 0;
 }
 

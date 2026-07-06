@@ -17,10 +17,11 @@ import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJ
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
+import { buildNpmBarrierForecasts } from "./strategy/npmBarrierForecast.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -61,6 +62,9 @@ async function main(): Promise<void> {
   }
   if (command === "fixing-watch") {
     return print(await fixingWatch(loaded, args));
+  }
+  if (command === "forecast-audit") {
+    return print(await forecastAudit(loaded, args));
   }
   if (command === "run") {
     for (;;) {
@@ -401,6 +405,49 @@ async function fixingWatchCycleWithOptions(loaded: LoadedStrategyConfig, replayE
   return report;
 }
 
+export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const top = Math.max(1, Number(args.get("top") ?? 20));
+  const state = await collectValuationState(loaded.config);
+  const marketRows = await buildMarketAuditRows(loaded, state);
+  const forecasts = buildNpmBarrierForecasts({
+    legs: state.allLegs,
+    evidenceByCompany: state.evidenceByCompany,
+    quotes: state.quotes,
+    marketRows,
+    config: loaded.config,
+  });
+  const candidates = forecasts.filter((row) => row.signalType !== "NO_FORECAST_EDGE");
+  const report = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    mode: loaded.config.mode,
+    liveEligible: false,
+    livePolicy: "forecast_audit_is_alert_only_until_paper_validated",
+    summary: {
+      legCount: forecasts.length,
+      candidateCount: candidates.length,
+      nearBoundaryCount: forecasts.filter((row) => row.state === "NEAR_BOUNDARY").length,
+      staleSourceBlockedCount: forecasts.filter((row) => row.reason === "source_date_stale").length,
+      maxEdge: forecasts.reduce((max, row) => Math.max(max, row.edge ?? -Infinity), -Infinity),
+      minimumProofBeforeLive: {
+        forecastCandidates: 30,
+        requiresPositiveCalibration: true,
+        requiresPositiveSimulatedEvAfterCosts: true,
+        requiresNoParserRuleErrors: true,
+        requiresOutOfSampleEdge: true,
+      },
+    },
+    candidates,
+    watchlist: forecasts
+      .filter((row) => row.state === "NEAR_BOUNDARY" || (row.distancePct !== undefined && row.distancePct >= 0 && row.distancePct <= 0.03))
+      .slice(0, top),
+    rows: forecasts,
+  };
+  await appendJsonl(join(loaded.config.logsDir, "forecast_audit.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_forecast_audit.json"), report);
+  return report;
+}
+
 async function buildMarketAuditRows(loaded: LoadedStrategyConfig, state: ValuationState): Promise<MarketAuditRow[]> {
   const candidates = new Map(state.thresholdCandidates.map((candidate) => [candidate.marketSlug, candidate]));
   const rows: MarketAuditRow[] = [];
@@ -714,7 +761,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 
