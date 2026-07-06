@@ -1,6 +1,6 @@
 import { curveRepairPassiveBid, farOptionalityPassiveBid, nearBoundaryPassiveBid } from "./entryQuotePlanner.ts";
 import type { ForecastAuditRow } from "./npmBarrierForecast.ts";
-import type { MarketAuditRow, MonotonicityAudit } from "./marketAudit.ts";
+import { bookAgeMs, type MarketAuditRow, type MonotonicityAudit } from "./marketAudit.ts";
 import type { BookQuote, NpmEvidence, StrategyConfig, ValuationLeg } from "./signalTypes.ts";
 
 export type EntryMode =
@@ -84,6 +84,7 @@ export type EntryPlan = {
     deadline: string;
     lowerYesAsk: number;
     higherNoAsk: number;
+    higherNoAskSource: "no_orderbook" | "synthetic_from_yes_bid";
     modelRangeProbability: number;
     combinedCost: number;
     currentMarkPrice: number | null;
@@ -94,6 +95,7 @@ export function buildLadderEntryPlans(input: {
   legs: ValuationLeg[];
   evidenceByCompany: Map<string, NpmEvidence>;
   quotes: Map<string, BookQuote>;
+  noQuotes?: Map<string, BookQuote>;
   marketRows: MarketAuditRow[];
   forecasts: ForecastAuditRow[];
   monotonicity: MonotonicityAudit[];
@@ -251,6 +253,7 @@ function curveRepairPlans(input: {
   legs: ValuationLeg[];
   evidenceByCompany: Map<string, NpmEvidence>;
   quotes: Map<string, BookQuote>;
+  noQuotes?: Map<string, BookQuote>;
   marketRows: MarketAuditRow[];
   monotonicity: MonotonicityAudit[];
   ladderContexts: Map<string, LadderContext>;
@@ -309,6 +312,7 @@ function rangeSpreadPlans(input: {
   legs: ValuationLeg[];
   evidenceByCompany: Map<string, NpmEvidence>;
   quotes: Map<string, BookQuote>;
+  noQuotes?: Map<string, BookQuote>;
   marketRows: MarketAuditRow[];
   forecasts: ForecastAuditRow[];
   monotonicity: MonotonicityAudit[];
@@ -329,6 +333,7 @@ function rangeSpreadPlans(input: {
       if ((lower.ruleFamilyHash ?? lower.ruleHash) !== (higher.ruleFamilyHash ?? higher.ruleHash)) continue;
       const lowerQuote = input.quotes.get(lower.marketSlug);
       const higherQuote = input.quotes.get(higher.marketSlug);
+      const higherNoQuote = input.noQuotes?.get(higher.marketSlug);
       const lowerForecast = forecastBySlug.get(lower.marketSlug);
       const higherForecast = forecastBySlug.get(higher.marketSlug);
       if (!lowerQuote || !higherQuote || !lowerForecast || !higherForecast) continue;
@@ -349,13 +354,17 @@ function rangeSpreadPlans(input: {
         marketRow: rows.get(higher.marketSlug),
         config: input.config,
       }).map((blocker) => `paired_${blocker}`);
-      const tokenBlockers = [
-        lower.yesTokenId ? null : "missing_yes_token",
-        higher.noTokenId ? null : "paired_missing_no_token",
-      ].filter((blocker): blocker is string => blocker !== null);
-      const blockers = [...new Set([...lowerBlockers, ...higherBlockers, ...tokenBlockers])];
+      const pairedNoBlockers = noSideBlockersFor({
+        leg: higher,
+        quote: higherNoQuote,
+        config: input.config,
+      }).map((blocker) => `paired_${blocker}`);
+      const blockers = [...new Set([...lowerBlockers, ...higherBlockers, ...pairedNoBlockers])];
       const lowerAsk = lowerQuote.bestAsk;
-      const higherNoAsk = higherQuote.bestBid === null ? null : round4(1 - higherQuote.bestBid);
+      const higherNoAsk = higherNoQuote?.bestAsk ?? (higherQuote.bestBid === null ? null : round4(1 - higherQuote.bestBid));
+      const higherNoAskSource = higherNoQuote?.bestAsk !== null && higherNoQuote?.bestAsk !== undefined
+        ? "no_orderbook" as const
+        : "synthetic_from_yes_bid" as const;
       if (lowerAsk === null || higherNoAsk === null) continue;
       const modelRangeProbability = Math.max(0, lowerForecast.pTouchByDeadline - higherForecast.pTouchByDeadline);
       const combinedCost = round4(lowerAsk + higherNoAsk);
@@ -392,6 +401,7 @@ function rangeSpreadPlans(input: {
           deadline: lower.deadlineIso,
           lowerYesAsk: lowerAsk,
           higherNoAsk,
+          higherNoAskSource,
           modelRangeProbability: round4(modelRangeProbability),
           combinedCost,
           currentMarkPrice: higherQuote.bestAsk === null ? null : round4((lowerQuote.bestBid ?? 0) + (1 - higherQuote.bestAsk)),
@@ -437,6 +447,20 @@ function structuralBlockersFor(input: {
   if (input.marketRow?.bookAgeMs !== undefined && input.marketRow.bookAgeMs > input.config.orderbookMaxAgeMs) blockers.push("orderbook_stale");
   if (input.direction === "UNKNOWN") blockers.push("direction_semantics_unknown");
   return [...new Set(blockers)];
+}
+
+function noSideBlockersFor(input: {
+  leg: ValuationLeg;
+  quote?: BookQuote;
+  config: StrategyConfig;
+}): string[] {
+  const blockers: string[] = [];
+  if (!input.leg.noTokenId) blockers.push("missing_no_token");
+  if (!input.quote) blockers.push("missing_no_orderbook");
+  if (input.quote && input.quote.liquidity < input.config.minLiquidity) blockers.push("no_orderbook_liquidity_below_minimum");
+  const age = bookAgeMs(input.quote);
+  if (age !== undefined && age > input.config.orderbookMaxAgeMs) blockers.push("no_orderbook_stale");
+  return blockers;
 }
 
 function planBase(input: {

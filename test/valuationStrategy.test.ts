@@ -872,6 +872,9 @@ test("ladder entry planner creates adjacent range spread paper candidate", () =>
       ["lower-range", quoteFixture(0.2, 0.18)],
       ["higher-range", quoteFixture(0.8, 0.75)],
     ]),
+    noQuotes: new Map([
+      ["higher-range", freshQuoteFixture(0.25, 0.2)],
+    ]),
     marketRows: [
       marketAuditRowFixture({ marketSlug: "lower-range", state: "NEAR_BOUNDARY", yesAsk: 0.2, yesBid: 0.18 }),
       marketAuditRowFixture({ marketSlug: "higher-range", state: "UNCROSSED", yesAsk: 0.8, yesBid: 0.75 }),
@@ -891,6 +894,7 @@ test("ladder entry planner creates adjacent range spread paper candidate", () =>
   assert.equal(plans[0]?.range?.higherNoTokenId, "no-token");
   assert.equal(plans[0]?.range?.lowerYesAsk, 0.2);
   assert.equal(plans[0]?.range?.higherNoAsk, 0.25);
+  assert.equal(plans[0]?.range?.higherNoAskSource, "no_orderbook");
   assert.equal(plans[0]?.range?.modelRangeProbability, 0.6);
 });
 
@@ -922,7 +926,9 @@ test("ladder entry planner blocks range spread paper without paired NO token map
   const plan = plans.find((item) => item.entryMode === "RANGE_SPREAD_PAPER");
   assert.equal(plan?.paperEligible, false);
   assert.equal(plan?.blockers.includes("paired_missing_no_token"), true);
+  assert.equal(plan?.blockers.includes("paired_missing_no_orderbook"), true);
   assert.equal(plan?.range?.higherNoTokenId, undefined);
+  assert.equal(plan?.range?.higherNoAskSource, "synthetic_from_yes_bid");
 });
 
 test("ladder entry planner blocks curve repair paper when lower leg has structural risk", () => {
@@ -1641,6 +1647,13 @@ function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): B
       { price: bestAsk, size: 100 },
       { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
     ],
+  };
+}
+
+function freshQuoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): BookQuote {
+  return {
+    ...quoteFixture(bestAsk, bestBid),
+    fetchedAt: new Date().toISOString(),
   };
 }
 

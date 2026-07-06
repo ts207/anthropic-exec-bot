@@ -41,6 +41,7 @@ type ValuationState = {
   evidenceByCompany: Map<string, NpmEvidence>;
   allLegs: ValuationLeg[];
   quotes: Map<string, BookQuote>;
+  noQuotes: Map<string, BookQuote>;
   curvePoints: CurvePoint[];
   thresholdCandidates: ValuationCandidate[];
 };
@@ -133,6 +134,7 @@ async function collectValuationState(config: StrategyConfig): Promise<ValuationS
   const evidenceByCompany = await loadEvidence(config);
   const allLegs: ValuationLeg[] = [];
   const quotes = new Map<string, BookQuote>();
+  const noQuotes = new Map<string, BookQuote>();
   const curvePoints: CurvePoint[] = [];
   const thresholdCandidates: ValuationCandidate[] = [];
 
@@ -150,6 +152,8 @@ async function collectValuationState(config: StrategyConfig): Promise<ValuationS
       await appendJsonl(join(config.logsDir, "legs.jsonl"), leg);
       const quote = leg.yesTokenId ? await safeQuote(leg.yesTokenId) : undefined;
       if (quote) quotes.set(leg.marketSlug, quote);
+      const noQuote = leg.noTokenId ? await safeQuote(leg.noTokenId) : undefined;
+      if (noQuote) noQuotes.set(leg.marketSlug, noQuote);
       if (leg.threshold !== undefined && quote?.bestAsk !== null && quote?.bestAsk !== undefined) {
         curvePoints.push({ leg, yesAsk: quote.bestAsk });
       }
@@ -163,7 +167,7 @@ async function collectValuationState(config: StrategyConfig): Promise<ValuationS
     }
   }
 
-  return { evidenceByCompany, allLegs, quotes, curvePoints, thresholdCandidates };
+  return { evidenceByCompany, allLegs, quotes, noQuotes, curvePoints, thresholdCandidates };
 }
 
 function scanSummary(result: ScanResult): Record<string, unknown> {
@@ -617,6 +621,7 @@ async function entryPlanContext(loaded: LoadedStrategyConfig): Promise<{
       legs: state.allLegs,
       evidenceByCompany: state.evidenceByCompany,
       quotes: state.quotes,
+      noQuotes: state.noQuotes,
       marketRows,
       forecasts,
       monotonicity,
