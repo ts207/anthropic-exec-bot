@@ -16,7 +16,7 @@ import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/strat
 import { probePath, writeJson } from "../src/strategy/stateStore.ts";
 import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketAudit.ts";
 import { updateFixingWatch } from "../src/strategy/fixingWatch.ts";
-import { buildNpmBarrierForecasts, monteCarloTouchProbability, pCrossTomorrow, tapeStats } from "../src/strategy/npmBarrierForecast.ts";
+import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, monteCarloTouchProbability, pCrossTomorrow, sourceFreshnessMap, tapeStats } from "../src/strategy/npmBarrierForecast.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -382,7 +382,7 @@ test("barrier forecast computes NPM tape stats and crossing probability", () => 
   }, { name: "Anthropic", npmCompanyId: "company-a" });
   const stats = tapeStats(evidence);
   assert.equal(stats.returnCount, 3);
-  assert.equal(stats.recent3DayDrift > 0, true);
+  assert.equal(stats.recent3DayAvgDailyDrift > 0, true);
   assert.equal(pCrossTomorrow(995, 1000, stats.meanDailyLogReturn, stats.dailyVol) > 0.5, true);
   assert.equal(monteCarloTouchProbability({
     latestValuation: 995,
@@ -408,6 +408,10 @@ test("barrier forecast creates alert-only near-boundary candidate", () => {
     ],
   }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
   const quote = quoteFixture(0.35, 0.33);
+  const sourceFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    now: new Date("2026-07-04T12:00:00Z"),
+  });
   const row = marketAuditRowFixture({
     marketSlug: "forecast-market",
     threshold: 1_000,
@@ -425,6 +429,7 @@ test("barrier forecast creates alert-only near-boundary candidate", () => {
     evidenceByCompany: new Map([["Anthropic", evidence]]),
     quotes: new Map([["forecast-market", quote]]),
     marketRows: [row],
+    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
     config,
     now: new Date("2026-07-04T12:00:00Z"),
     simulations: 800,
@@ -445,6 +450,15 @@ test("barrier forecast blocks stale source data", () => {
       { date: "2026-07-01", implied_valuation: 995 },
     ],
   }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const previousFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    now: new Date("2026-07-02T12:00:00Z"),
+  });
+  const sourceFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    previous: previousFreshness,
+    now: new Date("2026-07-06T12:00:00Z"),
+  });
   const forecasts = buildNpmBarrierForecasts({
     legs: [leg],
     evidenceByCompany: new Map([["Anthropic", evidence]]),
@@ -455,12 +469,14 @@ test("barrier forecast blocks stale source data", () => {
       state: "NEAR_BOUNDARY",
       depthUnderCap: 250,
     })],
+    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
     config,
     now: new Date("2026-07-06T12:00:00Z"),
     simulations: 200,
   });
   assert.equal(forecasts[0]?.signalType, "NO_FORECAST_EDGE");
-  assert.equal(forecasts[0]?.reason, "source_date_stale");
+  assert.equal(forecasts[0]?.reason, "stale_endpoint_blocked");
+  assert.equal(forecasts[0]?.freshnessState, "STALE_ENDPOINT");
 });
 
 function testConfig(): StrategyConfig {

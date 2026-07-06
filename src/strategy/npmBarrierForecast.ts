@@ -6,11 +6,41 @@ export type TapeStats = {
   returnCount: number;
   meanDailyDrift: number;
   medianDailyDrift: number;
-  recent3DayDrift: number;
-  recent7DayDrift: number;
+  recent3DayAvgDailyDrift: number;
+  recent7DayAvgDailyDrift: number;
   meanDailyLogReturn: number;
   dailyVol: number;
   maxDailyMove: number;
+};
+
+export type SourceFreshnessState =
+  | "FRESH_NEW_FIXING"
+  | "FRESH_CARRIED_FORWARD"
+  | "STALE_ENDPOINT"
+  | "MISSED_EXPECTED_UPDATE"
+  | "SOURCE_BLOCKED"
+  | "UNKNOWN";
+
+export type SourceFreshness = {
+  company: string;
+  fetchedAt: string;
+  latestTapeDate?: string;
+  latestTapeAgeHours?: number;
+  expectedNextUpdateAt?: string;
+  lastSuccessfulFetchAt?: string;
+  endpointFresh: boolean;
+  endpointChangedSinceLastFetch: boolean;
+  tapeAdvancedSinceLastFetch: boolean;
+  expectedUpdateMissed: boolean;
+  carryForwardLikely: boolean;
+  freshnessState: SourceFreshnessState;
+  staleBlockReason?: string;
+  rawHash?: string;
+};
+
+export type SourceFreshnessSnapshot = {
+  generatedAt: string;
+  companies: Record<string, SourceFreshness>;
 };
 
 export type ForecastAuditRow = {
@@ -27,10 +57,17 @@ export type ForecastAuditRow = {
   distancePct?: number;
   daysRemaining: number;
   sourceDateAgeHours?: number;
+  freshnessState: SourceFreshnessState;
+  expectedNextUpdateAt?: string;
+  lastSuccessfulFetchAt?: string;
+  endpointChangedSinceLastFetch: boolean;
+  tapeAdvancedSinceLastFetch: boolean;
+  carryForwardLikely: boolean;
+  staleBlockReason?: string;
   dailyDrift: number;
   medianDailyDrift: number;
-  recent3DayDrift: number;
-  recent7DayDrift: number;
+  recent3DayAvgDailyDrift: number;
+  recent7DayAvgDailyDrift: number;
   dailyVol: number;
   maxDailyMove: number;
   pCrossTomorrow: number;
@@ -44,6 +81,7 @@ export type ForecastAuditRow = {
   signalType: SignalType;
   liveEligible: false;
   reason: string;
+  needed: string[];
   paperTrade: {
     forecastTime: string;
     entryPrice: number | null;
@@ -60,6 +98,7 @@ export function buildNpmBarrierForecasts(input: {
   evidenceByCompany: Map<string, NpmEvidence>;
   quotes: Map<string, BookQuote>;
   marketRows: MarketAuditRow[];
+  sourceFreshnessByCompany?: Map<string, SourceFreshness>;
   config: StrategyConfig;
   now?: Date;
   simulations?: number;
@@ -73,6 +112,7 @@ export function buildNpmBarrierForecasts(input: {
       evidence: input.evidenceByCompany.get(leg.company),
       quote: input.quotes.get(leg.marketSlug),
       marketRow: marketRows.get(leg.marketSlug),
+      sourceFreshness: input.sourceFreshnessByCompany?.get(leg.company),
       config: input.config,
       now,
       simulations: input.simulations ?? 4_000,
@@ -88,12 +128,63 @@ export function tapeStats(evidence: NpmEvidence | undefined): TapeStats {
     returnCount: returns.length,
     meanDailyDrift: Math.exp(meanLog) - 1,
     medianDailyDrift: median(arithmetic),
-    recent3DayDrift: compoundDrift(returns.slice(-3)),
-    recent7DayDrift: compoundDrift(returns.slice(-7)),
+    recent3DayAvgDailyDrift: compoundDrift(returns.slice(-3)),
+    recent7DayAvgDailyDrift: compoundDrift(returns.slice(-7)),
     meanDailyLogReturn: meanLog,
     dailyVol: sampleStddev(returns),
     maxDailyMove: arithmetic.reduce((max, value) => Math.max(max, Math.abs(value)), 0),
   };
+}
+
+export function buildSourceFreshnessSnapshot(input: {
+  evidenceByCompany: Map<string, NpmEvidence>;
+  previous?: SourceFreshnessSnapshot | null;
+  now?: Date;
+}): SourceFreshnessSnapshot {
+  const now = input.now ?? new Date();
+  const fetchedAt = now.toISOString();
+  const companies: Record<string, SourceFreshness> = {};
+  for (const [company, evidence] of input.evidenceByCompany.entries()) {
+    companies[company] = sourceFreshnessForEvidence(company, evidence, input.previous?.companies[company], now);
+  }
+  return { generatedAt: fetchedAt, companies };
+}
+
+export function parseSourceFreshnessSnapshot(raw: unknown): SourceFreshnessSnapshot | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const rawCompanies = record.companies && typeof record.companies === "object" && !Array.isArray(record.companies)
+    ? record.companies as Record<string, unknown>
+    : {};
+  const companies: Record<string, SourceFreshness> = {};
+  for (const [company, value] of Object.entries(rawCompanies)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const item = value as Record<string, unknown>;
+    companies[company] = {
+      company,
+      fetchedAt: stringOr(item.fetchedAt, new Date(0).toISOString()),
+      latestTapeDate: optionalString(item.latestTapeDate),
+      latestTapeAgeHours: optionalNumber(item.latestTapeAgeHours),
+      expectedNextUpdateAt: optionalString(item.expectedNextUpdateAt),
+      lastSuccessfulFetchAt: optionalString(item.lastSuccessfulFetchAt),
+      endpointFresh: Boolean(item.endpointFresh),
+      endpointChangedSinceLastFetch: Boolean(item.endpointChangedSinceLastFetch),
+      tapeAdvancedSinceLastFetch: Boolean(item.tapeAdvancedSinceLastFetch),
+      expectedUpdateMissed: Boolean(item.expectedUpdateMissed),
+      carryForwardLikely: Boolean(item.carryForwardLikely),
+      freshnessState: parseFreshnessState(item.freshnessState),
+      staleBlockReason: optionalString(item.staleBlockReason),
+      rawHash: optionalString(item.rawHash),
+    };
+  }
+  return {
+    generatedAt: stringOr(record.generatedAt, new Date(0).toISOString()),
+    companies,
+  };
+}
+
+export function sourceFreshnessMap(snapshot: SourceFreshnessSnapshot): Map<string, SourceFreshness> {
+  return new Map(Object.entries(snapshot.companies));
 }
 
 export function pCrossTomorrow(latestValuation: number, threshold: number, mu: number, sigma: number): number {
@@ -140,11 +231,12 @@ function forecastLeg(input: {
   evidence?: NpmEvidence;
   quote?: BookQuote;
   marketRow?: MarketAuditRow;
+  sourceFreshness?: SourceFreshness;
   config: StrategyConfig;
   now: Date;
   simulations: number;
 }): ForecastAuditRow {
-  const { leg, evidence, quote, marketRow, config, now } = input;
+  const { leg, evidence, quote, marketRow, sourceFreshness, config, now } = input;
   const stats = tapeStats(evidence);
   const latestValuation = evidence?.latestValuation;
   const threshold = leg.threshold;
@@ -153,7 +245,7 @@ function forecastLeg(input: {
   const distance = latestValuation !== undefined && threshold !== undefined
     ? (threshold - latestValuation) / threshold
     : undefined;
-  const mu = stats.recent7DayDrift !== 0 ? Math.log(1 + stats.recent7DayDrift) : stats.meanDailyLogReturn;
+  const mu = stats.recent7DayAvgDailyDrift !== 0 ? Math.log(1 + stats.recent7DayAvgDailyDrift) : stats.meanDailyLogReturn;
   const sigma = stats.dailyVol;
   const tomorrow = latestValuation !== undefined && threshold !== undefined
     ? pCrossTomorrow(latestValuation, threshold, mu, sigma)
@@ -176,7 +268,18 @@ function forecastLeg(input: {
     edge,
     returnCount: stats.returnCount,
     dailyVol: stats.dailyVol,
-    sourceDateAgeHours: sourceAge,
+    sourceFreshness,
+  });
+  const needed = neededConditions({
+    state: marketRow?.state,
+    distancePct: distance,
+    edge,
+    confidence,
+    yesAsk,
+    depthUnderCap: marketRow?.depthUnderCap ?? 0,
+    recentDrift: stats.recent7DayAvgDailyDrift,
+    sourceFreshness,
+    config,
   });
   const signal = forecastSignal({
     state: marketRow?.state,
@@ -186,8 +289,8 @@ function forecastLeg(input: {
     confidence,
     yesAsk,
     depthUnderCap: marketRow?.depthUnderCap ?? 0,
-    recentDrift: stats.recent7DayDrift,
-    sourceDateAgeHours: sourceAge,
+    recentDrift: stats.recent7DayAvgDailyDrift,
+    sourceFreshness,
     config,
   });
   return {
@@ -204,10 +307,17 @@ function forecastLeg(input: {
     distancePct: distance,
     daysRemaining,
     sourceDateAgeHours: sourceAge,
+    freshnessState: sourceFreshness?.freshnessState ?? "UNKNOWN",
+    expectedNextUpdateAt: sourceFreshness?.expectedNextUpdateAt,
+    lastSuccessfulFetchAt: sourceFreshness?.lastSuccessfulFetchAt,
+    endpointChangedSinceLastFetch: sourceFreshness?.endpointChangedSinceLastFetch ?? false,
+    tapeAdvancedSinceLastFetch: sourceFreshness?.tapeAdvancedSinceLastFetch ?? false,
+    carryForwardLikely: sourceFreshness?.carryForwardLikely ?? false,
+    staleBlockReason: sourceFreshness?.staleBlockReason,
     dailyDrift: stats.meanDailyDrift,
     medianDailyDrift: stats.medianDailyDrift,
-    recent3DayDrift: stats.recent3DayDrift,
-    recent7DayDrift: stats.recent7DayDrift,
+    recent3DayAvgDailyDrift: stats.recent3DayAvgDailyDrift,
+    recent7DayAvgDailyDrift: stats.recent7DayAvgDailyDrift,
     dailyVol: stats.dailyVol,
     maxDailyMove: stats.maxDailyMove,
     pCrossTomorrow: tomorrow,
@@ -221,6 +331,7 @@ function forecastLeg(input: {
     signalType: signal.signalType,
     liveEligible: false,
     reason: signal.reason,
+    needed,
     paperTrade: {
       forecastTime: now.toISOString(),
       entryPrice: yesAsk,
@@ -242,11 +353,17 @@ function forecastSignal(input: {
   yesAsk: number | null;
   depthUnderCap: number;
   recentDrift: number;
-  sourceDateAgeHours?: number;
+  sourceFreshness?: SourceFreshness;
   config: StrategyConfig;
 }): { signalType: SignalType; reason: string } {
-  if (input.sourceDateAgeHours !== undefined && input.sourceDateAgeHours > 48) {
-    return { signalType: "NO_FORECAST_EDGE", reason: "source_date_stale" };
+  if (input.sourceFreshness?.freshnessState === "STALE_ENDPOINT") {
+    return { signalType: "NO_FORECAST_EDGE", reason: "stale_endpoint_blocked" };
+  }
+  if (input.sourceFreshness?.freshnessState === "SOURCE_BLOCKED") {
+    return { signalType: "NO_FORECAST_EDGE", reason: "source_blocked" };
+  }
+  if (!input.sourceFreshness || input.sourceFreshness.freshnessState === "UNKNOWN") {
+    return { signalType: "NO_FORECAST_EDGE", reason: "source_freshness_unknown" };
   }
   if (input.state !== "NEAR_BOUNDARY") {
     return { signalType: "NO_FORECAST_EDGE", reason: `state_${input.state ?? "unknown"}_not_near_boundary` };
@@ -259,6 +376,12 @@ function forecastSignal(input: {
   if (input.confidence < 0.7) return { signalType: "NO_FORECAST_EDGE", reason: "forecast_confidence_below_minimum" };
   if (input.yesAsk === null || input.yesAsk > 0.75) return { signalType: "NO_FORECAST_EDGE", reason: "yes_ask_above_forecast_cap" };
   if (input.depthUnderCap < input.config.minLiquidity) return { signalType: "NO_FORECAST_EDGE", reason: "depth_under_cap_below_minimum" };
+  if (input.sourceFreshness.freshnessState === "MISSED_EXPECTED_UPDATE") {
+    return { signalType: "NPM_MULTI_DAY_BARRIER_FORECAST_YES", reason: "near_boundary_forecast_edge_missed_expected_update_alert_only" };
+  }
+  if (input.sourceFreshness.freshnessState === "FRESH_CARRIED_FORWARD") {
+    return { signalType: "NPM_MULTI_DAY_BARRIER_FORECAST_YES", reason: "near_boundary_forecast_edge_carried_forward_alert_only" };
+  }
   if (input.daysRemaining <= 1) {
     return { signalType: "NPM_NEAR_BOUNDARY_FORECAST_YES", reason: "near_boundary_one_fixing_forecast_edge_alert_only" };
   }
@@ -283,14 +406,54 @@ function confidenceScore(input: {
   edge: number | null;
   returnCount: number;
   dailyVol: number;
-  sourceDateAgeHours?: number;
+  sourceFreshness?: SourceFreshness;
 }): number {
   const distanceScore = input.distancePct === undefined ? 0 : clamp01(1 - Math.max(0, input.distancePct) / 0.02);
   const edgeScore = input.edge === null ? 0 : clamp01(input.edge / 0.25);
   const sampleScore = clamp01(input.returnCount / 7);
   const volScore = input.dailyVol > 0 ? 1 : 0.25;
-  const freshnessScore = input.sourceDateAgeHours === undefined ? 0 : clamp01(1 - Math.max(0, input.sourceDateAgeHours - 24) / 48);
+  const freshnessScore = freshnessConfidence(input.sourceFreshness);
   return round4((distanceScore * 0.25) + (edgeScore * 0.25) + (sampleScore * 0.2) + (volScore * 0.15) + (freshnessScore * 0.15));
+}
+
+function freshnessConfidence(freshness: SourceFreshness | undefined): number {
+  if (!freshness) return 0;
+  if (freshness.freshnessState === "FRESH_NEW_FIXING") return 1;
+  if (freshness.freshnessState === "FRESH_CARRIED_FORWARD") return 0.75;
+  if (freshness.freshnessState === "MISSED_EXPECTED_UPDATE") return 0.45;
+  return 0;
+}
+
+function neededConditions(input: {
+  state?: MarketAuditRow["state"];
+  distancePct?: number;
+  edge: number | null;
+  confidence: number;
+  yesAsk: number | null;
+  depthUnderCap: number;
+  recentDrift: number;
+  sourceFreshness?: SourceFreshness;
+  config: StrategyConfig;
+}): string[] {
+  const needed: string[] = [];
+  const freshness = input.sourceFreshness?.freshnessState ?? "UNKNOWN";
+  if (freshness === "STALE_ENDPOINT") needed.push("freshnessState must not be STALE_ENDPOINT");
+  if (freshness === "SOURCE_BLOCKED") needed.push("source endpoint must fetch successfully");
+  if (freshness === "UNKNOWN") needed.push("source freshness must be known");
+  if (input.state !== "NEAR_BOUNDARY") needed.push("state must be NEAR_BOUNDARY");
+  if (input.distancePct === undefined) needed.push("distancePct must be available");
+  else {
+    if (input.distancePct < 0) needed.push("threshold must not already be crossed");
+    if (input.distancePct > 0.015) needed.push("distancePct must be <= 0.015");
+  }
+  if (input.recentDrift <= 0) needed.push("recent7DayAvgDailyDrift must be positive");
+  if (input.edge === null) needed.push("YES ask must be available to compute edge");
+  else if (input.edge < 0.12) needed.push("modelFairPrice - yesAsk must be >= 0.12");
+  if (input.confidence < 0.7) needed.push("confidenceScore must be >= 0.70");
+  if (input.yesAsk === null) needed.push("YES ask must be available");
+  else if (input.yesAsk > 0.75) needed.push("yesAsk must be <= 0.75");
+  if (input.depthUnderCap < input.config.minLiquidity) needed.push(`depthUnderCap must be >= ${input.config.minLiquidity}`);
+  return needed;
 }
 
 function daysRemainingFromSource(sourceDate: string, deadlineIso: string): number {
@@ -304,6 +467,89 @@ function sourceDateAgeHours(sourceDate: string, now: Date): number | undefined {
   const ts = Date.parse(`${sourceDate}T00:00:00Z`);
   if (!Number.isFinite(ts)) return undefined;
   return Math.max(0, (now.getTime() - ts) / 3_600_000);
+}
+
+function sourceFreshnessForEvidence(
+  company: string,
+  evidence: NpmEvidence,
+  previous: SourceFreshness | undefined,
+  now: Date,
+): SourceFreshness {
+  const fetchedAt = now.toISOString();
+  const latestTapeAgeHours = sourceDateAgeHours(evidence.latestTapeDate, now);
+  const expectedNextUpdateAt = expectedNextUpdate(evidence.latestTapeDate);
+  const expectedUpdateMissed = expectedNextUpdateAt ? now.getTime() > Date.parse(expectedNextUpdateAt) : false;
+  const endpointChangedSinceLastFetch = previous?.rawHash === undefined ? false : previous.rawHash !== evidence.rawHash;
+  const tapeAdvancedSinceLastFetch = previous?.latestTapeDate === undefined ? false : evidence.latestTapeDate > previous.latestTapeDate;
+  const hoursSinceLastFetch = previous?.fetchedAt ? Math.max(0, (now.getTime() - Date.parse(previous.fetchedAt)) / 3_600_000) : undefined;
+  const carryForwardLikely = !tapeAdvancedSinceLastFetch
+    && (endpointChangedSinceLastFetch || previous === undefined)
+    && latestTapeAgeHours !== undefined
+    && latestTapeAgeHours <= 72;
+  const freshnessState = classifySourceFreshness({
+    latestTapeAgeHours,
+    expectedUpdateMissed,
+    endpointChangedSinceLastFetch,
+    tapeAdvancedSinceLastFetch,
+    carryForwardLikely,
+    previous,
+    hoursSinceLastFetch,
+  });
+  return {
+    company,
+    fetchedAt,
+    latestTapeDate: evidence.latestTapeDate,
+    latestTapeAgeHours,
+    expectedNextUpdateAt,
+    lastSuccessfulFetchAt: fetchedAt,
+    endpointFresh: true,
+    endpointChangedSinceLastFetch,
+    tapeAdvancedSinceLastFetch,
+    expectedUpdateMissed,
+    carryForwardLikely,
+    freshnessState,
+    staleBlockReason: staleBlockReason(freshnessState),
+    rawHash: evidence.rawHash,
+  };
+}
+
+function classifySourceFreshness(input: {
+  latestTapeAgeHours?: number;
+  expectedUpdateMissed: boolean;
+  endpointChangedSinceLastFetch: boolean;
+  tapeAdvancedSinceLastFetch: boolean;
+  carryForwardLikely: boolean;
+  previous?: SourceFreshness;
+  hoursSinceLastFetch?: number;
+}): SourceFreshnessState {
+  if (input.tapeAdvancedSinceLastFetch) return "FRESH_NEW_FIXING";
+  if (input.latestTapeAgeHours !== undefined && input.latestTapeAgeHours <= 36) return "FRESH_NEW_FIXING";
+  if (input.carryForwardLikely) return "FRESH_CARRIED_FORWARD";
+  if (
+    input.previous
+    && !input.endpointChangedSinceLastFetch
+    && input.latestTapeAgeHours !== undefined
+    && input.latestTapeAgeHours > 72
+    && input.hoursSinceLastFetch !== undefined
+    && input.hoursSinceLastFetch >= 6
+  ) {
+    return "STALE_ENDPOINT";
+  }
+  if (input.expectedUpdateMissed) return "MISSED_EXPECTED_UPDATE";
+  return "UNKNOWN";
+}
+
+function expectedNextUpdate(latestTapeDate: string): string | undefined {
+  const latest = Date.parse(`${latestTapeDate}T00:00:00Z`);
+  if (!Number.isFinite(latest)) return undefined;
+  return new Date(latest + 36 * 3_600_000).toISOString();
+}
+
+function staleBlockReason(state: SourceFreshnessState): string | undefined {
+  if (state === "STALE_ENDPOINT") return "endpoint_response_unchanged_after_expected_update_window";
+  if (state === "SOURCE_BLOCKED") return "source_fetch_failed";
+  if (state === "UNKNOWN") return "source_freshness_unknown";
+  return undefined;
 }
 
 function compoundDrift(returns: number[]): number {
@@ -378,4 +624,29 @@ function clamp01(value: number): number {
 
 function round4(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringOr(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseFreshnessState(value: unknown): SourceFreshnessState {
+  if (
+    value === "FRESH_NEW_FIXING"
+    || value === "FRESH_CARRIED_FORWARD"
+    || value === "STALE_ENDPOINT"
+    || value === "MISSED_EXPECTED_UPDATE"
+    || value === "SOURCE_BLOCKED"
+    || value === "UNKNOWN"
+  ) return value;
+  return "UNKNOWN";
 }

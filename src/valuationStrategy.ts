@@ -17,7 +17,7 @@ import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJ
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
-import { buildNpmBarrierForecasts } from "./strategy/npmBarrierForecast.ts";
+import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, parseSourceFreshnessSnapshot, sourceFreshnessMap } from "./strategy/npmBarrierForecast.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
@@ -409,11 +409,17 @@ export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<stri
   const top = Math.max(1, Number(args.get("top") ?? 20));
   const state = await collectValuationState(loaded.config);
   const marketRows = await buildMarketAuditRows(loaded, state);
+  const previousFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(loaded.config)));
+  const sourceFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: state.evidenceByCompany,
+    previous: previousFreshness,
+  });
   const forecasts = buildNpmBarrierForecasts({
     legs: state.allLegs,
     evidenceByCompany: state.evidenceByCompany,
     quotes: state.quotes,
     marketRows,
+    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
     config: loaded.config,
   });
   const candidates = forecasts.filter((row) => row.signalType !== "NO_FORECAST_EDGE");
@@ -427,7 +433,11 @@ export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<stri
       legCount: forecasts.length,
       candidateCount: candidates.length,
       nearBoundaryCount: forecasts.filter((row) => row.state === "NEAR_BOUNDARY").length,
-      staleSourceBlockedCount: forecasts.filter((row) => row.reason === "source_date_stale").length,
+      staleSourceBlockedCount: forecasts.filter((row) => row.reason === "stale_endpoint_blocked" || row.reason === "source_blocked" || row.reason === "source_freshness_unknown").length,
+      freshnessStates: Object.values(sourceFreshness.companies).reduce<Record<string, number>>((counts, item) => {
+        counts[item.freshnessState] = (counts[item.freshnessState] ?? 0) + 1;
+        return counts;
+      }, {}),
       maxEdge: forecasts.reduce((max, row) => Math.max(max, row.edge ?? -Infinity), -Infinity),
       minimumProofBeforeLive: {
         forecastCandidates: 30,
@@ -437,6 +447,7 @@ export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<stri
         requiresOutOfSampleEdge: true,
       },
     },
+    sourceFreshness,
     candidates,
     watchlist: forecasts
       .filter((row) => row.state === "NEAR_BOUNDARY" || (row.distancePct !== undefined && row.distancePct >= 0 && row.distancePct <= 0.03))
@@ -445,7 +456,12 @@ export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<stri
   };
   await appendJsonl(join(loaded.config.logsDir, "forecast_audit.jsonl"), report);
   await writeJson(join(loaded.config.stateDir, "last_forecast_audit.json"), report);
+  await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
   return report;
+}
+
+function sourceFreshnessPath(config: StrategyConfig): string {
+  return join(config.stateDir, "source_freshness.json");
 }
 
 async function buildMarketAuditRows(loaded: LoadedStrategyConfig, state: ValuationState): Promise<MarketAuditRow[]> {
