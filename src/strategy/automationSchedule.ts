@@ -7,6 +7,7 @@ export type AutomationPhase =
 export type AutomationTask =
   | "discover"
   | "entry-audit"
+  | "ladder-paper"
   | "forecast-audit"
   | "forecast-paper"
   | "preflight"
@@ -27,6 +28,7 @@ export const AUTOMATION_PHASE_TASKS: Record<AutomationPhase, AutomationTask[]> =
     "discover",
     "forecast-audit",
     "entry-audit",
+    "ladder-paper",
     "forecast-paper",
   ],
   PRE_FIXING_PREP: [
@@ -35,12 +37,14 @@ export const AUTOMATION_PHASE_TASKS: Record<AutomationPhase, AutomationTask[]> =
     "market-audit-strict",
     "forecast-audit",
     "entry-audit",
+    "ladder-paper",
     "forecast-paper",
   ],
   FIXING_WINDOW: [
     "fixing-watch",
     "market-audit-strict",
     "entry-audit",
+    "ladder-paper",
     "forecast-paper",
   ],
   POST_FIXING_REVIEW: [
@@ -49,6 +53,7 @@ export const AUTOMATION_PHASE_TASKS: Record<AutomationPhase, AutomationTask[]> =
     "market-audit-strict",
     "forecast-audit",
     "entry-audit",
+    "ladder-paper",
     "forecast-paper",
     "daily-report",
   ],

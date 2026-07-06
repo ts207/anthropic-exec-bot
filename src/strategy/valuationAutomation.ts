@@ -96,6 +96,13 @@ export function meaningfulAlerts(results: AutomationTaskResult[]): Array<Record<
       if (nearBoundary > 0) alerts.push({ type: "NEAR_BOUNDARY_PASSIVE_BID_PLAN", count: nearBoundary });
       if (rangeSpreads > 0) alerts.push({ type: "RANGE_SPREAD_PAPER_PLAN", count: rangeSpreads });
     }
+    if (item.task === "ladder-paper") {
+      const summary = asRecord(result.summary);
+      const opened = Number(summary.openedThisRun ?? 0);
+      const filled = Number(summary.filledThisRun ?? 0);
+      if (opened > 0) alerts.push({ type: "LADDER_PAPER_OPENED", count: opened });
+      if (filled > 0) alerts.push({ type: "LADDER_PAPER_FILLED", count: filled });
+    }
     if (item.task === "fixing-watch") {
       const summary = asRecord(result.summary);
       const newCross = Number(summary.newCrossCount ?? 0);

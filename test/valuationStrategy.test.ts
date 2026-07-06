@@ -22,6 +22,7 @@ import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSche
 import { runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuationLadderEntries.ts";
+import { updateLadderPaperOrders } from "../src/strategy/ladderPaper.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -654,6 +655,105 @@ test("ladder entry planner keeps far optionality as paper-only passive bid", () 
   assert.equal(plans[0]?.liveEligible, false);
 });
 
+test("ladder entry planner creates adjacent range spread paper candidate", () => {
+  const config = testConfig();
+  const lower = legFixture({ threshold: 1_000, marketSlug: "lower-range" });
+  const higher = legFixture({ threshold: 1_100, marketSlug: "higher-range" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 990 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [lower, higher],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([
+      ["lower-range", quoteFixture(0.2, 0.18)],
+      ["higher-range", quoteFixture(0.8, 0.75)],
+    ]),
+    marketRows: [
+      marketAuditRowFixture({ marketSlug: "lower-range", state: "NEAR_BOUNDARY", yesAsk: 0.2, yesBid: 0.18 }),
+      marketAuditRowFixture({ marketSlug: "higher-range", state: "UNCROSSED", yesAsk: 0.8, yesBid: 0.75 }),
+    ],
+    forecasts: [
+      forecastRowFixture({ company: "Anthropic", marketSlug: "lower-range", threshold: 1_000, pTouchByDeadline: 0.8, modelFairPrice: 0.8 }),
+      forecastRowFixture({ company: "Anthropic", marketSlug: "higher-range", threshold: 1_100, pTouchByDeadline: 0.2, modelFairPrice: 0.2 }),
+    ],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "RANGE_SPREAD_PAPER");
+  assert.equal(plans[0]?.paperEligible, true);
+  assert.equal(plans[0]?.liveEligible, false);
+  assert.equal(plans[0]?.passiveBidPrice, 0.45);
+  assert.equal(plans[0]?.range?.modelRangeProbability, 0.6);
+});
+
+test("ladder paper opens passive orders and fills only when ask reaches bid", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const baseInput = {
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "paper-maker", state: "NEAR_BOUNDARY" })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "paper-maker",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  };
+  const openedPlans = buildLadderEntryPlans({
+    ...baseInput,
+    quotes: new Map([["paper-maker", quoteFixture(0.97, 0.4)]]),
+  });
+  const opened = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans: openedPlans,
+    now: new Date("2026-07-06T12:00:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(opened.opened.length, 1);
+  assert.equal(opened.opened[0]?.status, "working");
+  assert.equal(opened.metrics.filledThisRun, 0);
+
+  const fillPlans = buildLadderEntryPlans({
+    ...baseInput,
+    quotes: new Map([["paper-maker", quoteFixture(0.55, 0.4)]]),
+  });
+  const filled = updateLadderPaperOrders({
+    previous: opened.state,
+    plans: fillPlans,
+    now: new Date("2026-07-06T12:05:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(filled.filled.length, 1);
+  assert.equal(filled.filled[0]?.status, "filled");
+  assert.equal(filled.filled[0]?.fillPrice, 0.56);
+
+  const noDuplicate = updateLadderPaperOrders({
+    previous: {
+      ...filled.state,
+      orders: [
+        ...filled.state.orders.map((order) => ({ ...order, status: "resolved" as const })),
+        ...filled.state.orders.map((order) => ({ ...order, status: "working" as const })),
+      ],
+    },
+    plans: fillPlans,
+    now: new Date("2026-07-06T12:10:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(noDuplicate.opened.length, 0);
+  assert.equal(noDuplicate.state.orders.length, 1);
+});
+
 test("ladder direction rejects ambiguous down-arrow reaches-or-exceeds legs", () => {
   const leg = legFixture({
     question: "Will Stripe's valuation hit ↓$170B by July 31?",
@@ -681,7 +781,7 @@ test("automation dry run lists phase tasks without execution", async () => {
     },
   });
   assert.equal(cycle.phase, "FIXING_WINDOW");
-  assert.deepEqual(cycle.tasks, ["fixing-watch", "market-audit-strict", "entry-audit", "forecast-paper"]);
+  assert.deepEqual(cycle.tasks, ["fixing-watch", "market-audit-strict", "entry-audit", "ladder-paper", "forecast-paper"]);
   assert.equal(cycle.results.every((result) => result.dryRun === true), true);
 });
 

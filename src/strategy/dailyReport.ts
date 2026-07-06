@@ -7,6 +7,7 @@ export type DailyReportInput = {
   marketAudit?: unknown;
   curveAudit?: unknown;
   entryAudit?: unknown;
+  ladderPaper?: unknown;
   discovery?: unknown;
 };
 
@@ -17,6 +18,7 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
   const market = asRecord(input.marketAudit);
   const curve = asRecord(input.curveAudit);
   const entry = asRecord(input.entryAudit);
+  const ladderPaper = asRecord(input.ladderPaper);
   const discovery = asRecord(input.discovery);
   const freshness = asRecord(asRecord(input.sourceFreshness).companies);
   const forecastRows = arrayOfRecords(forecast.rows);
@@ -27,6 +29,7 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
   const marketSummary = asRecord(market.summary);
   const curveSummary = asRecord(curve.summary);
   const entrySummary = asRecord(entry.summary);
+  const ladderPaperSummary = asRecord(ladderPaper.summary);
   return {
     generatedAt: input.generatedAt,
     sourceFreshness: Object.fromEntries(Object.entries(freshness).map(([company, value]) => [
@@ -106,6 +109,13 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
         reason: row.reason,
       })),
     },
+    ladderPaper: {
+      summary: ladderPaperSummary,
+      opened: arrayOfRecords(ladderPaper.opened).map(ladderPaperOrderSummary),
+      filled: arrayOfRecords(ladderPaper.filled).map(ladderPaperOrderSummary),
+      workingOrders: arrayOfRecords(ladderPaper.workingOrders).map(ladderPaperOrderSummary),
+      filledOrders: arrayOfRecords(ladderPaper.filledOrders).map(ladderPaperOrderSummary),
+    },
     discovery: {
       discoveredEventCount: discovery.discoveredEventCount ?? 0,
       accessIssues: discovery.accessIssues ?? [],
@@ -124,7 +134,26 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
       hardCurveViolationCount: Number(curveSummary.hardMonotonicityCount ?? 0),
       passiveBidPlanCount: Number(entrySummary.nearBoundaryPassiveBidCount ?? 0) + Number(entrySummary.farOptionalityBidCount ?? 0) + Number(entrySummary.curveRepairBidCount ?? 0),
       sourceConfirmedTakerPlanCount: Number(entrySummary.strictSourceConfirmedTakerCount ?? 0),
+      ladderPaperOpenedThisRun: Number(ladderPaperSummary.openedThisRun ?? 0),
+      ladderPaperFilledThisRun: Number(ladderPaperSummary.filledThisRun ?? 0),
     },
+  };
+}
+
+function ladderPaperOrderSummary(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    company: row.company,
+    marketSlug: row.marketSlug,
+    pairedMarketSlug: row.pairedMarketSlug,
+    threshold: row.threshold,
+    pairedThreshold: row.pairedThreshold,
+    entryMode: row.entryMode,
+    passiveBidPrice: row.passiveBidPrice,
+    modelFair: row.modelFair,
+    status: row.status,
+    filledAt: row.filledAt,
+    hypotheticalPnl: row.hypotheticalPnl,
+    reason: row.reason,
   };
 }
 

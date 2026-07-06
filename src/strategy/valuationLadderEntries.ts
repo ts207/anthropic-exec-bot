@@ -19,7 +19,9 @@ export type EntryPlan = {
   eventSlug: string;
   marketSlug: string;
   threshold?: number;
+  deadline: string;
   direction: LadderDirection;
+  sourceDate?: string;
   currentValuation?: number;
   maxEligibleValuation?: number;
   distancePct?: number;
@@ -43,6 +45,16 @@ export type EntryPlan = {
   blockers: string[];
   reason: string;
   pairedMarketSlug?: string;
+  range?: {
+    lowerMarketSlug: string;
+    higherMarketSlug: string;
+    lowerThreshold: number;
+    higherThreshold: number;
+    deadline: string;
+    modelRangeProbability: number;
+    combinedCost: number;
+    currentMarkPrice: number | null;
+  };
 };
 
 export function buildLadderEntryPlans(input: {
@@ -57,7 +69,8 @@ export function buildLadderEntryPlans(input: {
   const rows = new Map(input.marketRows.map((row) => [row.marketSlug, row]));
   const forecasts = new Map(input.forecasts.map((row) => [row.marketSlug, row]));
   const curvePlans = curveRepairPlans(input);
-  const curvePlanSlugs = new Set(curvePlans.map((plan) => plan.marketSlug));
+  const rangePlans = rangeSpreadPlans(input);
+  const replacementSlugs = new Set([...curvePlans, ...rangePlans].map((plan) => plan.marketSlug));
   const plans = input.legs
     .filter((leg) => leg.eventKind === "threshold")
     .map((leg) => buildLegEntryPlan({
@@ -68,8 +81,8 @@ export function buildLadderEntryPlans(input: {
       forecast: forecasts.get(leg.marketSlug),
       config: input.config,
     }))
-    .filter((plan) => !curvePlanSlugs.has(plan.marketSlug));
-  return [...plans, ...curvePlans].sort(comparePlans);
+    .filter((plan) => !replacementSlugs.has(plan.marketSlug));
+  return [...plans, ...curvePlans, ...rangePlans].sort(comparePlans);
 }
 
 export function ladderDirection(leg: ValuationLeg): LadderDirection {
@@ -107,6 +120,7 @@ function buildLegEntryPlan(input: {
   const base = planBase({
     leg,
     direction,
+    sourceDate: evidence?.latestTapeDate,
     currentValuation,
     maxEligibleValuation,
     distancePct,
@@ -233,6 +247,74 @@ function curveRepairPlans(input: {
     });
 }
 
+function rangeSpreadPlans(input: {
+  legs: ValuationLeg[];
+  evidenceByCompany: Map<string, NpmEvidence>;
+  quotes: Map<string, BookQuote>;
+  marketRows: MarketAuditRow[];
+  forecasts: ForecastAuditRow[];
+  monotonicity: MonotonicityAudit[];
+  config: StrategyConfig;
+}): EntryPlan[] {
+  const forecastBySlug = new Map(input.forecasts.map((forecast) => [forecast.marketSlug, forecast]));
+  const rows = new Map(input.marketRows.map((row) => [row.marketSlug, row]));
+  const grouped = groupBy(input.legs.filter((leg) => leg.eventKind === "threshold" && leg.threshold !== undefined), (leg) => `${leg.company}\u0000${leg.deadlineIso}\u0000${leg.eventSlug}`);
+  const plans: EntryPlan[] = [];
+  for (const legs of grouped.values()) {
+    const sorted = [...legs].sort((left, right) => (left.threshold ?? 0) - (right.threshold ?? 0));
+    for (let index = 1; index < sorted.length; index += 1) {
+      const lower = sorted[index - 1];
+      const higher = sorted[index];
+      if (!lower || !higher || lower.threshold === undefined || higher.threshold === undefined) continue;
+      if (ladderDirection(lower) !== "UP" || ladderDirection(higher) !== "UP") continue;
+      if ((lower.ruleFamilyHash ?? lower.ruleHash) !== (higher.ruleFamilyHash ?? higher.ruleHash)) continue;
+      const lowerQuote = input.quotes.get(lower.marketSlug);
+      const higherQuote = input.quotes.get(higher.marketSlug);
+      const lowerForecast = forecastBySlug.get(lower.marketSlug);
+      const higherForecast = forecastBySlug.get(higher.marketSlug);
+      if (!lowerQuote || !higherQuote || !lowerForecast || !higherForecast) continue;
+      const lowerAsk = lowerQuote.bestAsk;
+      const higherNoAsk = higherQuote.bestBid === null ? null : round4(1 - higherQuote.bestBid);
+      if (lowerAsk === null || higherNoAsk === null) continue;
+      const modelRangeProbability = Math.max(0, lowerForecast.pTouchByDeadline - higherForecast.pTouchByDeadline);
+      const combinedCost = round4(lowerAsk + higherNoAsk);
+      if (combinedCost >= modelRangeProbability - 0.10) continue;
+      const evidence = input.evidenceByCompany.get(lower.company);
+      const base = buildLegEntryPlan({
+        leg: lower,
+        evidence,
+        quote: lowerQuote,
+        marketRow: rows.get(lower.marketSlug),
+        forecast: lowerForecast,
+        config: input.config,
+      });
+      plans.push({
+        ...base,
+        pairedMarketSlug: higher.marketSlug,
+        modelFair: round4(modelRangeProbability),
+        requiredEdge: 0.10,
+        passiveBidPrice: combinedCost,
+        entryMode: "RANGE_SPREAD_PAPER",
+        paperEligible: true,
+        liveEligible: false,
+        blockers: [],
+        reason: "adjacent_threshold_range_spread_paper_only",
+        range: {
+          lowerMarketSlug: lower.marketSlug,
+          higherMarketSlug: higher.marketSlug,
+          lowerThreshold: lower.threshold,
+          higherThreshold: higher.threshold,
+          deadline: lower.deadlineIso,
+          modelRangeProbability: round4(modelRangeProbability),
+          combinedCost,
+          currentMarkPrice: higherQuote.bestAsk === null ? null : round4((lowerQuote.bestBid ?? 0) + (1 - higherQuote.bestAsk)),
+        },
+      });
+    }
+  }
+  return plans;
+}
+
 function watchOrNoEntryPlan(base: EntryPlan, sourceConfirmed: boolean, structuralBlockers: string[]): EntryPlan {
   const nearEnoughToWatch = base.distancePct !== undefined && base.distancePct >= 0 && base.distancePct <= 0.05;
   const entryMode: EntryMode = nearEnoughToWatch || sourceConfirmed ? "WATCH_ONLY" : "NO_ENTRY";
@@ -273,6 +355,7 @@ function planBase(input: {
   direction: LadderDirection;
   currentValuation?: number;
   maxEligibleValuation?: number;
+  sourceDate?: string;
   distancePct?: number;
   yesAsk: number | null;
   yesBid: number | null;
@@ -287,7 +370,9 @@ function planBase(input: {
     eventSlug: input.leg.eventSlug,
     marketSlug: input.leg.marketSlug,
     threshold: input.leg.threshold,
+    deadline: input.leg.deadlineIso,
     direction: input.direction,
+    sourceDate: input.sourceDate,
     currentValuation: input.currentValuation,
     maxEligibleValuation: input.maxEligibleValuation,
     distancePct: input.distancePct,
@@ -343,4 +428,10 @@ function comparePlans(left: EntryPlan, right: EntryPlan): number {
 
 function round4(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function groupBy<T>(items: T[], keyFn: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) groups.set(keyFn(item), [...(groups.get(keyFn(item)) ?? []), item]);
+  return groups;
 }

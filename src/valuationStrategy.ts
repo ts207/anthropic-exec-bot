@@ -25,10 +25,11 @@ import { buildDailyReport } from "./strategy/dailyReport.ts";
 import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, type EntryPlan } from "./strategy/valuationLadderEntries.ts";
 import { discoverValuationUniverse } from "./strategy/valuationUniverseDiscovery.ts";
+import { ladderPaperPath, parseLadderPaperState, updateLadderPaperOrders } from "./strategy/ladderPaper.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto" | "discover" | "entry-audit";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto" | "discover" | "entry-audit" | "ladder-paper";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -81,6 +82,9 @@ async function main(): Promise<void> {
   }
   if (command === "entry-audit") {
     return print(await entryAudit(loaded, args));
+  }
+  if (command === "ladder-paper") {
+    return print(await ladderPaper(loaded, args));
   }
   if (command === "daily-report") {
     return print(await dailyReport(loaded));
@@ -512,31 +516,7 @@ export async function discoverUniverse(loaded: LoadedStrategyConfig, args: Map<s
 
 export async function entryAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
   const top = Math.max(1, Number(args.get("top") ?? 30));
-  const state = await collectValuationState(loaded.config);
-  const marketRows = await buildMarketAuditRows(loaded, state);
-  const previousFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(loaded.config)));
-  const sourceFreshness = buildSourceFreshnessSnapshot({
-    evidenceByCompany: state.evidenceByCompany,
-    previous: previousFreshness,
-  });
-  const forecasts = buildNpmBarrierForecasts({
-    legs: state.allLegs,
-    evidenceByCompany: state.evidenceByCompany,
-    quotes: state.quotes,
-    marketRows,
-    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
-    config: loaded.config,
-  });
-  const monotonicity = monotonicityAudits(state.curvePoints, state.quotes, loaded.config);
-  const plans = buildLadderEntryPlans({
-    legs: state.allLegs,
-    evidenceByCompany: state.evidenceByCompany,
-    quotes: state.quotes,
-    marketRows,
-    forecasts,
-    monotonicity,
-    config: loaded.config,
-  });
+  const { plans, sourceFreshness } = await entryPlanContext(loaded);
   const actionable = plans.filter((plan) => plan.entryMode !== "NO_ENTRY" && plan.entryMode !== "WATCH_ONLY");
   const report = {
     ok: true,
@@ -555,6 +535,37 @@ export async function entryAudit(loaded: LoadedStrategyConfig, args: Map<string,
   return report;
 }
 
+export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const sizeUsd = Math.max(0.01, Number(args.get("size-usd") ?? 1));
+  const { plans, sourceFreshness } = await entryPlanContext(loaded);
+  const previous = parseLadderPaperState(await readJson(ladderPaperPath(loaded.config)));
+  const update = updateLadderPaperOrders({
+    previous,
+    plans,
+    sizeUsd,
+  });
+  await writeJson(ladderPaperPath(loaded.config), update.state);
+  await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
+  const report = {
+    ok: true,
+    generatedAt: update.state.updatedAt,
+    mode: loaded.config.mode,
+    liveEligible: false,
+    livePolicy: "ladder_paper_is_research_only_until_passive_fills_prove_ev",
+    sizeUsd,
+    summary: update.metrics,
+    opened: update.opened,
+    filled: update.filled,
+    updated: update.updated,
+    workingOrders: update.state.orders.filter((order) => order.status === "working"),
+    filledOrders: update.state.orders.filter((order) => order.status === "filled"),
+    resolvedOrders: update.state.orders.filter((order) => order.status === "resolved"),
+  };
+  await appendJsonl(join(loaded.config.logsDir, "ladder_paper.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_ladder_paper.json"), report);
+  return report;
+}
+
 export async function dailyReport(loaded: LoadedStrategyConfig): Promise<Record<string, unknown>> {
   const report = buildDailyReport({
     generatedAt: new Date().toISOString(),
@@ -565,11 +576,46 @@ export async function dailyReport(loaded: LoadedStrategyConfig): Promise<Record<
     marketAudit: await readJson(join(loaded.config.stateDir, "last_market_audit.json")),
     curveAudit: await readJson(join(loaded.config.stateDir, "last_curve_audit.json")),
     entryAudit: await readJson(join(loaded.config.stateDir, "last_entry_audit.json")),
+    ladderPaper: await readJson(join(loaded.config.stateDir, "last_ladder_paper.json")),
     discovery: await readJson(join(loaded.config.stateDir, "last_discovery.json")),
   });
   await appendJsonl(join(loaded.config.logsDir, "daily_report.jsonl"), report);
   await writeJson(join(loaded.config.stateDir, "last_daily_report.json"), report);
   return report;
+}
+
+async function entryPlanContext(loaded: LoadedStrategyConfig): Promise<{
+  plans: EntryPlan[];
+  sourceFreshness: SourceFreshnessSnapshot;
+}> {
+  const state = await collectValuationState(loaded.config);
+  const marketRows = await buildMarketAuditRows(loaded, state);
+  const previousFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(loaded.config)));
+  const sourceFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: state.evidenceByCompany,
+    previous: previousFreshness,
+  });
+  const forecasts = buildNpmBarrierForecasts({
+    legs: state.allLegs,
+    evidenceByCompany: state.evidenceByCompany,
+    quotes: state.quotes,
+    marketRows,
+    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
+    config: loaded.config,
+  });
+  const monotonicity = monotonicityAudits(state.curvePoints, state.quotes, loaded.config);
+  return {
+    plans: buildLadderEntryPlans({
+      legs: state.allLegs,
+      evidenceByCompany: state.evidenceByCompany,
+      quotes: state.quotes,
+      marketRows,
+      forecasts,
+      monotonicity,
+      config: loaded.config,
+    }),
+    sourceFreshness,
+  };
 }
 
 export async function valuationAuto(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
@@ -643,6 +689,7 @@ async function persistAutomationCycle(config: StrategyConfig, cycle: Record<stri
 async function runAutomationTask(loaded: LoadedStrategyConfig, task: AutomationTask): Promise<unknown> {
   if (task === "discover") return discoverUniverse(loaded);
   if (task === "entry-audit") return entryAudit(loaded);
+  if (task === "ladder-paper") return ladderPaper(loaded);
   if (task === "forecast-audit") return forecastAudit(loaded);
   if (task === "forecast-paper") return forecastPaper(loaded);
   if (task === "preflight") return preflight(loaded);
@@ -761,7 +808,9 @@ function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
     eventSlug: plan.eventSlug,
     marketSlug: plan.marketSlug,
     threshold: plan.threshold,
+    deadline: plan.deadline,
     direction: plan.direction,
+    sourceDate: plan.sourceDate,
     currentValuation: plan.currentValuation,
     maxEligibleValuation: plan.maxEligibleValuation,
     distancePct: plan.distancePct,
@@ -781,6 +830,7 @@ function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
     blockers: plan.blockers,
     reason: plan.reason,
     pairedMarketSlug: plan.pairedMarketSlug,
+    range: plan.range,
   };
 }
 
@@ -1049,7 +1099,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper" || value === "daily-report" || value === "auto" || value === "discover" || value === "entry-audit") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper" || value === "daily-report" || value === "auto" || value === "discover" || value === "entry-audit" || value === "ladder-paper") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 
