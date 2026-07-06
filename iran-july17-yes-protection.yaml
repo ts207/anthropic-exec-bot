@@ -73,7 +73,12 @@ safety:
 
 sources:
   # Fixed article URLs are execution-grade; feed URLs below are discovery/alert-grade by default.
-  poll_urls: []
+  # The Iran liveblog itself rotates to a new URL/slug daily (e.g. .../2026/7/5/...,
+  # .../2026/7/6/...), so it can't be pinned directly. Al Jazeera's "US-Israel war on
+  # Iran" tag page is a stable URL that always surfaces whichever liveblog is current
+  # plus recent standalone updates, so it's polled directly here instead.
+  poll_urls:
+    - "https://www.aljazeera.com/tag/israel-iran-conflict/"
   feed_urls:
     - "https://www.aljazeera.com/xml/rss/all.xml"
   allow_feed_auto_trade: false

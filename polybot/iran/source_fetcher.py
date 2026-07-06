@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import json
@@ -91,6 +92,45 @@ def _is_descendant(node, ancestor) -> bool:
     return False
 
 
+def _apollo_state(markup: str) -> dict | None:
+    """Decode a React/Apollo SSR state blob embedded as base64 in the page.
+
+    Some templates (observed on Al Jazeera liveblogs) render only a truncated
+    preview of the real post body in the DOM, collapsed behind a client-side
+    "Read more" toggle; the full body text exists only in this hydration
+    state. Returns None for pages that don't use this pattern (the common
+    case), so callers must treat it as a best-effort enrichment, not a
+    required step.
+    """
+    match = re.search(r'window\.__APOLLO_STATE__\s*=\s*"([^"]*)"', markup)
+    if not match:
+        return None
+    try:
+        decoded = base64.b64decode(match.group(1)).decode("utf-8")
+        state = json.loads(decoded)
+    except Exception:
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _apollo_post_text(state: dict, url: str) -> str | None:
+    slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+    for value in state.values():
+        if not isinstance(value, dict) or value.get("__typename") != "Post":
+            continue
+        if value.get("slug") != slug:
+            continue
+        content_html = value.get("content")
+        if not content_html:
+            continue
+        body_text = _clean_extracted_text(BeautifulSoup(content_html, "lxml").get_text(separator="\n"))
+        if not body_text:
+            continue
+        parts = [part for part in (value.get("title"), value.get("subheading"), body_text) if part]
+        return "\n\n".join(parts)
+    return None
+
+
 def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
     response = requests.get(url, headers={"User-Agent": user_agent}, timeout=20)
     response.raise_for_status()
@@ -98,6 +138,14 @@ def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
     parser.feed(response.text)
     raw_text = parser.text()
     title = parser.title or _first_line(raw_text) or url
+
+    # Prefer the untruncated Apollo-state body over the DOM text whenever it's
+    # available and actually more complete; never regress below the DOM parse.
+    state = _apollo_state(response.text)
+    if state is not None:
+        apollo_text = _apollo_post_text(state, url)
+        if apollo_text and len(apollo_text) > len(raw_text):
+            raw_text = apollo_text
     fetched_at = datetime.now(timezone.utc).isoformat()
     digest = hashlib.sha256(f"{url}\n{title}\n{raw_text}".encode("utf-8")).hexdigest()
     return Article(
