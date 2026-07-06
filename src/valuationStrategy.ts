@@ -503,11 +503,13 @@ export async function forecastPaper(loaded: LoadedStrategyConfig, args: Map<stri
 
 export async function discoverUniverse(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
   const crawlGamma = args.get("crawl") !== "false" && args.get("crawl") !== "0";
-  const maxPages = Number(args.get("max-pages") ?? 5);
+  const maxPages = Number(args.get("max-pages") ?? 50);
+  const fetchQuotes = args.get("quotes") !== "false" && args.get("quotes") !== "0";
   const report = await discoverValuationUniverse({
     config: loaded.config,
     crawlGamma,
     maxPages,
+    fetchQuotes,
   });
   await appendJsonl(join(loaded.config.logsDir, "discovery.jsonl"), report);
   await writeJson(join(loaded.config.stateDir, "last_discovery.json"), report);

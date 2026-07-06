@@ -1,4 +1,5 @@
 import { fetchGammaEvent, parseGammaEvent, parseValuationLegs } from "./marketParser.ts";
+import { fetchBookQuote } from "./orderbookSource.ts";
 import type { EventConfig, GammaEvent, StrategyConfig, ValuationLeg } from "./signalTypes.ts";
 
 const GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events";
@@ -17,6 +18,7 @@ export type DiscoveredValuationEvent = {
   legCount: number;
   thresholdLegCount: number;
   directionCounts: Record<"UP" | "DOWN" | "UNKNOWN", number>;
+  quoteIssues: string[];
   markets: Array<{
     marketSlug: string;
     question: string;
@@ -24,10 +26,15 @@ export type DiscoveredValuationEvent = {
     direction: "UP" | "DOWN" | "UNKNOWN";
     yesTokenId?: string;
     noTokenId?: string;
+    yesBid: number | null;
+    yesAsk: number | null;
+    noBid: number | null;
+    noAsk: number | null;
     active: boolean;
     closed: boolean;
     acceptingOrders: boolean;
     liquidity: number;
+    ruleText: string;
     ruleHash: string;
     parseStatus: string;
   }>;
@@ -39,8 +46,19 @@ export type ValuationDiscoveryReport = {
   configuredSeedCount: number;
   gammaCrawlEnabled: boolean;
   gammaPagesScanned: number;
+  gammaEventsScanned: number;
+  gammaCrawlExhausted: boolean;
+  maxPagesReached: boolean;
   discoveredEventCount: number;
   accessIssues: string[];
+  coverage: {
+    configuredEventCount: number;
+    configuredThresholdEventCount: number;
+    crawlDiscoveredEventCount: number;
+    configuredSeedFetchFailures: number;
+    eventsWithNpmCompanyId: number;
+    eventsWithQuoteIssues: number;
+  };
   events: DiscoveredValuationEvent[];
 };
 
@@ -49,6 +67,7 @@ export async function discoverValuationUniverse(input: {
   crawlGamma?: boolean;
   maxPages?: number;
   pageSize?: number;
+  fetchQuotes?: boolean;
 }): Promise<ValuationDiscoveryReport> {
   const configured = new Map(input.config.events.map((event) => [event.slug, event]));
   const events = new Map<string, { event: GammaEvent; source: DiscoveredValuationEvent["source"]; config?: EventConfig }>();
@@ -66,19 +85,31 @@ export async function discoverValuationUniverse(input: {
   }
 
   let pagesScanned = 0;
+  let eventsScanned = 0;
+  let gammaCrawlExhausted = input.crawlGamma === false;
+  let maxPagesReached = false;
   if (input.crawlGamma !== false) {
-    const maxPages = Math.max(1, input.maxPages ?? 5);
+    const maxPages = Math.max(1, input.maxPages ?? 50);
     const pageSize = Math.max(20, Math.min(100, input.pageSize ?? 100));
     for (let page = 0; page < maxPages; page += 1) {
       try {
         const rawEvents = await fetchGammaEventsPage(page * pageSize, pageSize);
         pagesScanned += 1;
-        if (!rawEvents.length) break;
+        eventsScanned += rawEvents.length;
+        if (!rawEvents.length) {
+          gammaCrawlExhausted = true;
+          break;
+        }
         for (const raw of rawEvents) {
           const event = parseGammaEvent(raw);
           if (!isValuationEvent(event) || events.has(event.slug)) continue;
           events.set(event.slug, { event, source: "gamma_crawl", config: inferEventConfig(event) });
         }
+        if (rawEvents.length < pageSize) {
+          gammaCrawlExhausted = true;
+          break;
+        }
+        if (page === maxPages - 1) maxPagesReached = true;
       } catch (error) {
         accessIssues.push(`gamma_crawl_failed:page_${page}:${errorMessage(error)}`);
         break;
@@ -86,11 +117,18 @@ export async function discoverValuationUniverse(input: {
     }
   }
 
-  const discovered = [...events.values()]
-    .map(({ event, source, config }) => discoveredEventRow(event, config ?? inferEventConfig(event), source, configured.has(event.slug)))
+  const discovered = (await Promise.all([...events.values()]
+    .map(({ event, source, config }) => discoveredEventRow({
+      event,
+      config: config ?? inferEventConfig(event),
+      source,
+      configured: configured.has(event.slug),
+      fetchQuotes: input.fetchQuotes !== false,
+    }))))
     .sort((left, right) => left.company === right.company
       ? left.eventSlug.localeCompare(right.eventSlug)
       : String(left.company ?? "").localeCompare(String(right.company ?? "")));
+  const configuredFailures = accessIssues.filter((issue) => issue.startsWith("configured_seed_fetch_failed")).length;
 
   return {
     ok: true,
@@ -98,8 +136,19 @@ export async function discoverValuationUniverse(input: {
     configuredSeedCount: input.config.events.length,
     gammaCrawlEnabled: input.crawlGamma !== false,
     gammaPagesScanned: pagesScanned,
+    gammaEventsScanned: eventsScanned,
+    gammaCrawlExhausted,
+    maxPagesReached,
     discoveredEventCount: discovered.length,
     accessIssues,
+    coverage: {
+      configuredEventCount: input.config.events.length,
+      configuredThresholdEventCount: input.config.events.filter((event) => event.kind === "threshold").length,
+      crawlDiscoveredEventCount: discovered.filter((event) => event.source === "gamma_crawl").length,
+      configuredSeedFetchFailures: configuredFailures,
+      eventsWithNpmCompanyId: discovered.filter((event) => event.npmCompanyId).length,
+      eventsWithQuoteIssues: discovered.filter((event) => event.quoteIssues.length > 0).length,
+    },
     events: discovered,
   };
 }
@@ -117,14 +166,18 @@ async function fetchGammaEventsPage(offset: number, limit: number): Promise<unkn
   return Array.isArray(raw) ? raw : [];
 }
 
-function discoveredEventRow(
-  event: GammaEvent,
-  config: EventConfig,
-  source: DiscoveredValuationEvent["source"],
-  configured: boolean,
-): DiscoveredValuationEvent {
+async function discoveredEventRow(input: {
+  event: GammaEvent;
+  config: EventConfig;
+  source: DiscoveredValuationEvent["source"];
+  configured: boolean;
+  fetchQuotes: boolean;
+}): Promise<DiscoveredValuationEvent> {
+  const { event, config, source, configured } = input;
   const legs = parseValuationLegs(event, config);
   const thresholdLegs = legs.filter((leg) => leg.threshold !== undefined);
+  const quotes = input.fetchQuotes ? await quoteLegs(legs) : new Map<string, QuotePair>();
+  const quoteIssues = [...quotes.values()].flatMap((quote) => quote.issues);
   const directionCounts = thresholdLegs.reduce<Record<"UP" | "DOWN" | "UNKNOWN", number>>((counts, leg) => {
     counts[directionFromLeg(leg)] += 1;
     return counts;
@@ -142,6 +195,7 @@ function discoveredEventRow(
     legCount: legs.length,
     thresholdLegCount: thresholdLegs.length,
     directionCounts,
+    quoteIssues,
     markets: legs.map((leg) => ({
       marketSlug: leg.marketSlug,
       question: leg.question,
@@ -149,14 +203,54 @@ function discoveredEventRow(
       direction: directionFromLeg(leg),
       yesTokenId: leg.yesTokenId,
       noTokenId: leg.noTokenId,
+      yesBid: quotes.get(leg.marketSlug)?.yesBid ?? null,
+      yesAsk: quotes.get(leg.marketSlug)?.yesAsk ?? null,
+      noBid: quotes.get(leg.marketSlug)?.noBid ?? null,
+      noAsk: quotes.get(leg.marketSlug)?.noAsk ?? null,
       active: leg.active,
       closed: leg.closed,
       acceptingOrders: leg.acceptingOrders,
       liquidity: leg.liquidity,
+      ruleText: leg.ruleText,
       ruleHash: leg.ruleHash,
       parseStatus: leg.parseStatus,
     })),
   };
+}
+
+type QuotePair = {
+  yesBid: number | null;
+  yesAsk: number | null;
+  noBid: number | null;
+  noAsk: number | null;
+  issues: string[];
+};
+
+async function quoteLegs(legs: ValuationLeg[]): Promise<Map<string, QuotePair>> {
+  const result = new Map<string, QuotePair>();
+  await Promise.all(legs.map(async (leg) => {
+    const pair: QuotePair = { yesBid: null, yesAsk: null, noBid: null, noAsk: null, issues: [] };
+    if (leg.yesTokenId) {
+      try {
+        const quote = await fetchBookQuote(leg.yesTokenId);
+        pair.yesBid = quote.bestBid;
+        pair.yesAsk = quote.bestAsk;
+      } catch (error) {
+        pair.issues.push(`${leg.marketSlug}:yes_quote_failed:${errorMessage(error)}`);
+      }
+    }
+    if (leg.noTokenId) {
+      try {
+        const quote = await fetchBookQuote(leg.noTokenId);
+        pair.noBid = quote.bestBid;
+        pair.noAsk = quote.bestAsk;
+      } catch (error) {
+        pair.issues.push(`${leg.marketSlug}:no_quote_failed:${errorMessage(error)}`);
+      }
+    }
+    result.set(leg.marketSlug, pair);
+  }));
+  return result;
 }
 
 function inferEventConfig(event: GammaEvent): EventConfig {

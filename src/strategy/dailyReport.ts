@@ -118,6 +118,11 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
     },
     discovery: {
       discoveredEventCount: discovery.discoveredEventCount ?? 0,
+      coverage: discovery.coverage ?? null,
+      gammaPagesScanned: discovery.gammaPagesScanned ?? 0,
+      gammaEventsScanned: discovery.gammaEventsScanned ?? 0,
+      gammaCrawlExhausted: discovery.gammaCrawlExhausted ?? false,
+      maxPagesReached: discovery.maxPagesReached ?? false,
       accessIssues: discovery.accessIssues ?? [],
     },
     liveReadiness: {

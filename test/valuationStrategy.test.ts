@@ -23,6 +23,8 @@ import { runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuationLadderEntries.ts";
 import { updateLadderPaperOrders } from "../src/strategy/ladderPaper.ts";
+import { discoverValuationUniverse } from "../src/strategy/valuationUniverseDiscovery.ts";
+import { buildDailyReport } from "../src/strategy/dailyReport.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -762,6 +764,100 @@ test("ladder direction rejects ambiguous down-arrow reaches-or-exceeds legs", ()
   assert.equal(ladderDirection(leg), "UNKNOWN");
 });
 
+test("valuation discovery stores rule text, executable quotes, and crawl coverage", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/events/slug/test-event")) {
+      return jsonResponse({
+        slug: "test-event",
+        title: "Will Stripe's valuation hit by July 31?",
+        description: "This market resolves Yes if NPM reaches or exceeds the listed amount.",
+        resolutionSource: "https://forgeglobal.com/insights/companies/company-6edded11-6786-4392-9695-3cce6fda0de0",
+        markets: [marketFixture("Will Stripe's valuation hit $175B by July 31?", "stripe-175")],
+      });
+    }
+    if (url.includes("gamma-api.polymarket.com/events?")) {
+      return jsonResponse(Array.from({ length: 20 }, (_, index) => ({
+        slug: `non-valuation-${index}`,
+        title: `Non valuation event ${index}`,
+        description: "Unrelated market",
+        markets: [],
+      })));
+    }
+    if (url.includes("token_id=yes-token")) {
+      return jsonResponse({
+        bids: [{ price: "0.56", size: "10" }],
+        asks: [{ price: "0.79", size: "10" }],
+      });
+    }
+    if (url.includes("token_id=no-token")) {
+      return jsonResponse({
+        bids: [{ price: "0.21", size: "10" }],
+        asks: [{ price: "0.44", size: "10" }],
+      });
+    }
+    return new Response("not found", { status: 404, statusText: "Not Found" });
+  }) as typeof fetch;
+  try {
+    const report = await discoverValuationUniverse({
+      config: testConfig(),
+      crawlGamma: true,
+      maxPages: 1,
+      pageSize: 20,
+    });
+    assert.equal(report.discoveredEventCount, 1);
+    assert.equal(report.gammaPagesScanned, 1);
+    assert.equal(report.gammaEventsScanned, 20);
+    assert.equal(report.gammaCrawlExhausted, false);
+    assert.equal(report.maxPagesReached, true);
+    assert.equal(report.coverage.configuredEventCount, 1);
+    assert.equal(report.coverage.configuredThresholdEventCount, 1);
+    assert.equal(report.coverage.configuredSeedFetchFailures, 0);
+    assert.equal(report.coverage.eventsWithNpmCompanyId, 1);
+    assert.equal(report.coverage.eventsWithQuoteIssues, 0);
+    assert.equal(report.events[0]?.npmCompanyId, "company-6edded11-6786-4392-9695-3cce6fda0de0");
+    assert.equal(report.events[0]?.npmSourceUrl?.includes("forgeglobal.com"), true);
+    assert.equal(report.events[0]?.markets[0]?.ruleText.includes("reaches or exceeds"), true);
+    assert.equal(report.events[0]?.markets[0]?.yesBid, 0.56);
+    assert.equal(report.events[0]?.markets[0]?.yesAsk, 0.79);
+    assert.equal(report.events[0]?.markets[0]?.noBid, 0.21);
+    assert.equal(report.events[0]?.markets[0]?.noAsk, 0.44);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("daily report exposes discovery coverage and crawl completeness", () => {
+  const report = buildDailyReport({
+    generatedAt: "2026-07-06T00:00:00Z",
+    discovery: {
+      discoveredEventCount: 5,
+      coverage: {
+        configuredEventCount: 7,
+        configuredThresholdEventCount: 5,
+        crawlDiscoveredEventCount: 0,
+        configuredSeedFetchFailures: 0,
+        eventsWithNpmCompanyId: 5,
+        eventsWithQuoteIssues: 1,
+      },
+      gammaPagesScanned: 10,
+      gammaEventsScanned: 1000,
+      gammaCrawlExhausted: false,
+      maxPagesReached: true,
+      accessIssues: ["quote_failed"],
+    },
+  });
+  const discovery = report.discovery as Record<string, unknown>;
+  assert.equal(discovery.discoveredEventCount, 5);
+  assert.equal(discovery.gammaPagesScanned, 10);
+  assert.equal(discovery.gammaEventsScanned, 1000);
+  assert.equal(discovery.gammaCrawlExhausted, false);
+  assert.equal(discovery.maxPagesReached, true);
+  assert.deepEqual((discovery.coverage as Record<string, unknown>).eventsWithQuoteIssues, 1);
+  assert.deepEqual(discovery.accessIssues, ["quote_failed"]);
+});
+
 test("automation schedule resolves expected NPM fixing phases", () => {
   const expected = new Date("2026-07-06T17:00:00Z");
   assert.equal(phaseForNow(new Date("2026-07-06T16:15:00Z"), expected), "PRE_FIXING_PREP");
@@ -895,6 +991,13 @@ function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): B
       { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
     ],
   };
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 function marketAuditRowFixture(overrides: Partial<ReturnType<typeof buildMarketAuditRow>> = {}): ReturnType<typeof buildMarketAuditRow> {
