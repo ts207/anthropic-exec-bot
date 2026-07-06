@@ -890,6 +890,64 @@ test("ladder paper opens passive orders and fills only when ask reaches bid", ()
   assert.equal(noDuplicate.state.orders.length, 1);
 });
 
+test("ladder paper cancels stale passive bids before NPM fixing", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const baseInput = {
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "paper-maker", state: "NEAR_BOUNDARY" })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "paper-maker",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      modelFairPrice: 0.68,
+    })],
+    quotes: new Map([["paper-maker", quoteFixture(0.97, 0.4)]]),
+    monotonicity: [],
+    config,
+  };
+  const plans = buildLadderEntryPlans(baseInput);
+  const opened = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans,
+    now: new Date("2026-07-06T16:00:00Z"),
+    sizeUsd: 1,
+    nextFixingAt: new Date("2026-07-06T17:00:00Z"),
+    cancelBeforeFixingMs: 10 * 60_000,
+  });
+  assert.equal(opened.opened[0]?.status, "working");
+
+  const held = updateLadderPaperOrders({
+    previous: opened.state,
+    plans,
+    now: new Date("2026-07-06T16:45:00Z"),
+    sizeUsd: 1,
+    nextFixingAt: new Date("2026-07-06T17:00:00Z"),
+    cancelBeforeFixingMs: 10 * 60_000,
+  });
+  assert.equal(held.state.orders[0]?.status, "working");
+
+  const cancelled = updateLadderPaperOrders({
+    previous: opened.state,
+    plans,
+    now: new Date("2026-07-06T16:55:00Z"),
+    sizeUsd: 1,
+    nextFixingAt: new Date("2026-07-06T17:00:00Z"),
+    cancelBeforeFixingMs: 10 * 60_000,
+  });
+  assert.equal(cancelled.state.orders[0]?.status, "cancelled");
+  assert.equal(cancelled.state.orders[0]?.cancelReason, "cancel_before_npm_fixing_model_fair_stale");
+  assert.equal(cancelled.opened.length, 0);
+});
+
 test("ladder paper proof summarizes passive-fill evidence without enabling live", () => {
   const orders = Array.from({ length: 30 }, (_, index) => ladderPaperOrderFixture({
     id: `near-${index}`,

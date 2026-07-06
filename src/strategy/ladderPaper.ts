@@ -104,6 +104,8 @@ export function updateLadderPaperOrders(input: {
   plans: EntryPlan[];
   now?: Date;
   sizeUsd?: number;
+  nextFixingAt?: Date;
+  cancelBeforeFixingMs?: number;
 }): LadderPaperUpdate {
   const now = input.now ?? new Date();
   const sizeUsd = input.sizeUsd ?? 1;
@@ -116,7 +118,11 @@ export function updateLadderPaperOrders(input: {
     const order = orders[index];
     if (!order || order.status === "resolved" || order.status === "cancelled") continue;
     const plan = plansByKey.get(order.id);
-    const next = updateOpenOrder(order, plan, now);
+    const next = updateOpenOrder(order, plan, {
+      now,
+      nextFixingAt: input.nextFixingAt,
+      cancelBeforeFixingMs: input.cancelBeforeFixingMs,
+    });
     orders[index] = next;
     if (next !== order) {
       updated.push(next);
@@ -194,10 +200,18 @@ function openOrder(plan: EntryPlan, now: Date, sizeUsd: number): LadderPaperOrde
   };
 }
 
-function updateOpenOrder(order: LadderPaperOrder, plan: EntryPlan | undefined, now: Date): LadderPaperOrder {
+function updateOpenOrder(
+  order: LadderPaperOrder,
+  plan: EntryPlan | undefined,
+  timing: { now: Date; nextFixingAt?: Date; cancelBeforeFixingMs?: number },
+): LadderPaperOrder {
+  const { now } = timing;
   if (!plan) return cancelOrder(order, "entry_plan_no_longer_available");
   if (plan.blockers.some((blocker) => blocker === "direction_semantics_unknown" || blocker === "market_not_accepting_orders" || blocker === "malformed_or_unsupported_leg")) {
     return cancelOrder(order, `cancelled_by_blocker:${plan.blockers.join(",")}`);
+  }
+  if (order.status === "working" && shouldCancelBeforeFixing(order, plan, timing)) {
+    return cancelOrder(order, "cancel_before_npm_fixing_model_fair_stale");
   }
   if (plan.currentValuation !== undefined && order.currentValuation !== undefined && plan.threshold !== undefined) {
     const movedAway = Math.max(0, plan.distancePct ?? 0) > Math.max(0, order.distancePct ?? 0) + 0.025;
@@ -226,6 +240,18 @@ function updateOpenOrder(order: LadderPaperOrder, plan: EntryPlan | undefined, n
     }
   }
   return JSON.stringify(next) === JSON.stringify(order) ? order : next;
+}
+
+function shouldCancelBeforeFixing(
+  order: LadderPaperOrder,
+  plan: EntryPlan,
+  timing: { now: Date; nextFixingAt?: Date; cancelBeforeFixingMs?: number },
+): boolean {
+  if (!timing.nextFixingAt || !timing.cancelBeforeFixingMs || timing.cancelBeforeFixingMs <= 0) return false;
+  const msUntilFixing = timing.nextFixingAt.getTime() - timing.now.getTime();
+  if (msUntilFixing < 0 || msUntilFixing > timing.cancelBeforeFixingMs) return false;
+  if (order.entryMode === "RANGE_SPREAD_PAPER") return false;
+  return order.sourceDate === undefined || order.sourceDate === plan.sourceDate;
 }
 
 function wouldPassiveBidFill(plan: EntryPlan, bidPrice: number): boolean {

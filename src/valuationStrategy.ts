@@ -19,7 +19,7 @@ import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type Mono
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, parseSourceFreshnessSnapshot, sourceFreshnessMap, type ForecastAuditRow, type SourceFreshnessSnapshot } from "./strategy/npmBarrierForecast.ts";
 import { forecastPaperPath, parseForecastPaperState, updateForecastPaperTrades } from "./strategy/forecastPaper.ts";
-import { parseAutomationPhase, type AutomationTask } from "./strategy/automationSchedule.ts";
+import { expectedNpmUpdateAt, parseAutomationPhase, type AutomationTask } from "./strategy/automationSchedule.ts";
 import { runAutomationCycle } from "./strategy/valuationAutomation.ts";
 import { buildDailyReport } from "./strategy/dailyReport.ts";
 import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
@@ -539,12 +539,16 @@ export async function entryAudit(loaded: LoadedStrategyConfig, args: Map<string,
 
 export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
   const sizeUsd = Math.max(0.01, Number(args.get("size-usd") ?? 1));
+  const now = new Date();
   const { plans, sourceFreshness } = await entryPlanContext(loaded);
   const previous = parseLadderPaperState(await readJson(ladderPaperPath(loaded.config)));
   const update = updateLadderPaperOrders({
     previous,
     plans,
+    now,
     sizeUsd,
+    nextFixingAt: expectedNpmUpdateAt(now, loaded.config.npmUpdate),
+    cancelBeforeFixingMs: 10 * 60_000,
   });
   await writeJson(ladderPaperPath(loaded.config), update.state);
   await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
