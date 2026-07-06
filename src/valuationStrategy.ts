@@ -23,10 +23,12 @@ import { parseAutomationPhase, type AutomationTask } from "./strategy/automation
 import { runAutomationCycle } from "./strategy/valuationAutomation.ts";
 import { buildDailyReport } from "./strategy/dailyReport.ts";
 import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
+import { buildLadderEntryPlans, type EntryPlan } from "./strategy/valuationLadderEntries.ts";
+import { discoverValuationUniverse } from "./strategy/valuationUniverseDiscovery.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto" | "discover" | "entry-audit";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -73,6 +75,12 @@ async function main(): Promise<void> {
   }
   if (command === "forecast-paper") {
     return print(await forecastPaper(loaded, args));
+  }
+  if (command === "discover") {
+    return print(await discoverUniverse(loaded, args));
+  }
+  if (command === "entry-audit") {
+    return print(await entryAudit(loaded, args));
   }
   if (command === "daily-report") {
     return print(await dailyReport(loaded));
@@ -489,6 +497,64 @@ export async function forecastPaper(loaded: LoadedStrategyConfig, args: Map<stri
   return report;
 }
 
+export async function discoverUniverse(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const crawlGamma = args.get("crawl") !== "false" && args.get("crawl") !== "0";
+  const maxPages = Number(args.get("max-pages") ?? 5);
+  const report = await discoverValuationUniverse({
+    config: loaded.config,
+    crawlGamma,
+    maxPages,
+  });
+  await appendJsonl(join(loaded.config.logsDir, "discovery.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_discovery.json"), report);
+  return report;
+}
+
+export async function entryAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const top = Math.max(1, Number(args.get("top") ?? 30));
+  const state = await collectValuationState(loaded.config);
+  const marketRows = await buildMarketAuditRows(loaded, state);
+  const previousFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(loaded.config)));
+  const sourceFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: state.evidenceByCompany,
+    previous: previousFreshness,
+  });
+  const forecasts = buildNpmBarrierForecasts({
+    legs: state.allLegs,
+    evidenceByCompany: state.evidenceByCompany,
+    quotes: state.quotes,
+    marketRows,
+    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
+    config: loaded.config,
+  });
+  const monotonicity = monotonicityAudits(state.curvePoints, state.quotes, loaded.config);
+  const plans = buildLadderEntryPlans({
+    legs: state.allLegs,
+    evidenceByCompany: state.evidenceByCompany,
+    quotes: state.quotes,
+    marketRows,
+    forecasts,
+    monotonicity,
+    config: loaded.config,
+  });
+  const actionable = plans.filter((plan) => plan.entryMode !== "NO_ENTRY" && plan.entryMode !== "WATCH_ONLY");
+  const report = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    mode: loaded.config.mode,
+    liveEligible: false,
+    livePolicy: "entry_audit_is_planning_only_maker_entries_are_paper_until_promoted",
+    summary: entryAuditSummary(plans),
+    topPlans: plans.slice(0, top).map(entryPlanSummary),
+    actionablePlans: actionable.slice(0, top).map(entryPlanSummary),
+    plans: plans.map(entryPlanSummary),
+  };
+  await appendJsonl(join(loaded.config.logsDir, "entry_audit.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_entry_audit.json"), report);
+  await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
+  return report;
+}
+
 export async function dailyReport(loaded: LoadedStrategyConfig): Promise<Record<string, unknown>> {
   const report = buildDailyReport({
     generatedAt: new Date().toISOString(),
@@ -498,6 +564,8 @@ export async function dailyReport(loaded: LoadedStrategyConfig): Promise<Record<
     fixingWatch: await readJson(join(loaded.config.stateDir, "last_fixing_watch.json")),
     marketAudit: await readJson(join(loaded.config.stateDir, "last_market_audit.json")),
     curveAudit: await readJson(join(loaded.config.stateDir, "last_curve_audit.json")),
+    entryAudit: await readJson(join(loaded.config.stateDir, "last_entry_audit.json")),
+    discovery: await readJson(join(loaded.config.stateDir, "last_discovery.json")),
   });
   await appendJsonl(join(loaded.config.logsDir, "daily_report.jsonl"), report);
   await writeJson(join(loaded.config.stateDir, "last_daily_report.json"), report);
@@ -573,6 +641,8 @@ async function persistAutomationCycle(config: StrategyConfig, cycle: Record<stri
 }
 
 async function runAutomationTask(loaded: LoadedStrategyConfig, task: AutomationTask): Promise<unknown> {
+  if (task === "discover") return discoverUniverse(loaded);
+  if (task === "entry-audit") return entryAudit(loaded);
   if (task === "forecast-audit") return forecastAudit(loaded);
   if (task === "forecast-paper") return forecastPaper(loaded);
   if (task === "preflight") return preflight(loaded);
@@ -657,6 +727,60 @@ function marketRowSummary(row: MarketAuditRow): Record<string, unknown> {
     tradeBand: row.tradeBand,
     liveBlockers: row.liveBlockers,
     reason: row.reason,
+  };
+}
+
+function entryAuditSummary(plans: EntryPlan[]): Record<string, unknown> {
+  const counts = plans.reduce<Record<string, number>>((result, plan) => {
+    result[plan.entryMode] = (result[plan.entryMode] ?? 0) + 1;
+    return result;
+  }, {});
+  const strictSourceConfirmed = plans.filter((plan) => (
+    plan.entryMode === "TAKER_SOURCE_CONFIRMED"
+    && !plan.blockers.includes("not_strict_stale_source_confirmed")
+  ));
+  return {
+    planCount: plans.length,
+    sourceConfirmedTakerCount: counts.TAKER_SOURCE_CONFIRMED ?? 0,
+    strictSourceConfirmedTakerCount: strictSourceConfirmed.length,
+    nearBoundaryPassiveBidCount: counts.MAKER_NEAR_BOUNDARY_BID ?? 0,
+    farOptionalityBidCount: counts.MAKER_FAR_OPTIONALITY_BID ?? 0,
+    curveRepairBidCount: counts.MAKER_CURVE_REPAIR_BID ?? 0,
+    rangeSpreadPaperCount: counts.RANGE_SPREAD_PAPER ?? 0,
+    watchOnlyCount: counts.WATCH_ONLY ?? 0,
+    noEntryCount: counts.NO_ENTRY ?? 0,
+    paperEligibleCount: plans.filter((plan) => plan.paperEligible).length,
+    liveEligibleCount: plans.filter((plan) => plan.liveEligible).length,
+    modeCounts: counts,
+  };
+}
+
+function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
+  return {
+    company: plan.company,
+    eventSlug: plan.eventSlug,
+    marketSlug: plan.marketSlug,
+    threshold: plan.threshold,
+    direction: plan.direction,
+    currentValuation: plan.currentValuation,
+    maxEligibleValuation: plan.maxEligibleValuation,
+    distancePct: plan.distancePct,
+    yesAsk: plan.yesAsk,
+    yesBid: plan.yesBid,
+    noAsk: plan.noAsk,
+    noBid: plan.noBid,
+    modelFair: plan.modelFair,
+    requiredEdge: plan.requiredEdge,
+    passiveBidPrice: plan.passiveBidPrice,
+    maxTakerPrice: plan.maxTakerPrice,
+    entryMode: plan.entryMode,
+    paperEligible: plan.paperEligible,
+    liveEligible: plan.liveEligible,
+    activation: plan.activation,
+    cancelRules: plan.cancelRules,
+    blockers: plan.blockers,
+    reason: plan.reason,
+    pairedMarketSlug: plan.pairedMarketSlug,
   };
 }
 
@@ -925,7 +1049,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper" || value === "daily-report" || value === "auto") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper" || value === "daily-report" || value === "auto" || value === "discover" || value === "entry-audit") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 

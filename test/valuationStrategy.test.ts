@@ -21,6 +21,7 @@ import { isPaperOpenTrigger, updateForecastPaperTrades } from "../src/strategy/f
 import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSchedule.ts";
 import { runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
+import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuationLadderEntries.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -554,6 +555,113 @@ test("forecast paper updates after fixing and scores resolved touch", () => {
   assert.equal(updated.metrics.totalHypotheticalPnl, 0.8182);
 });
 
+test("ladder entry planner creates near-boundary passive maker bid without crossing ask", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "stripe-175" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+    tape_d_prices: [
+      { date: "2026-07-05", implied_valuation: 980 },
+      { date: "2026-07-06", implied_valuation: 993 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["stripe-175", quoteFixture(0.97, 0.4)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "stripe-175", state: "NEAR_BOUNDARY", yesAsk: 0.97, yesBid: 0.4 })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "stripe-175",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      yesAsk: 0.97,
+      yesBid: 0.4,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "MAKER_NEAR_BOUNDARY_BID");
+  assert.equal(plans[0]?.passiveBidPrice, 0.56);
+  assert.equal(plans[0]?.paperEligible, true);
+  assert.equal(plans[0]?.liveEligible, false);
+});
+
+test("ladder entry planner allows source-confirmed taker only for strict stale legs", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "crossed" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 1_010 },
+    tape_d_prices: [
+      { date: "2026-07-05", implied_valuation: 990 },
+      { date: "2026-07-06", implied_valuation: 1_010 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["crossed", quoteFixture(0.81, 0.78)]]),
+    marketRows: [marketAuditRowFixture({
+      marketSlug: "crossed",
+      state: "NEWLY_CROSSED",
+      crossedQuality: "SOURCE_CONFIRMED_AND_STALE",
+      yesAsk: 0.81,
+      yesBid: 0.78,
+      depthUnderCap: 100,
+      liveBlockers: [],
+    })],
+    forecasts: [],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "TAKER_SOURCE_CONFIRMED");
+  assert.equal(plans[0]?.liveEligible, true);
+});
+
+test("ladder entry planner keeps far optionality as paper-only passive bid", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_200, marketSlug: "far" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 1_000 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["far", quoteFixture(0.12, 0.08)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "far", state: "FAR_ABOVE", yesAsk: 0.12, yesBid: 0.08 })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "far",
+      threshold: 1_200,
+      state: "FAR_ABOVE",
+      latestValuation: 1_000,
+      maxEligibleValuation: 1_000,
+      distancePct: 0.1667,
+      yesAsk: 0.12,
+      yesBid: 0.08,
+      modelFairPrice: 0.18,
+    })],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "MAKER_FAR_OPTIONALITY_BID");
+  assert.equal(plans[0]?.passiveBidPrice, 0.078);
+  assert.equal(plans[0]?.paperEligible, true);
+  assert.equal(plans[0]?.liveEligible, false);
+});
+
+test("ladder direction rejects ambiguous down-arrow reaches-or-exceeds legs", () => {
+  const leg = legFixture({
+    question: "Will Stripe's valuation hit ↓$170B by July 31?",
+    ruleText: "This market resolves Yes if NPM reports Stripe reaches or exceeds the listed amount.",
+  });
+  assert.equal(ladderDirection(leg), "UNKNOWN");
+});
+
 test("automation schedule resolves expected NPM fixing phases", () => {
   const expected = new Date("2026-07-06T17:00:00Z");
   assert.equal(phaseForNow(new Date("2026-07-06T16:15:00Z"), expected), "PRE_FIXING_PREP");
@@ -573,7 +681,7 @@ test("automation dry run lists phase tasks without execution", async () => {
     },
   });
   assert.equal(cycle.phase, "FIXING_WINDOW");
-  assert.deepEqual(cycle.tasks, ["fixing-watch", "market-audit-strict", "forecast-paper"]);
+  assert.deepEqual(cycle.tasks, ["fixing-watch", "market-audit-strict", "entry-audit", "forecast-paper"]);
   assert.equal(cycle.results.every((result) => result.dryRun === true), true);
 });
 

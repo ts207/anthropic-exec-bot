@@ -5,6 +5,8 @@ export type AutomationPhase =
   | "POST_FIXING_REVIEW";
 
 export type AutomationTask =
+  | "discover"
+  | "entry-audit"
   | "forecast-audit"
   | "forecast-paper"
   | "preflight"
@@ -22,24 +24,31 @@ export const AUTOMATION_INTERVALS_MS: Record<AutomationPhase, number> = {
 
 export const AUTOMATION_PHASE_TASKS: Record<AutomationPhase, AutomationTask[]> = {
   LOW_FREQUENCY_MONITOR: [
+    "discover",
     "forecast-audit",
+    "entry-audit",
     "forecast-paper",
   ],
   PRE_FIXING_PREP: [
+    "discover",
     "preflight",
     "market-audit-strict",
     "forecast-audit",
+    "entry-audit",
     "forecast-paper",
   ],
   FIXING_WINDOW: [
     "fixing-watch",
     "market-audit-strict",
+    "entry-audit",
     "forecast-paper",
   ],
   POST_FIXING_REVIEW: [
+    "discover",
     "fixing-watch",
     "market-audit-strict",
     "forecast-audit",
+    "entry-audit",
     "forecast-paper",
     "daily-report",
   ],

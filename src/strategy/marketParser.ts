@@ -19,6 +19,7 @@ export function parseGammaEvent(raw: unknown): GammaEvent {
     slug: requiredString(record.slug, "event.slug"),
     title: stringOr(record.title, ""),
     description: stringOr(record.description, ""),
+    resolutionSource: optionalString(record.resolutionSource ?? record.resolution_source),
     markets,
     rawHash: sha256(JSON.stringify(raw)),
   };
@@ -29,6 +30,7 @@ export function parseValuationLegs(event: GammaEvent, config: EventConfig): Valu
     const question = stringOr(market.question ?? market.title, "");
     const ruleText = [
       event.description,
+      event.resolutionSource,
       stringOr(market.description, ""),
       stringOr(market.rules, ""),
       stringOr(market.resolutionSource, ""),

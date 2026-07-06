@@ -56,7 +56,8 @@
       "npmCompanyId": "company-802a7f97-3625-4614-a13d-d999cf139330"
     },
     {
-      "name": "Stripe"
+      "name": "Stripe",
+      "npmCompanyId": "company-6edded11-6786-4392-9695-3cce6fda0de0"
     },
     {
       "name": "Kraken"
@@ -78,7 +79,8 @@
       "name": "Anduril"
     },
     {
-      "name": "Databricks"
+      "name": "Databricks",
+      "npmCompanyId": "company-53787f17-a704-47a9-895a-cb54833bdb1f"
     }
   ],
   "events": [
@@ -100,6 +102,20 @@
       "slug": "will-perplexitys-valuation-hit-by-july-31-20260629173034234",
       "kind": "threshold",
       "companyName": "Perplexity",
+      "deadlineIso": "2026-08-01T03:59:59Z",
+      "marketWindowStartIso": "2026-06-29T00:00:00Z"
+    },
+    {
+      "slug": "will-stripes-valuation-hit-by-july-31-20260629182809316",
+      "kind": "threshold",
+      "companyName": "Stripe",
+      "deadlineIso": "2026-08-01T03:59:59Z",
+      "marketWindowStartIso": "2026-06-29T00:00:00Z"
+    },
+    {
+      "slug": "will-databricks-valuation-hit-by-july-31-20260629172513776",
+      "kind": "threshold",
+      "companyName": "Databricks",
       "deadlineIso": "2026-08-01T03:59:59Z",
       "marketWindowStartIso": "2026-06-29T00:00:00Z"
     },

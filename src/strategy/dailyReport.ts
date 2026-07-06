@@ -6,6 +6,8 @@ export type DailyReportInput = {
   fixingWatch?: unknown;
   marketAudit?: unknown;
   curveAudit?: unknown;
+  entryAudit?: unknown;
+  discovery?: unknown;
 };
 
 export function buildDailyReport(input: DailyReportInput): Record<string, unknown> {
@@ -14,6 +16,8 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
   const fixing = asRecord(input.fixingWatch);
   const market = asRecord(input.marketAudit);
   const curve = asRecord(input.curveAudit);
+  const entry = asRecord(input.entryAudit);
+  const discovery = asRecord(input.discovery);
   const freshness = asRecord(asRecord(input.sourceFreshness).companies);
   const forecastRows = arrayOfRecords(forecast.rows);
   const watchlist = arrayOfRecords(forecast.watchlist);
@@ -22,6 +26,7 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
   const fixingSummary = asRecord(fixing.summary);
   const marketSummary = asRecord(market.summary);
   const curveSummary = asRecord(curve.summary);
+  const entrySummary = asRecord(entry.summary);
   return {
     generatedAt: input.generatedAt,
     sourceFreshness: Object.fromEntries(Object.entries(freshness).map(([company, value]) => [
@@ -82,9 +87,32 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
       count: curveSummary.hardMonotonicityCount ?? 0,
       rows: arrayOfRecords(curve.monotonicityViolations),
     },
+    ladderEntries: {
+      summary: entrySummary,
+      actionablePlans: arrayOfRecords(entry.actionablePlans).map((row) => ({
+        company: row.company,
+        marketSlug: row.marketSlug,
+        threshold: row.threshold,
+        entryMode: row.entryMode,
+        direction: row.direction,
+        distancePct: row.distancePct,
+        yesAsk: row.yesAsk,
+        yesBid: row.yesBid,
+        modelFair: row.modelFair,
+        passiveBidPrice: row.passiveBidPrice,
+        paperEligible: row.paperEligible,
+        liveEligible: row.liveEligible,
+        blockers: row.blockers,
+        reason: row.reason,
+      })),
+    },
+    discovery: {
+      discoveredEventCount: discovery.discoveredEventCount ?? 0,
+      accessIssues: discovery.accessIssues ?? [],
+    },
     liveReadiness: {
       forecastLive: false,
-      sourceConfirmedLive: false,
+      sourceConfirmedLive: Number(entrySummary.liveEligibleCount ?? 0) > 0,
       reason: "paper_trade_sample_size_insufficient",
     },
     summary: {
@@ -94,6 +122,8 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
       newlyCrossedCount: Number(fixingSummary.newCrossCount ?? 0),
       strictStaleCrossedCount: Number(marketSummary.strictCrossedLegCount ?? 0),
       hardCurveViolationCount: Number(curveSummary.hardMonotonicityCount ?? 0),
+      passiveBidPlanCount: Number(entrySummary.nearBoundaryPassiveBidCount ?? 0) + Number(entrySummary.farOptionalityBidCount ?? 0) + Number(entrySummary.curveRepairBidCount ?? 0),
+      sourceConfirmedTakerPlanCount: Number(entrySummary.strictSourceConfirmedTakerCount ?? 0),
     },
   };
 }

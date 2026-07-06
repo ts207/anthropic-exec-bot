@@ -93,6 +93,7 @@ export type GammaEvent = {
   slug: string;
   title: string;
   description: string;
+  resolutionSource?: string;
   markets: Record<string, unknown>[];
   rawHash: string;
 };
