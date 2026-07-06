@@ -15,10 +15,11 @@ import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
 import { executeCandidate, postedProbe } from "./strategy/betaExecution.ts";
 import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
+import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -52,7 +53,10 @@ async function main(): Promise<void> {
     return print(await auditCandidates(loaded, args));
   }
   if (command === "curve-audit") {
-    return print(await curveAudit(loaded));
+    return print(await curveAudit(loaded, args));
+  }
+  if (command === "market-audit") {
+    return print(await marketAudit(loaded, args));
   }
   if (command === "run") {
     for (;;) {
@@ -162,35 +166,50 @@ function compactCandidate(candidate: ValuationCandidate): Record<string, unknown
   };
 }
 
-export async function curveAudit(loaded: LoadedStrategyConfig): Promise<Record<string, unknown>> {
+export async function curveAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
   const config = loaded.config;
+  const strict = args.get("strict") === "true" || args.get("strict") === "1";
   const state = await collectValuationState(config);
   const curves = buildImpliedCurves(state.curvePoints);
   const rankingLegs = state.allLegs.filter((leg) => leg.eventKind === "ranking");
-  const monotonicity = curveMonotonicityCandidates(state.curvePoints, state.quotes, config);
+  const monotonicity = monotonicityAudits(state.curvePoints, state.quotes, config);
+  const strictMonotonicity = monotonicity.filter((violation) => violation.violationTier === "HARD_CROSS_MARKET_BID_VIOLATION");
   const calendar = calendarDominanceCandidates(state.curvePoints, state.quotes, config);
   const ranking = rankingAlertCandidates(rankingLegs, state.evidenceByCompany, state.quotes, config, curves);
   const crossed = state.thresholdCandidates.filter((candidate) => (
     candidate.signalType === "SOURCE_CONFIRMED_YES" && candidate.status === "candidate"
   ));
+  const marketRows = await buildMarketAuditRows(loaded, state);
+  const strictCrossed = marketRows.filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore");
+  const strictCrossedSlugs = new Set(strictCrossed.map((row) => row.marketSlug));
+  const nestedMonotonicity = strict ? strictMonotonicity : monotonicity;
+  const nestedCrossed = strict ? crossed.filter((candidate) => strictCrossedSlugs.has(candidate.marketSlug)) : crossed;
   const report = {
     ok: true,
     generatedAt: new Date().toISOString(),
     mode: config.mode,
+    strict,
     liveEligible: false,
     livePolicy: "relative_value_audit_is_alert_only",
     summary: {
       curveCount: curves.length,
       curvePointCount: state.curvePoints.length,
       monotonicityViolationCount: monotonicity.length,
+      hardMonotonicityCount: strictMonotonicity.length,
+      softMonotonicityCount: monotonicity.filter((violation) => violation.violationTier === "SOFT_MID_VIOLATION" || violation.violationTier === "SOFT_ASK_ONLY_VIOLATION").length,
+      staleViolationCount: monotonicity.filter((violation) => violation.violationTier === "STALE_BOOK_VIOLATION").length,
       calendarViolationCount: calendar.length,
       crossedLegOpportunityCount: crossed.length,
+      strictCrossedLegCount: strictCrossed.length,
       rankingContradictionCount: ranking.length,
+      tradeableCandidateCount: strictMonotonicity.length + strictCrossed.length,
     },
-    curves: curves.map((curve) => curveAuditRow(curve, [...monotonicity, ...calendar, ...crossed])),
-    monotonicityViolations: monotonicity.map(relativeCandidate),
+    curves: curves.map((curve) => curveAuditRow(curve, nestedMonotonicity, [...calendar, ...nestedCrossed])),
+    monotonicityViolations: (strict ? strictMonotonicity : monotonicity).map(monotonicityRow),
     calendarViolations: calendar.map(relativeCandidate),
-    crossedLegOpportunities: crossed.map(relativeCandidate),
+    crossedLegOpportunities: strict
+      ? strictCrossed.map(marketRowSummary)
+      : crossed.map(relativeCandidate),
     rankingContradictions: ranking.map(relativeCandidate),
   };
   await appendJsonl(join(config.logsDir, "curve_audit.jsonl"), report);
@@ -198,10 +217,11 @@ export async function curveAudit(loaded: LoadedStrategyConfig): Promise<Record<s
   return report;
 }
 
-function curveAuditRow(curve: ImpliedCurve, candidates: ValuationCandidate[]): Record<string, unknown> {
+function curveAuditRow(curve: ImpliedCurve, monotonicity: MonotonicityAudit[], candidates: ValuationCandidate[]): Record<string, unknown> {
   const curveCandidates = candidates
     .filter((candidate) => candidate.company === curve.company && candidate.deadline === curve.deadlineIso)
     .sort((left, right) => right.edge - left.edge);
+  const curveViolations = monotonicity.filter((violation) => violation.company === curve.company && violation.deadline === curve.deadlineIso);
   return {
     company: curve.company,
     deadline: curve.deadlineIso,
@@ -213,10 +233,35 @@ function curveAuditRow(curve: ImpliedCurve, candidates: ValuationCandidate[]): R
       marketSlug: point.leg.marketSlug,
       label: point.leg.label,
     })),
-    monotonicityViolations: curveCandidates.filter((candidate) => candidate.signalType === "CURVE_MONOTONICITY_YES").map(relativeCandidate),
+    monotonicityViolations: curveViolations.map(monotonicityRow),
     calendarViolations: curveCandidates.filter((candidate) => candidate.signalType === "CALENDAR_DOMINANCE_YES").map(relativeCandidate),
     crossedLegs: curveCandidates.filter((candidate) => candidate.signalType === "SOURCE_CONFIRMED_YES").map(relativeCandidate),
     bestUnderpricedYesLeg: curveCandidates[0] ? relativeCandidate(curveCandidates[0]) : null,
+    liveEligible: false,
+  };
+}
+
+function monotonicityRow(violation: MonotonicityAudit): Record<string, unknown> {
+  return {
+    company: violation.company,
+    deadline: violation.deadline,
+    lowerMarketSlug: violation.lowerMarketSlug,
+    higherMarketSlug: violation.higherMarketSlug,
+    lowerThreshold: violation.lowerThreshold,
+    higherThreshold: violation.higherThreshold,
+    lowerYesAsk: violation.lowerYesAsk,
+    lowerYesBid: violation.lowerYesBid,
+    higherYesAsk: violation.higherYesAsk,
+    higherYesBid: violation.higherYesBid,
+    bidBackedEdge: violation.bidBackedEdge,
+    midEdge: violation.midEdge,
+    askOnlyEdge: violation.askOnlyEdge,
+    bookAgeMs: violation.bookAgeMs,
+    sameRuleHashFamily: violation.sameRuleHashFamily,
+    sameDirectionSemantics: violation.sameDirectionSemantics,
+    violationTier: violation.violationTier,
+    tradeableBuyOnly: violation.tradeableBuyOnly,
+    reason: violation.reason,
     liveEligible: false,
   };
 }
@@ -238,6 +283,105 @@ function relativeCandidate(candidate: ValuationCandidate): Record<string, unknow
     pairedYesAsk: candidate.pairedYesAsk,
     orderTemplate: candidate.orderTemplate ?? null,
     liveEligible: false,
+  };
+}
+
+export async function marketAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const state = await collectValuationState(loaded.config);
+  const rows = await buildMarketAuditRows(loaded, state);
+  const strict = args.get("strict") === "true" || args.get("strict") === "1";
+  const filteredRows = strict
+    ? rows.filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore")
+    : rows;
+  const companies = [...new Set(filteredRows.map((row) => row.company))].map((company) => {
+    const companyRows = filteredRows
+      .filter((row) => row.company === company)
+      .sort((left, right) => (left.threshold ?? 0) - (right.threshold ?? 0));
+    const evidence = state.evidenceByCompany.get(company);
+    return {
+      company,
+      latestNpmValuation: evidence?.latestValuation,
+      latestNpmDate: evidence?.latestTapeDate,
+      maxEligibleValuation: evidence?.maxEligibleValuation ?? evidence?.latestValuation,
+      maxEligibleDate: evidence?.maxEligibleDate ?? evidence?.latestTapeDate,
+      thresholdCurve: companyRows.map(marketRowSummary),
+      bestStaleCrossedLeg: companyRows
+        .filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE")
+        .sort((left, right) => right.tradeScore - left.tradeScore)[0] ?? null,
+      nearBoundaryWatchlist: companyRows.filter((row) => row.state === "NEAR_BOUNDARY").map(marketRowSummary),
+    };
+  });
+  const report = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    mode: loaded.config.mode,
+    strict,
+    summary: {
+      legCount: rows.length,
+      outputLegCount: filteredRows.length,
+      newlyCrossedCount: rows.filter((row) => row.state === "NEWLY_CROSSED").length,
+      previouslyCrossedCount: rows.filter((row) => row.state === "PREVIOUSLY_CROSSED").length,
+      strictCrossedLegCount: rows.filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore").length,
+      nearBoundaryCount: rows.filter((row) => row.state === "NEAR_BOUNDARY").length,
+      ambiguousCount: rows.filter((row) => row.state === "AMBIGUOUS").length,
+      tradeableCandidateCount: rows.filter((row) => row.tradeBand === "tradeable" && row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE").length,
+    },
+    companies,
+    rows: filteredRows.map(marketRowSummary),
+  };
+  await appendJsonl(join(loaded.config.logsDir, "market_audit.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_market_audit.json"), report);
+  return report;
+}
+
+async function buildMarketAuditRows(loaded: LoadedStrategyConfig, state: ValuationState): Promise<MarketAuditRow[]> {
+  const candidates = new Map(state.thresholdCandidates.map((candidate) => [candidate.marketSlug, candidate]));
+  const rows: MarketAuditRow[] = [];
+  for (const leg of state.allLegs.filter((item) => item.eventKind === "threshold")) {
+    const rawEvidence = state.evidenceByCompany.get(leg.company);
+    const evidence = rawEvidence ? withEligibleMax(rawEvidence, leg.marketWindowStartIso, leg.deadlineIso) : undefined;
+    const candidate = candidates.get(leg.marketSlug) ?? candidateShell(leg);
+    rows.push(buildMarketAuditRow({
+      leg,
+      evidence,
+      quote: state.quotes.get(leg.marketSlug),
+      config: loaded.config,
+      liveBlockers: await liveBlockers(candidate, loaded.config, loaded.hash),
+    }));
+  }
+  return rows.sort((left, right) => {
+    if (left.company !== right.company) return left.company.localeCompare(right.company);
+    return (left.threshold ?? 0) - (right.threshold ?? 0);
+  });
+}
+
+function marketRowSummary(row: MarketAuditRow): Record<string, unknown> {
+  return {
+    company: row.company,
+    eventSlug: row.eventSlug,
+    marketSlug: row.marketSlug,
+    threshold: row.threshold,
+    deadline: row.deadline,
+    label: row.label,
+    state: row.state,
+    crossedQuality: row.crossedQuality,
+    latestValuation: row.latestValuation,
+    latestDate: row.latestDate,
+    maxEligibleValuation: row.maxEligibleValuation,
+    maxEligibleDate: row.maxEligibleDate,
+    previousMaxEligibleValuation: row.previousMaxEligibleValuation,
+    sourceDateAgeHours: row.sourceDateAgeHours,
+    yesAsk: row.yesAsk,
+    yesBid: row.yesBid,
+    settlementEdge: row.settlementEdge,
+    distancePct: row.distancePct,
+    depthUnderCap: row.depthUnderCap,
+    bookAgeMs: row.bookAgeMs,
+    ruleConfidence: row.ruleConfidence,
+    tradeScore: row.tradeScore,
+    tradeBand: row.tradeBand,
+    liveBlockers: row.liveBlockers,
+    reason: row.reason,
   };
 }
 
@@ -503,7 +647,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 

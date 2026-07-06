@@ -16,6 +16,7 @@
     "valuation:preflight": "tsx src/valuationStrategy.ts preflight --config configs/private-valuations-july31.json",
     "valuation:audit": "tsx src/valuationStrategy.ts audit --config configs/private-valuations-july31.json",
     "valuation:curve-audit": "tsx src/valuationStrategy.ts curve-audit --config configs/private-valuations-july31.json",
+    "valuation:market-audit": "tsx src/valuationStrategy.ts market-audit --config configs/private-valuations-july31.json",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

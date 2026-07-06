@@ -25,6 +25,8 @@ export function parseBookQuote(raw: unknown, tokenId: string, fetchedAt = new Da
     spread,
     liquidity: visibleAskDepth,
     fetchedAt,
+    bids,
+    asks,
   };
 }
 

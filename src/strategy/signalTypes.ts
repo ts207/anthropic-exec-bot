@@ -113,6 +113,8 @@ export type BookQuote = {
   spread: number | null;
   liquidity: number;
   fetchedAt: string;
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
 };
 
 export type CurvePoint = {

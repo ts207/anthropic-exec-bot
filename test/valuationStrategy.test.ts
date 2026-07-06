@@ -14,6 +14,7 @@ import type { BookQuote, CurvePoint, EventConfig, StrategyConfig, ValuationLeg }
 import { liveBlockers } from "../src/valuationStrategy.ts";
 import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/strategy/probeValidation.ts";
 import { probePath, writeJson } from "../src/strategy/stateStore.ts";
+import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketAudit.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -238,6 +239,54 @@ test("posted probe validation accepts current beta BUY FAK probe metadata", asyn
   assert.deepEqual(validation.blockers, []);
 });
 
+test("monotonicity audit distinguishes bid-backed hard violation from ask-only noise", () => {
+  const config = testConfig();
+  const lower = legFixture({ threshold: 900_000_000_000, marketSlug: "lower" });
+  const higher = legFixture({ threshold: 950_000_000_000, marketSlug: "higher" });
+  const hard = monotonicityAudits([
+    { leg: lower, yesAsk: 0.52 },
+    { leg: higher, yesAsk: 0.7 },
+  ], new Map([
+    ["lower", quoteFixture(0.52, 0.5)],
+    ["higher", quoteFixture(0.7, 0.62)],
+  ]), config, new Date("2026-07-05T00:00:01Z"));
+  assert.equal(hard[0]?.violationTier, "HARD_CROSS_MARKET_BID_VIOLATION");
+  assert.equal(hard[0]?.tradeableBuyOnly, true);
+
+  const soft = monotonicityAudits([
+    { leg: lower, yesAsk: 0.52 },
+    { leg: higher, yesAsk: 0.7 },
+  ], new Map([
+    ["lower", quoteFixture(0.52, 0.5)],
+    ["higher", quoteFixture(0.7, 0.45)],
+  ]), config, new Date("2026-07-05T00:00:01Z"));
+  assert.equal(soft[0]?.violationTier, "SOFT_ASK_ONLY_VIOLATION");
+  assert.equal(soft[0]?.tradeableBuyOnly, false);
+});
+
+test("market audit row classifies source-confirmed stale crossed leg", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_100_000_000_000 });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-01", implied_valuation: 1_101_000_000_000 },
+    tape_d_prices: [
+      { date: "2026-06-30", implied_valuation: 1_090_000_000_000 },
+      { date: "2026-07-01", implied_valuation: 1_101_000_000_000 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const row = buildMarketAuditRow({
+    leg,
+    evidence,
+    quote: quoteFixture(0.81, 0.78),
+    config,
+    now: new Date("2026-07-02T00:00:00Z"),
+  });
+  assert.equal(row.state, "NEWLY_CROSSED");
+  assert.equal(row.crossedQuality, "SOURCE_CONFIRMED_AND_STALE");
+  assert.equal(row.depthUnderCap > 0, true);
+  assert.equal(row.tradeBand === "tradeable" || row.tradeBand === "maybe", true);
+});
+
 function testConfig(): StrategyConfig {
   return normalizeConfig({
     events: [thresholdEvent("Anthropic")],
@@ -303,13 +352,18 @@ function rankingLegFixture(company: string, ranking: 1 | 2 | 3): ValuationLeg {
   };
 }
 
-function quoteFixture(bestAsk: number): BookQuote {
+function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): BookQuote {
   return {
     tokenId: "yes-token",
-    bestBid: Math.max(0, bestAsk - 0.03),
+    bestBid,
     bestAsk,
-    spread: 0.03,
+    spread: Math.max(0, bestAsk - bestBid),
     liquidity: 500,
     fetchedAt: "2026-07-05T00:00:00Z",
+    bids: [{ price: bestBid, size: 100 }],
+    asks: [
+      { price: bestAsk, size: 100 },
+      { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
+    ],
   };
 }
