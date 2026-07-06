@@ -211,7 +211,11 @@ function nearBoundaryMakerPlan(base: EntryPlan, structuralBlockers: string[]): E
     paperEligible: passiveBid !== null && structuralBlockers.length === 0,
     liveEligible: false,
     blockers: structuralBlockers,
-    reason: passiveBid === null ? "near_boundary_bid_below_minimum" : "near_boundary_passive_bid_paper_only",
+    reason: passiveBid === null
+      ? "near_boundary_bid_below_minimum"
+      : structuralBlockers.length
+        ? "near_boundary_passive_bid_blocked_by_structural_risk"
+        : "near_boundary_passive_bid_paper_only",
   };
 }
 
@@ -229,7 +233,11 @@ function farOptionalityMakerPlan(base: EntryPlan, structuralBlockers: string[]):
     paperEligible: passiveBid !== null && structuralBlockers.length === 0,
     liveEligible: false,
     blockers: structuralBlockers,
-    reason: passiveBid === null ? "far_optionality_bid_below_minimum" : "far_optionality_passive_bid_paper_only",
+    reason: passiveBid === null
+      ? "far_optionality_bid_below_minimum"
+      : structuralBlockers.length
+        ? "far_optionality_passive_bid_blocked_by_structural_risk"
+        : "far_optionality_passive_bid_paper_only",
   };
 }
 
@@ -410,6 +418,7 @@ function structuralBlockersFor(input: {
   if (!input.leg.active || input.leg.closed || !input.leg.acceptingOrders) blockers.push("market_not_accepting_orders");
   if (!input.evidence?.identityOk) blockers.push("missing_or_unverified_npm_evidence");
   if (!input.quote) blockers.push("missing_orderbook");
+  if (input.quote && input.quote.liquidity < input.config.minLiquidity) blockers.push("orderbook_liquidity_below_minimum");
   if (input.marketRow?.bookAgeMs !== undefined && input.marketRow.bookAgeMs > input.config.orderbookMaxAgeMs) blockers.push("orderbook_stale");
   if (input.direction === "UNKNOWN") blockers.push("direction_semantics_unknown");
   return [...new Set(blockers)];

@@ -677,6 +677,39 @@ test("ladder entry planner creates near-boundary passive maker bid without cross
   assert.equal(plans[0]?.liveEligible, false);
 });
 
+test("ladder entry planner blocks near-boundary paper bid on low visible liquidity", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "stripe-175" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const lowLiquidityQuote = { ...quoteFixture(0.97, 0.4), liquidity: config.minLiquidity - 1 };
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["stripe-175", lowLiquidityQuote]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "stripe-175", state: "NEAR_BOUNDARY", yesAsk: 0.97, yesBid: 0.4 })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "stripe-175",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      yesAsk: 0.97,
+      yesBid: 0.4,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "MAKER_NEAR_BOUNDARY_BID");
+  assert.equal(plans[0]?.paperEligible, false);
+  assert.equal(plans[0]?.blockers.includes("orderbook_liquidity_below_minimum"), true);
+  assert.equal(plans[0]?.reason, "near_boundary_passive_bid_blocked_by_structural_risk");
+});
+
 test("ladder entry planner annotates market shape and nearest ladder thresholds", () => {
   const config = testConfig();
   const lower = legFixture({ threshold: 900, marketSlug: "lower-900" });
