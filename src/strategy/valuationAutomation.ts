@@ -92,9 +92,17 @@ export function meaningfulAlerts(results: AutomationTaskResult[]): Array<Record<
       const sourceTakers = Number(summary.strictSourceConfirmedTakerCount ?? 0);
       const nearBoundary = Number(summary.nearBoundaryPassiveBidCount ?? 0);
       const rangeSpreads = Number(summary.rangeSpreadPaperCount ?? 0);
-      if (sourceTakers > 0) alerts.push({ type: "SOURCE_CONFIRMED_STALE_YES_PLAN", count: sourceTakers });
-      if (nearBoundary > 0) alerts.push({ type: "NEAR_BOUNDARY_PASSIVE_BID_PLAN", count: nearBoundary });
-      if (rangeSpreads > 0) alerts.push({ type: "RANGE_SPREAD_PAPER_PLAN", count: rangeSpreads });
+      const plans = entryPlans(result);
+      const sourceRows = plans.filter((plan) => plan.entryMode === "TAKER_SOURCE_CONFIRMED" && !arrayOfStrings(plan.blockers).includes("not_strict_stale_source_confirmed"));
+      const nearRows = plans.filter((plan) => plan.entryMode === "MAKER_NEAR_BOUNDARY_BID");
+      const rangeRows = plans.filter((plan) => plan.entryMode === "RANGE_SPREAD_PAPER");
+      const askCapRows = plans.filter(isAskBelowEntryCap);
+      const ambiguousDownsideRows = plans.filter(isAmbiguousCandidateLeg);
+      if (sourceTakers > 0) alerts.push({ type: "SOURCE_CONFIRMED_STALE_YES_PLAN", count: sourceTakers, rows: sourceRows.map(alertPlanRow) });
+      if (nearBoundary > 0) alerts.push({ type: "NEAR_BOUNDARY_PASSIVE_BID_PLAN", count: nearBoundary, rows: nearRows.map(alertPlanRow) });
+      if (rangeSpreads > 0) alerts.push({ type: "RANGE_SPREAD_PAPER_PLAN", count: rangeSpreads, rows: rangeRows.map(alertPlanRow) });
+      if (askCapRows.length > 0) alerts.push({ type: "ASK_BELOW_ENTRY_CAP", count: askCapRows.length, rows: askCapRows.map(alertPlanRow) });
+      if (ambiguousDownsideRows.length > 0) alerts.push({ type: "DOWNSIDE_SEMANTICS_AMBIGUOUS", count: ambiguousDownsideRows.length, rows: ambiguousDownsideRows.map(alertPlanRow) });
     }
     if (item.task === "ladder-paper") {
       const summary = asRecord(result.summary);
@@ -131,6 +139,69 @@ export function meaningfulAlerts(results: AutomationTaskResult[]): Array<Record<
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function entryPlans(result: Record<string, unknown>): Record<string, unknown>[] {
+  return [
+    ...arrayOfRecords(result.actionablePlans),
+    ...arrayOfRecords(result.plans),
+  ].filter((plan, index, plans) => {
+    const key = `${String(plan.marketSlug ?? "")}:${String(plan.entryMode ?? "")}:${String(plan.pairedMarketSlug ?? "")}`;
+    return plans.findIndex((item) => `${String(item.marketSlug ?? "")}:${String(item.entryMode ?? "")}:${String(item.pairedMarketSlug ?? "")}` === key) === index;
+  });
+}
+
+function isAskBelowEntryCap(plan: Record<string, unknown>): boolean {
+  const yesAsk = numeric(plan.yesAsk);
+  if (yesAsk === null) return false;
+  const passiveBid = numeric(plan.passiveBidPrice);
+  if (passiveBid !== null) return yesAsk <= passiveBid;
+  const maxTaker = numeric(plan.maxTakerPrice);
+  const entryMode = String(plan.entryMode ?? "");
+  return entryMode === "TAKER_SOURCE_CONFIRMED" && maxTaker !== null && yesAsk <= maxTaker;
+}
+
+function isAmbiguousCandidateLeg(plan: Record<string, unknown>): boolean {
+  if (!arrayOfStrings(plan.blockers).includes("direction_semantics_unknown")) return false;
+  const entryMode = String(plan.entryMode ?? "");
+  if (entryMode !== "WATCH_ONLY" && entryMode !== "TAKER_SOURCE_CONFIRMED") return true;
+  const distancePct = numeric(plan.distancePct);
+  return distancePct !== null && distancePct >= 0 && distancePct <= 0.05;
+}
+
+function alertPlanRow(plan: Record<string, unknown>): Record<string, unknown> {
+  return {
+    company: plan.company,
+    eventSlug: plan.eventSlug,
+    marketSlug: plan.marketSlug,
+    pairedMarketSlug: plan.pairedMarketSlug,
+    threshold: plan.threshold,
+    direction: plan.direction,
+    entryMode: plan.entryMode,
+    distancePct: plan.distancePct,
+    yesAsk: plan.yesAsk,
+    yesBid: plan.yesBid,
+    passiveBidPrice: plan.passiveBidPrice,
+    maxTakerPrice: plan.maxTakerPrice,
+    modelFair: plan.modelFair,
+    blockers: plan.blockers,
+    reason: plan.reason,
+  };
+}
+
+function arrayOfRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    : [];
+}
+
+function arrayOfStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function numeric(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, task: AutomationTask): Promise<T> {

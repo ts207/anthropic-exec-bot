@@ -19,7 +19,7 @@ import { updateFixingWatch } from "../src/strategy/fixingWatch.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, monteCarloTouchProbability, pCrossTomorrow, sourceFreshnessMap, tapeStats } from "../src/strategy/npmBarrierForecast.ts";
 import { isPaperOpenTrigger, updateForecastPaperTrades } from "../src/strategy/forecastPaper.ts";
 import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSchedule.ts";
-import { runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
+import { meaningfulAlerts, runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuationLadderEntries.ts";
 import { updateLadderPaperOrders } from "../src/strategy/ladderPaper.ts";
@@ -891,6 +891,84 @@ test("automation cycle marks task timeout as failed alert", async () => {
   assert.equal(cycle.results[0]?.ok, false);
   assert.equal(cycle.results[0]?.timedOut, true);
   assert.equal(cycle.alerts[0]?.type, "TASK_FAILED");
+});
+
+test("automation entry alerts include row details, ask-cap drops, and ambiguous downside", () => {
+  const alerts = meaningfulAlerts([{
+    task: "entry-audit",
+    ok: true,
+    result: {
+      summary: {
+        strictSourceConfirmedTakerCount: 1,
+        nearBoundaryPassiveBidCount: 1,
+        rangeSpreadPaperCount: 1,
+      },
+      actionablePlans: [{
+        company: "Stripe",
+        eventSlug: "stripe-event",
+        marketSlug: "stripe-175",
+        threshold: 175_000_000_000,
+        direction: "UP",
+        entryMode: "MAKER_NEAR_BOUNDARY_BID",
+        distancePct: 0.006,
+        yesAsk: 0.54,
+        yesBid: 0.4,
+        passiveBidPrice: 0.56,
+        modelFair: 0.68,
+        blockers: [],
+        reason: "near_boundary_passive_bid_paper_only",
+      }, {
+        company: "Stripe",
+        eventSlug: "stripe-event",
+        marketSlug: "stripe-range",
+        pairedMarketSlug: "stripe-180",
+        threshold: 175_000_000_000,
+        direction: "UP",
+        entryMode: "RANGE_SPREAD_PAPER",
+        yesAsk: 0.2,
+        passiveBidPrice: 0.45,
+        modelFair: 0.6,
+        blockers: [],
+        reason: "adjacent_threshold_range_spread_paper_only",
+      }],
+      plans: [{
+        company: "Anthropic",
+        eventSlug: "anthropic-event",
+        marketSlug: "anthropic-crossed",
+        threshold: 1_100_000_000_000,
+        direction: "UP",
+        entryMode: "TAKER_SOURCE_CONFIRMED",
+        yesAsk: 0.81,
+        maxTakerPrice: 0.94,
+        modelFair: 1,
+        blockers: [],
+        reason: "source_confirmed_stale_yes_taker",
+      }, {
+        company: "Stripe",
+        eventSlug: "stripe-event",
+        marketSlug: "stripe-down",
+        threshold: 170_000_000_000,
+        direction: "UNKNOWN",
+        entryMode: "WATCH_ONLY",
+        distancePct: 0.01,
+        yesAsk: 0.4,
+        modelFair: 0,
+        blockers: ["direction_semantics_unknown"],
+        reason: "watch_ladder_leg_no_entry",
+      }],
+    },
+  }]);
+  const types = alerts.map((alert) => alert.type);
+  assert.equal(types.includes("SOURCE_CONFIRMED_STALE_YES_PLAN"), true);
+  assert.equal(types.includes("NEAR_BOUNDARY_PASSIVE_BID_PLAN"), true);
+  assert.equal(types.includes("RANGE_SPREAD_PAPER_PLAN"), true);
+  assert.equal(types.includes("ASK_BELOW_ENTRY_CAP"), true);
+  assert.equal(types.includes("DOWNSIDE_SEMANTICS_AMBIGUOUS"), true);
+  const askAlert = alerts.find((alert) => alert.type === "ASK_BELOW_ENTRY_CAP") as Record<string, unknown>;
+  assert.equal(Array.isArray(askAlert.rows), true);
+  assert.equal((askAlert.rows as Record<string, unknown>[])[0]?.marketSlug, "stripe-175");
+  const downsideAlert = alerts.find((alert) => alert.type === "DOWNSIDE_SEMANTICS_AMBIGUOUS") as Record<string, unknown>;
+  assert.equal((downsideAlert.rows as Record<string, unknown>[])[0]?.marketSlug, "stripe-down");
 });
 
 test("automation runtime lock prevents overlapping instances and writes heartbeat", async () => {
