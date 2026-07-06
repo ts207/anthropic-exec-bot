@@ -37,6 +37,17 @@ export type EventConfig = {
 export type StrategyConfig = {
   mode: OperatorMode;
   pollMs: number;
+  npmUpdate: {
+    timeZone: string;
+    hour: number;
+    minute: number;
+  };
+  automation: {
+    taskTimeoutMs: number;
+    lockTtlMs: number;
+    maxBackoffMs: number;
+    alertSink: "file" | "console" | "both" | "none";
+  };
   logsDir: string;
   stateDir: string;
   orderbookMaxAgeMs: number;

@@ -39,6 +39,8 @@ export async function loadStrategyConfig(path: string): Promise<LoadedStrategyCo
 export function normalizeConfig(value: unknown): StrategyConfig {
   const record = asRecord(value);
   const minimumEdge = asRecord(record.minimumEdge);
+  const npmUpdate = asRecord(record.npmUpdate);
+  const automation = asRecord(record.automation);
   const signalMultipliersInput = asRecord(record.signalMultipliers);
   const signalMultipliers = Object.fromEntries(
     SIGNALS.map((signal) => [signal, numberOr(signalMultipliersInput[signal], defaultSignalMultiplier(signal))]),
@@ -47,6 +49,17 @@ export function normalizeConfig(value: unknown): StrategyConfig {
   const config: StrategyConfig = {
     mode: parseMode(record.mode, "alert_only"),
     pollMs: numberOr(record.pollMs, 30_000),
+    npmUpdate: {
+      timeZone: stringOr(npmUpdate.timeZone, "America/New_York"),
+      hour: numberOr(npmUpdate.hour, 13),
+      minute: numberOr(npmUpdate.minute, 0),
+    },
+    automation: {
+      taskTimeoutMs: numberOr(automation.taskTimeoutMs, 120_000),
+      lockTtlMs: numberOr(automation.lockTtlMs, 10 * 60_000),
+      maxBackoffMs: numberOr(automation.maxBackoffMs, 10 * 60_000),
+      alertSink: parseAlertSink(automation.alertSink),
+    },
     logsDir: stringOr(record.logsDir, "logs/valuation"),
     stateDir: stringOr(record.stateDir, "data/valuation"),
     orderbookMaxAgeMs: numberOr(record.orderbookMaxAgeMs, 15_000),
@@ -69,6 +82,9 @@ export function normalizeConfig(value: unknown): StrategyConfig {
   };
 
   if (config.pollMs < 5_000) throw new Error("pollMs must be at least 5000");
+  if (config.npmUpdate.hour < 0 || config.npmUpdate.hour > 23) throw new Error("npmUpdate.hour must be 0-23");
+  if (config.npmUpdate.minute < 0 || config.npmUpdate.minute > 59) throw new Error("npmUpdate.minute must be 0-59");
+  if (config.automation.taskTimeoutMs < 1_000) throw new Error("automation.taskTimeoutMs must be at least 1000");
   if (config.defaultMaxYesPrice <= 0 || config.defaultMaxYesPrice > 1) {
     throw new Error("defaultMaxYesPrice must be in (0, 1]");
   }
@@ -131,6 +147,12 @@ function parseRanking(value: unknown): 1 | 2 | 3 | undefined {
   if (value === undefined) return undefined;
   if (value === 1 || value === 2 || value === 3) return value;
   throw new Error("ranking must be 1, 2, or 3");
+}
+
+function parseAlertSink(value: unknown): StrategyConfig["automation"]["alertSink"] {
+  if (value === undefined || value === null || value === "") return "file";
+  if (value === "file" || value === "console" || value === "both" || value === "none") return value;
+  throw new Error(`invalid automation alert sink: ${String(value)}`);
 }
 
 function defaultSignalMultiplier(signal: SignalType): number {

@@ -3,6 +3,17 @@
   "pollMs": 30000,
   "logsDir": "logs/valuation",
   "stateDir": "data/valuation",
+  "npmUpdate": {
+    "timeZone": "America/New_York",
+    "hour": 13,
+    "minute": 0
+  },
+  "automation": {
+    "taskTimeoutMs": 120000,
+    "lockTtlMs": 600000,
+    "maxBackoffMs": 600000,
+    "alertSink": "file"
+  },
   "orderbookMaxAgeMs": 15000,
   "maxSpread": 0.2,
   "minLiquidity": 100,

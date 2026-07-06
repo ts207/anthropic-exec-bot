@@ -5,6 +5,7 @@ import {
   phaseForNow,
   type AutomationPhase,
   type AutomationTask,
+  type NpmUpdateSchedule,
 } from "./automationSchedule.ts";
 
 export type AutomationTaskResult = {
@@ -13,6 +14,7 @@ export type AutomationTaskResult = {
   dryRun?: boolean;
   result?: unknown;
   error?: string;
+  timedOut?: boolean;
 };
 
 export type AutomationCycle = {
@@ -31,10 +33,12 @@ export async function runAutomationCycle(input: {
   now?: Date;
   phaseOverride?: AutomationPhase;
   dryRun?: boolean;
+  npmUpdate?: NpmUpdateSchedule;
+  taskTimeoutMs?: number;
   runTask: (task: AutomationTask) => Promise<unknown>;
 }): Promise<AutomationCycle> {
   const now = input.now ?? new Date();
-  const expectedUpdate = expectedNpmUpdateAt(now);
+  const expectedUpdate = expectedNpmUpdateAt(now, input.npmUpdate);
   const phase = input.phaseOverride ?? phaseForNow(now, expectedUpdate);
   const tasks = AUTOMATION_PHASE_TASKS[phase];
   const results: AutomationTaskResult[] = [];
@@ -44,12 +48,13 @@ export async function runAutomationCycle(input: {
       continue;
     }
     try {
-      results.push({ task, ok: true, result: await input.runTask(task) });
+      results.push({ task, ok: true, result: await withTimeout(input.runTask(task), input.taskTimeoutMs ?? 120_000, task) });
     } catch (error) {
       results.push({
         task,
         ok: false,
         error: error instanceof Error ? error.message : String(error),
+        timedOut: error instanceof Error && error.message.includes("timed out"),
       });
     }
   }
@@ -106,4 +111,14 @@ export function meaningfulAlerts(results: AutomationTaskResult[]): Array<Record<
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, task: AutomationTask): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`automation task timed out: ${task}`)), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }

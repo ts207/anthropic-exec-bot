@@ -22,6 +22,7 @@ import { forecastPaperPath, parseForecastPaperState, updateForecastPaperTrades }
 import { parseAutomationPhase, type AutomationTask } from "./strategy/automationSchedule.ts";
 import { runAutomationCycle } from "./strategy/valuationAutomation.ts";
 import { buildDailyReport } from "./strategy/dailyReport.ts";
+import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
@@ -507,26 +508,67 @@ export async function valuationAuto(loaded: LoadedStrategyConfig, args: Map<stri
   const once = args.get("once") === "true" || args.get("once") === "1";
   const dryRun = args.get("dry-run") === "true" || args.get("dry-run") === "1";
   const phaseOverride = parseAutomationPhase(args.get("phase"));
-  if (once || dryRun) {
-    const cycle = await runAutomationCycle({
-      phaseOverride,
-      dryRun,
-      runTask: (task) => runAutomationTask(loaded, task),
-    });
-    await appendJsonl(join(loaded.config.logsDir, "automation.jsonl"), cycle);
-    await writeJson(join(loaded.config.stateDir, "last_automation.json"), cycle);
-    return cycle;
+  const lock = dryRun ? null : await acquireAutomationLock(loaded.config);
+  let stopping = false;
+  const stop = () => {
+    stopping = true;
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  let consecutiveFailures = 0;
+  try {
+    if (once || dryRun) {
+      const cycle = await runAutomationCycle({
+        phaseOverride,
+        dryRun,
+        npmUpdate: loaded.config.npmUpdate,
+        taskTimeoutMs: loaded.config.automation.taskTimeoutMs,
+        runTask: (task) => runAutomationTask(loaded, task),
+      });
+      await persistAutomationCycle(loaded.config, cycle);
+      return cycle;
+    }
+    while (!stopping) {
+      const cycle = await runAutomationCycle({
+        phaseOverride,
+        dryRun,
+        npmUpdate: loaded.config.npmUpdate,
+        taskTimeoutMs: loaded.config.automation.taskTimeoutMs,
+        runTask: (task) => runAutomationTask(loaded, task),
+      });
+      consecutiveFailures = cycle.ok ? 0 : consecutiveFailures + 1;
+      const sleepMs = cycle.ok
+        ? cycle.nextRunInMs
+        : Math.min(cycle.nextRunInMs * (2 ** consecutiveFailures), loaded.config.automation.maxBackoffMs);
+      const persistedCycle = { ...cycle, nextRunInMs: sleepMs, consecutiveFailures };
+      await persistAutomationCycle(loaded.config, persistedCycle);
+      console.log(JSON.stringify(persistedCycle));
+      await sleepInterruptible(sleepMs, () => stopping);
+    }
+    return { ok: true, stopped: true };
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    await lock?.release();
   }
-  for (;;) {
-    const cycle = await runAutomationCycle({
-      phaseOverride,
-      dryRun,
-      runTask: (task) => runAutomationTask(loaded, task),
-    });
-    await appendJsonl(join(loaded.config.logsDir, "automation.jsonl"), cycle);
-    await writeJson(join(loaded.config.stateDir, "last_automation.json"), cycle);
-    console.log(JSON.stringify(cycle));
-    await sleep(cycle.nextRunInMs);
+}
+
+async function persistAutomationCycle(config: StrategyConfig, cycle: Record<string, unknown> & { alerts?: Array<Record<string, unknown>> }): Promise<void> {
+  await appendJsonl(join(config.logsDir, "automation.jsonl"), cycle);
+  await writeJson(join(config.stateDir, "last_automation.json"), cycle);
+  await writeAutomationHeartbeat(config, {
+    phase: cycle.phase,
+    ok: cycle.ok,
+    nextRunInMs: cycle.nextRunInMs,
+    alertCount: cycle.alerts?.length ?? 0,
+  });
+  if (cycle.alerts?.length) {
+    if (config.automation.alertSink === "file" || config.automation.alertSink === "both") {
+      for (const alert of cycle.alerts) await appendJsonl(join(config.logsDir, "automation_alerts.jsonl"), alert);
+    }
+    if (config.automation.alertSink === "console" || config.automation.alertSink === "both") {
+      for (const alert of cycle.alerts) console.log(JSON.stringify({ alert }));
+    }
   }
 }
 
@@ -920,6 +962,20 @@ async function filePresent(path: string): Promise<boolean> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sleepInterruptible(ms: number, shouldStop: () => boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      if (shouldStop() || Date.now() - started >= ms) {
+        resolve();
+        return;
+      }
+      setTimeout(tick, Math.min(1_000, ms));
+    };
+    tick();
+  });
 }
 
 function print(value: unknown): void {

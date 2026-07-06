@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -20,11 +20,21 @@ import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, monteCarloTouch
 import { isPaperOpenTrigger, updateForecastPaperTrades } from "../src/strategy/forecastPaper.ts";
 import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSchedule.ts";
 import { runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
+import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
   assert.equal(config.mode, "alert_only");
   assert.equal(config.pollMs, 30_000);
+  assert.deepEqual(config.npmUpdate, {
+    timeZone: "America/New_York",
+    hour: 13,
+    minute: 0,
+  });
+  assert.equal(config.automation.taskTimeoutMs, 120_000);
+  assert.equal(config.automation.lockTtlMs, 600_000);
+  assert.equal(config.automation.maxBackoffMs, 600_000);
+  assert.equal(config.automation.alertSink, "file");
   assert.equal(config.signalMultipliers.SOURCE_CONFIRMED_YES, 1);
   assert.equal(config.signalMultipliers.RANKING_INCONSISTENCY_ALERT, 0);
 });
@@ -551,6 +561,7 @@ test("automation schedule resolves expected NPM fixing phases", () => {
   assert.equal(phaseForNow(new Date("2026-07-06T17:30:00Z"), expected), "POST_FIXING_REVIEW");
   assert.equal(phaseForNow(new Date("2026-07-06T20:00:00Z"), expected), "LOW_FREQUENCY_MONITOR");
   assert.equal(expectedNpmUpdateAt(new Date("2026-07-06T18:30:00Z")).toISOString(), "2026-07-07T17:00:00.000Z");
+  assert.equal(expectedNpmUpdateAt(new Date("2026-01-06T12:00:00Z")).toISOString(), "2026-01-06T18:00:00.000Z");
 });
 
 test("automation dry run lists phase tasks without execution", async () => {
@@ -564,6 +575,36 @@ test("automation dry run lists phase tasks without execution", async () => {
   assert.equal(cycle.phase, "FIXING_WINDOW");
   assert.deepEqual(cycle.tasks, ["fixing-watch", "market-audit-strict", "forecast-paper"]);
   assert.equal(cycle.results.every((result) => result.dryRun === true), true);
+});
+
+test("automation cycle marks task timeout as failed alert", async () => {
+  const cycle = await runAutomationCycle({
+    now: new Date("2026-07-06T17:00:00Z"),
+    taskTimeoutMs: 1,
+    runTask: async () => new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 20)),
+  });
+  assert.equal(cycle.ok, false);
+  assert.equal(cycle.results[0]?.ok, false);
+  assert.equal(cycle.results[0]?.timedOut, true);
+  assert.equal(cycle.alerts[0]?.type, "TASK_FAILED");
+});
+
+test("automation runtime lock prevents overlapping instances and writes heartbeat", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "valuation-auto-test-"));
+  const config = normalizeConfig({
+    stateDir,
+    events: [thresholdEvent("Anthropic")],
+    companies: [{ name: "Anthropic", npmCompanyId: "company-a" }],
+  });
+  const lock = await acquireAutomationLock(config);
+  await assert.rejects(() => acquireAutomationLock(config), /already running/);
+  await writeAutomationHeartbeat(config, { phase: "FIXING_WINDOW", ok: true });
+  const heartbeat = JSON.parse(await readFile(automationHeartbeatPath(config), "utf8")) as Record<string, unknown>;
+  assert.equal(heartbeat.phase, "FIXING_WINDOW");
+  assert.equal(heartbeat.ok, true);
+  await lock.release();
+  const nextLock = await acquireAutomationLock(config);
+  await nextLock.release();
 });
 
 function testConfig(): StrategyConfig {
