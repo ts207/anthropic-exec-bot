@@ -75,11 +75,7 @@ sources:
   # Fixed article URLs are execution-grade; feed URLs below are discovery/alert-grade by default.
   poll_urls: []
   feed_urls:
-    - "https://news.google.com/rss/search?q=%28Iran%20OR%20Araghchi%20OR%20Witkoff%29%20%28talks%20OR%20negotiations%20OR%20Doha%20OR%20Oman%20OR%20Qatar%29%20site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen"
-    - "https://news.google.com/rss/search?q=%28Iran%20OR%20Araghchi%20OR%20Witkoff%29%20%28talks%20OR%20negotiations%20OR%20Doha%20OR%20Oman%20OR%20Qatar%29%20site%3Aapnews.com&hl=en-US&gl=US&ceid=US%3Aen"
-    - "https://www.state.gov/rss-feed/press-releases/feed/"
-    - "https://www.state.gov/rss-feed/speeches-and-remarks/feed/"
-    - "https://www.state.gov/rss-feed/media-note/feed/"
+    - "https://www.aljazeera.com/xml/rss/all.xml"
   allow_feed_auto_trade: false
   promote_feed_to_article: true
   max_trade_article_age_hours: 24
@@ -98,6 +94,7 @@ sources:
     - "passport"
     - "allowances"
   auto_trade_domains:
+    - "aljazeera.com"
     - "reuters.com"
     - "apnews.com"
     - "afp.com"
