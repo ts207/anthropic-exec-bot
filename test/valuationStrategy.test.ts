@@ -969,6 +969,50 @@ test("ladder paper opens passive orders and fills only when ask reaches bid", ()
   assert.equal(noDuplicate.state.orders.length, 1);
 });
 
+test("ladder paper enforces company event deadline and global paper caps before opening", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["paper-maker", quoteFixture(0.97, 0.4)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "paper-maker", state: "NEAR_BOUNDARY" })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "paper-maker",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  const blocked = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans,
+    now: new Date("2026-07-06T12:00:00Z"),
+    sizeUsd: 10,
+    caps: {
+      globalUsdCap: 100,
+      perEventUsdCap: 100,
+      perCompanyUsdCap: 5,
+      perDeadlineUsdCap: 100,
+    },
+  });
+  assert.equal(blocked.opened.length, 0);
+  assert.equal(blocked.blocked.length, 1);
+  assert.equal(blocked.blocked[0]?.reason, "paper_company_notional_cap_exceeded");
+  assert.equal(blocked.metrics.blockedOpenThisRun, 1);
+  assert.equal(blocked.metrics.activeExposureUsd, 0);
+  assert.deepEqual(blocked.metrics.byCompanyExposureUsd, {});
+});
+
 test("ladder paper cancels stale passive bids before NPM fixing", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });

@@ -549,6 +549,7 @@ export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string
     sizeUsd,
     nextFixingAt: expectedNpmUpdateAt(now, loaded.config.npmUpdate),
     cancelBeforeFixingMs: 10 * 60_000,
+    caps: loaded.config,
   });
   await writeJson(ladderPaperPath(loaded.config), update.state);
   await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
@@ -563,6 +564,7 @@ export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string
     opened: update.opened,
     filled: update.filled,
     updated: update.updated,
+    blocked: update.blocked,
     workingOrders: update.state.orders.filter((order) => order.status === "working"),
     filledOrders: update.state.orders.filter((order) => order.status === "filled"),
     resolvedOrders: update.state.orders.filter((order) => order.status === "resolved"),

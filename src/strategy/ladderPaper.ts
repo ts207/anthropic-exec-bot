@@ -44,7 +44,22 @@ export type LadderPaperUpdate = {
   opened: LadderPaperOrder[];
   filled: LadderPaperOrder[];
   updated: LadderPaperOrder[];
+  blocked: LadderPaperOpenBlock[];
   metrics: LadderPaperMetrics;
+};
+
+export type LadderPaperCaps = Pick<StrategyConfig, "globalUsdCap" | "perEventUsdCap" | "perCompanyUsdCap" | "perDeadlineUsdCap">;
+
+export type LadderPaperOpenBlock = {
+  company: string;
+  eventSlug: string;
+  marketSlug: string;
+  deadline?: string;
+  entryMode: EntryMode;
+  reason: string;
+  sizeUsd: number;
+  usedUsd: number;
+  capUsd: number;
 };
 
 export type LadderPaperMetrics = {
@@ -53,9 +68,16 @@ export type LadderPaperMetrics = {
   filledOrders: number;
   resolvedOrders: number;
   cancelledOrders: number;
+  activeExposureUsd: number;
+  workingExposureUsd: number;
+  filledExposureUsd: number;
+  byCompanyExposureUsd: Record<string, number>;
+  byEventExposureUsd: Record<string, number>;
+  byDeadlineExposureUsd: Record<string, number>;
   openedThisRun: number;
   filledThisRun: number;
   updatedThisRun: number;
+  blockedOpenThisRun: number;
   totalHypotheticalPnl: number;
   byMode: Record<string, number>;
   byModeProof: Array<{
@@ -106,6 +128,7 @@ export function updateLadderPaperOrders(input: {
   sizeUsd?: number;
   nextFixingAt?: Date;
   cancelBeforeFixingMs?: number;
+  caps?: LadderPaperCaps;
 }): LadderPaperUpdate {
   const now = input.now ?? new Date();
   const sizeUsd = input.sizeUsd ?? 1;
@@ -114,6 +137,7 @@ export function updateLadderPaperOrders(input: {
   const orders = dedupeOrders(input.previous.orders).map((order) => ({ ...order }));
   const updated: LadderPaperOrder[] = [];
   const filled: LadderPaperOrder[] = [];
+  const blocked: LadderPaperOpenBlock[] = [];
 
   for (let index = 0; index < orders.length; index += 1) {
     const order = orders[index];
@@ -139,6 +163,11 @@ export function updateLadderPaperOrders(input: {
     if (!isLadderPaperOpenTrigger(plan)) continue;
     const id = planKey(plan);
     if (knownIds.has(id)) continue;
+    const capBlock = paperCapBlock(plan, orders, sizeUsd, input.caps);
+    if (capBlock) {
+      blocked.push(capBlock);
+      continue;
+    }
     const order = openOrder(plan, now, sizeUsd);
     orders.push(order);
     opened.push(order);
@@ -156,7 +185,8 @@ export function updateLadderPaperOrders(input: {
     opened,
     filled,
     updated,
-    metrics: ladderPaperMetrics(orders, opened.length, filled.length, updated.length),
+    blocked,
+    metrics: ladderPaperMetrics(orders, opened.length, filled.length, updated.length, blocked.length),
   };
 }
 
@@ -296,12 +326,62 @@ function cancelOrder(order: LadderPaperOrder, reason: string): LadderPaperOrder 
   };
 }
 
+function paperCapBlock(
+  plan: EntryPlan,
+  orders: LadderPaperOrder[],
+  sizeUsd: number,
+  caps: LadderPaperCaps | undefined,
+): LadderPaperOpenBlock | null {
+  if (!caps) return null;
+  const active = activeOrders(orders);
+  const globalUsed = sumExposure(active);
+  const eventUsed = sumExposure(active.filter((order) => order.eventSlug === plan.eventSlug));
+  const companyUsed = sumExposure(active.filter((order) => order.company === plan.company));
+  const deadline = plan.range?.deadline ?? plan.deadline;
+  const deadlineUsed = sumExposure(active.filter((order) => order.deadline === deadline));
+  if (globalUsed + sizeUsd > caps.globalUsdCap) {
+    return paperCapBlockRow(plan, "paper_global_notional_cap_exceeded", sizeUsd, globalUsed, caps.globalUsdCap);
+  }
+  if (eventUsed + sizeUsd > caps.perEventUsdCap) {
+    return paperCapBlockRow(plan, "paper_event_notional_cap_exceeded", sizeUsd, eventUsed, caps.perEventUsdCap);
+  }
+  if (companyUsed + sizeUsd > caps.perCompanyUsdCap) {
+    return paperCapBlockRow(plan, "paper_company_notional_cap_exceeded", sizeUsd, companyUsed, caps.perCompanyUsdCap);
+  }
+  if (deadlineUsed + sizeUsd > caps.perDeadlineUsdCap) {
+    return paperCapBlockRow(plan, "paper_deadline_notional_cap_exceeded", sizeUsd, deadlineUsed, caps.perDeadlineUsdCap);
+  }
+  return null;
+}
+
+function paperCapBlockRow(
+  plan: EntryPlan,
+  reason: string,
+  sizeUsd: number,
+  usedUsd: number,
+  capUsd: number,
+): LadderPaperOpenBlock {
+  return {
+    company: plan.company,
+    eventSlug: plan.eventSlug,
+    marketSlug: plan.marketSlug,
+    deadline: plan.range?.deadline ?? plan.deadline,
+    entryMode: plan.entryMode,
+    reason,
+    sizeUsd: round4(sizeUsd),
+    usedUsd: round4(usedUsd),
+    capUsd: round4(capUsd),
+  };
+}
+
 function ladderPaperMetrics(
   orders: LadderPaperOrder[],
   openedThisRun: number,
   filledThisRun: number,
   updatedThisRun: number,
+  blockedOpenThisRun: number,
 ): LadderPaperMetrics {
+  const active = activeOrders(orders);
   const byMode = orders.reduce<Record<string, number>>((counts, order) => {
     counts[order.entryMode] = (counts[order.entryMode] ?? 0) + 1;
     return counts;
@@ -317,9 +397,16 @@ function ladderPaperMetrics(
     filledOrders: orders.filter((order) => order.status === "filled").length,
     resolvedOrders: resolved.length,
     cancelledOrders: orders.filter((order) => order.status === "cancelled").length,
+    activeExposureUsd: round4(sumExposure(active)),
+    workingExposureUsd: round4(sumExposure(orders.filter((order) => order.status === "working"))),
+    filledExposureUsd: round4(sumExposure(orders.filter((order) => order.status === "filled"))),
+    byCompanyExposureUsd: exposureBy(active, (order) => order.company),
+    byEventExposureUsd: exposureBy(active, (order) => order.eventSlug),
+    byDeadlineExposureUsd: exposureBy(active, (order) => order.deadline ?? "unknown-deadline"),
     openedThisRun,
     filledThisRun,
     updatedThisRun,
+    blockedOpenThisRun,
     totalHypotheticalPnl,
     byMode,
     byModeProof: modeProofRows(orders),
@@ -341,6 +428,26 @@ function ladderPaperMetrics(
       ],
     },
   };
+}
+
+function activeOrders(orders: LadderPaperOrder[]): LadderPaperOrder[] {
+  return orders.filter((order) => order.status === "working" || order.status === "filled");
+}
+
+function sumExposure(orders: LadderPaperOrder[]): number {
+  return orders.reduce((sum, order) => sum + order.sizeUsd, 0);
+}
+
+function exposureBy(
+  orders: LadderPaperOrder[],
+  keyFn: (order: LadderPaperOrder) => string,
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const order of orders) {
+    const key = keyFn(order);
+    result[key] = round4((result[key] ?? 0) + order.sizeUsd);
+  }
+  return result;
 }
 
 function dedupeOrders(orders: LadderPaperOrder[]): LadderPaperOrder[] {
