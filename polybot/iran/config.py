@@ -63,6 +63,11 @@ class ClassifierConfig:
     max_escalations_per_day: int = 20
     max_classifier_errors_per_hour: int = 3
     classify_feed_summaries: bool = False
+    # Used only when provider is "claude_cli": shells out to the local Claude
+    # Code CLI (billed against the Claude subscription's weekly limit) instead
+    # of calling the metered Anthropic Messages API directly.
+    cli_binary: str = "claude"
+    cli_timeout_seconds: int = 180
 
 
 @dataclass(frozen=True)

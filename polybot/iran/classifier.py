@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from dataclasses import asdict
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import requests
 
@@ -191,10 +192,17 @@ class RuleBasedFixtureClassifier:
 
 
 class LLMClassifier:
-    def __init__(self, config: ClassifierConfig, sources: SourcesConfig, anthropic_client: object | None = None):
+    def __init__(
+        self,
+        config: ClassifierConfig,
+        sources: SourcesConfig,
+        anthropic_client: object | None = None,
+        cli_runner: Callable[[str], str] | None = None,
+    ):
         self.config = config
         self.sources = sources
         self._anthropic_client = anthropic_client
+        self._cli_runner = cli_runner
         self.last_usage: dict[str, Any] | None = None
 
     def classify(self, article: Article, market_rule_text: str) -> SignalFactors:
@@ -205,6 +213,8 @@ class LLMClassifier:
             raw = self._openai(prompt)
         elif provider == "anthropic":
             raw = self._anthropic(prompt)
+        elif provider in {"claude_cli", "claude-cli", "claude_code_cli"}:
+            raw = self._claude_cli(prompt)
         else:
             raise RuntimeError(f"unsupported classifier provider: {self.config.provider}")
         return SignalFactors.from_dict(_json_object(raw))
@@ -264,6 +274,86 @@ class LLMClassifier:
                 raise RuntimeError("ANTHROPIC_API_KEY or LLM_API_KEY is required")
             self._anthropic_client = anthropic.Anthropic(api_key=key, timeout=60.0, max_retries=2)
         return self._anthropic_client
+
+    def _claude_cli(self, prompt: str) -> str:
+        # Shells out to the local Claude Code CLI instead of the metered
+        # Anthropic API, so classification is billed against the Claude
+        # subscription's weekly rate limit rather than per-token. The prompt
+        # is passed over stdin (not argv) to avoid shell-escaping issues with
+        # article text, and ANTHROPIC_API_KEY/LLM_API_KEY are stripped from
+        # the subprocess environment so the CLI can't silently fall back to
+        # metered key-based billing. Deliberately no --bare: bare mode skips
+        # the OAuth/keychain session entirely and requires ANTHROPIC_API_KEY,
+        # which is exactly the metered path this provider exists to avoid.
+        stdout = self._cli_runner(prompt) if self._cli_runner is not None else self._run_claude_cli(prompt)
+        return self._extract_claude_cli_result_text(stdout)
+
+    def _run_claude_cli(self, prompt: str) -> str:
+        binary = self.config.cli_binary
+        timeout = self.config.cli_timeout_seconds
+        env = {key: value for key, value in os.environ.items() if key not in {"ANTHROPIC_API_KEY", "LLM_API_KEY"}}
+        try:
+            completed = subprocess.run(
+                [
+                    binary,
+                    "-p",
+                    "--safe-mode",  # skip CLAUDE.md/skills/plugins/MCP/auto-memory; keeps subscription auth (unlike --bare)
+                    "--model",
+                    self.config.model,
+                    "--tools",
+                    "",  # pure text classification; no bash/read/edit tools needed
+                    "--no-session-persistence",
+                    "--max-budget-usd",
+                    "0.50",  # hard per-call cost ceiling as a safety net
+                    "--output-format",
+                    "json",
+                    "--json-schema",
+                    json.dumps(_ANTHROPIC_OUTPUT_SCHEMA),
+                    "--dangerously-skip-permissions",
+                ],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"claude CLI binary {binary!r} not found; install it "
+                "(npm install -g @anthropic-ai/claude-code) and run `claude login`"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"claude CLI timed out after {timeout}s") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"claude CLI exited {completed.returncode}: {completed.stderr.strip()[:500]}")
+        return completed.stdout
+
+    def _extract_claude_cli_result_text(self, stdout: str) -> str:
+        try:
+            wrapper: Any = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"claude CLI did not return a JSON envelope: {stdout[:300]!r}") from exc
+        if isinstance(wrapper, list):
+            # Some CLI output modes emit a stream of events; take the last
+            # top-level "result" event if present, else the last event.
+            result_events = [item for item in wrapper if isinstance(item, dict) and item.get("type") == "result"]
+            wrapper = result_events[-1] if result_events else (wrapper[-1] if wrapper else {})
+        if not isinstance(wrapper, dict):
+            raise RuntimeError(f"unexpected claude CLI output shape: {stdout[:300]!r}")
+        if wrapper.get("is_error"):
+            raise RuntimeError(f"claude CLI reported an error: {stdout[:500]!r}")
+        usage_fields = {key: wrapper[key] for key in ("total_cost_usd", "num_turns", "duration_ms", "usage") if key in wrapper}
+        self.last_usage = usage_fields or None
+        # --json-schema makes the CLI return the schema-conformant object in
+        # structured_output; fall back to parsing the free-text result field
+        # for older CLI versions that don't support --json-schema yet.
+        structured = wrapper.get("structured_output")
+        if isinstance(structured, dict):
+            return json.dumps(structured)
+        result_text = wrapper.get("result")
+        if not isinstance(result_text, str) or not result_text.strip():
+            raise RuntimeError(f"claude CLI returned no result text: {stdout[:300]!r}")
+        return result_text
 
 
 def build_classifier(config: ClassifierConfig, sources: SourcesConfig) -> FactorClassifier:

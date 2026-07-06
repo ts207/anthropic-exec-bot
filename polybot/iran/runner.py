@@ -410,7 +410,10 @@ class IranProtectionBot:
                 continue
             if not self.article_store.store(article):
                 continue
-            decisions.append(self.process_article(article))
+            # poll_urls is the curated, always-relevant Iran-blog tracker (not
+            # the broad general feed), so every distinct update from it is
+            # pushed to Telegram unconditionally -- no keyword filtering.
+            decisions.append(self.process_article(article, always_notify=True))
         for feed_url in self.config.sources.feed_urls:
             try:
                 articles = fetch_feed_articles(
@@ -433,12 +436,42 @@ class IranProtectionBot:
                 decisions.append(self.process_article(promoted))
         return decisions
 
-    def process_article(self, article: Article) -> Decision:
+    def process_article(self, article: Article, *, always_notify: bool = False) -> Decision:
+        if always_notify:
+            # This article came straight from the curated Iran-blog tracker
+            # (sources.poll_urls), not the broad general feed, so every
+            # distinct update is pushed to Telegram unconditionally -- no
+            # keyword filtering. This is a live-news ping, not a trade
+            # signal; the ALERT_ONLY/trade notifications below still fire
+            # separately once a verdict is reached.
+            # Telegram only receives the `message` string (fields below are
+            # for structured logging only), so the full article text is
+            # embedded directly in the message, chunked to stay under
+            # Telegram's per-message character limit.
+            for chunk in _chunk_telegram_message(_format_live_update_message(article)):
+                self.notifier.notify(
+                    chunk,
+                    title=article.title,
+                    url=article.url,
+                    domain=article.domain,
+                    published_at=article.published_at,
+                )
         gate = keyword_gate(f"{article.title}\n{article.raw_text}")
         if not gate.escalate:
             decision = Decision("NO_ACTION", "0", "keyword_gate_no_escalation")
             self._log_decision(article, decision, gate=gate.__dict__)
             return decision
+        if not always_notify:
+            # For non-poll_urls sources (the broad general feed), still only
+            # ping on genuinely Iran/talks-relevant escalations so World Cup
+            # scores and unrelated regional news don't flood the channel.
+            self.notifier.notify(
+                "Iran protection: new live update detected",
+                title=article.title,
+                url=article.url,
+                domain=article.domain,
+                published_at=article.published_at,
+            )
         age_hours = _article_age_hours(article)
         max_age = self.config.sources.max_trade_article_age_hours
         if max_age > 0 and age_hours is not None and age_hours > max_age:
@@ -670,6 +703,32 @@ def _classifier_context_for(config: IranBotConfig, market_rule_text: str) -> str
     if not config.classifier.include_market_rule_text:
         return f"Target leg: {config.market.target_leg}"
     return f"{market_rule_text}\nTarget leg: {config.market.target_leg}"
+
+
+_TELEGRAM_CHUNK_CHARS = 3500  # headroom under Telegram's 4096-char message limit
+
+
+def _format_live_update_message(article: Article) -> str:
+    parts = [article.title.strip(), "", article.raw_text.strip(), "", f"Source: {article.url}"]
+    return "\n".join(part for part in parts if part)
+
+
+def _chunk_telegram_message(message: str, limit: int = _TELEGRAM_CHUNK_CHARS) -> list[str]:
+    if len(message) <= limit:
+        return [message]
+    chunks: list[str] = []
+    remaining = message
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    total = len(chunks)
+    return [f"[{i + 1}/{total}]\n{chunk}" for i, chunk in enumerate(chunks)]
 
 
 def _is_feed_summary(article: Article) -> bool:

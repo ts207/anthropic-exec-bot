@@ -797,6 +797,112 @@ def test_anthropic_classifier_refusal_raises() -> None:
         classifier.classify(article("A new round of talks is scheduled."), "rule text")
 
 
+def _claude_cli_classifier(cli_runner) -> "LLMClassifier":
+    from polybot.iran.classifier import LLMClassifier
+    from polybot.iran.config import ClassifierConfig
+
+    config = ClassifierConfig(provider="claude_cli", model="claude-sonnet-4-6")
+    return LLMClassifier(config, SourcesConfig(), cli_runner=cli_runner)
+
+
+def test_claude_cli_classifier_parses_result_field() -> None:
+    import json
+
+    payload = {
+        "source_is_trusted": True,
+        "event_status": "scheduled",
+        "before_deadline": True,
+        "scheduled_before_july30": True,
+        "begun_before_july31": False,
+        "formal_senior_level_round": True,
+        "senior_us_representative_involved": True,
+        "senior_iran_representative_involved": True,
+        "in_person_or_indirect_in_person": True,
+        "peace_talks_or_negotiations": True,
+        "technical_or_implementation_only": False,
+        "protect_no_position": True,
+        "would_resolve_yes_if_true": False,
+        "recommended_action": "no_action",
+        "level": "4A",
+        "quote_supporting_trigger": "A new round of talks is scheduled for July 10 in Doha.",
+        "event_type": "round_scheduled",
+        "seniority": "senior",
+        "timing_relative_to_deadline": "before",
+        "source_tier": "wire",
+    }
+    cli_envelope = json.dumps({"type": "result", "is_error": False, "result": json.dumps(payload), "total_cost_usd": 0.0})
+    received_prompts: list[str] = []
+
+    def fake_runner(prompt: str) -> str:
+        received_prompts.append(prompt)
+        return cli_envelope
+
+    classifier = _claude_cli_classifier(fake_runner)
+    factors = classifier.classify(article("A new round of talks is scheduled for July 10 in Doha."), "rule text")
+    assert factors.event_type == "round_scheduled"
+    assert factors.level == "4A"
+    assert len(received_prompts) == 1
+    assert classifier.last_usage == {"total_cost_usd": 0.0}
+
+
+def test_claude_cli_classifier_prefers_structured_output_field() -> None:
+    import json
+
+    payload = {
+        "source_is_trusted": True,
+        "event_status": "held",
+        "before_deadline": True,
+        "scheduled_before_july30": True,
+        "begun_before_july31": True,
+        "formal_senior_level_round": True,
+        "senior_us_representative_involved": True,
+        "senior_iran_representative_involved": True,
+        "in_person_or_indirect_in_person": True,
+        "peace_talks_or_negotiations": True,
+        "technical_or_implementation_only": False,
+        "protect_no_position": True,
+        "would_resolve_yes_if_true": True,
+        "recommended_action": "sell_no_and_buy_yes",
+        "level": "4B",
+        "quote_supporting_trigger": "Talks began today in Doha.",
+        "event_type": "round_occurred",
+        "seniority": "senior",
+        "timing_relative_to_deadline": "before",
+        "source_tier": "wire",
+    }
+    cli_envelope = json.dumps({"type": "result", "is_error": False, "result": "see structured_output", "structured_output": payload})
+    classifier = _claude_cli_classifier(lambda prompt: cli_envelope)
+    factors = classifier.classify(article("Talks began today in Doha."), "rule text")
+    assert factors.event_type == "round_occurred"
+    assert factors.level == "4B"
+
+
+def test_claude_cli_classifier_error_envelope_raises() -> None:
+    import json
+
+    import pytest
+
+    classifier = _claude_cli_classifier(lambda prompt: json.dumps({"type": "result", "is_error": True, "result": "boom"}))
+    with pytest.raises(RuntimeError, match="claude CLI reported an error"):
+        classifier.classify(article("A new round of talks is scheduled."), "rule text")
+
+
+def test_claude_cli_missing_binary_raises_actionable_error(monkeypatch) -> None:
+    import pytest
+
+    from polybot.iran.classifier import LLMClassifier
+    from polybot.iran.config import ClassifierConfig
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("no such file")
+
+    monkeypatch.setattr("polybot.iran.classifier.subprocess.run", fake_run)
+    config = ClassifierConfig(provider="claude_cli", model="claude-sonnet-4-6")
+    classifier = LLMClassifier(config, SourcesConfig())
+    with pytest.raises(RuntimeError, match="claude login"):
+        classifier.classify(article("A new round of talks is scheduled."), "rule text")
+
+
 def test_promote_google_news_item_uses_resolved_publisher_url(monkeypatch) -> None:
     from polybot.iran import source_fetcher
 
