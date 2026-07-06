@@ -18,6 +18,7 @@ export type LadderPaperOrder = {
   sourceDate?: string;
   currentValuation?: number;
   maxEligibleValuation?: number;
+  sourceConfirmed?: boolean;
   distancePct?: number;
   passiveBidPrice: number;
   modelFair: number;
@@ -217,6 +218,7 @@ function openOrder(plan: EntryPlan, now: Date, sizeUsd: number): LadderPaperOrde
     sourceDate: plan.sourceDate,
     currentValuation: plan.currentValuation,
     maxEligibleValuation: plan.maxEligibleValuation,
+    sourceConfirmed: plan.sourceConfirmed,
     distancePct: plan.distancePct,
     passiveBidPrice: plan.passiveBidPrice ?? 0,
     modelFair: plan.modelFair,
@@ -259,6 +261,7 @@ function updateOpenOrder(
     ...order,
     currentValuation: plan.currentValuation,
     maxEligibleValuation: plan.maxEligibleValuation,
+    sourceConfirmed: plan.sourceConfirmed,
     distancePct: plan.distancePct,
     currentMarkPrice: markPrice(plan),
   };

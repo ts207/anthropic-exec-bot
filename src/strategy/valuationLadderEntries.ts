@@ -49,6 +49,7 @@ export type EntryPlan = {
   sourceDate?: string;
   currentValuation?: number;
   maxEligibleValuation?: number;
+  sourceConfirmed: boolean;
   distancePct?: number;
   yesAsk: number | null;
   yesBid: number | null;
@@ -152,6 +153,7 @@ function buildLegEntryPlan(input: {
     sourceDate: evidence?.latestTapeDate,
     currentValuation,
     maxEligibleValuation,
+    sourceConfirmed,
     distancePct,
     yesAsk,
     yesBid,
@@ -418,6 +420,7 @@ function planBase(input: {
   direction: LadderDirection;
   currentValuation?: number;
   maxEligibleValuation?: number;
+  sourceConfirmed: boolean;
   sourceDate?: string;
   distancePct?: number;
   yesAsk: number | null;
@@ -439,6 +442,7 @@ function planBase(input: {
     sourceDate: input.sourceDate,
     currentValuation: input.currentValuation,
     maxEligibleValuation: input.maxEligibleValuation,
+    sourceConfirmed: input.sourceConfirmed,
     distancePct: input.distancePct,
     yesAsk: input.yesAsk,
     yesBid: input.yesBid,

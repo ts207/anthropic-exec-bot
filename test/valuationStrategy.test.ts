@@ -671,6 +671,7 @@ test("ladder entry planner creates near-boundary passive maker bid without cross
     config,
   });
   assert.equal(plans[0]?.entryMode, "MAKER_NEAR_BOUNDARY_BID");
+  assert.equal(plans[0]?.sourceConfirmed, false);
   assert.equal(plans[0]?.passiveBidPrice, 0.56);
   assert.equal(plans[0]?.paperEligible, true);
   assert.equal(plans[0]?.liveEligible, false);
@@ -756,6 +757,7 @@ test("ladder entry planner allows source-confirmed taker only for strict stale l
     config,
   });
   assert.equal(plans[0]?.entryMode, "TAKER_SOURCE_CONFIRMED");
+  assert.equal(plans[0]?.sourceConfirmed, true);
   assert.equal(plans[0]?.liveEligible, true);
 });
 
@@ -937,6 +939,7 @@ test("ladder paper opens passive orders and fills only when ask reaches bid", ()
   });
   assert.equal(opened.opened.length, 1);
   assert.equal(opened.opened[0]?.status, "working");
+  assert.equal(opened.opened[0]?.sourceConfirmed, false);
   assert.equal(opened.metrics.filledThisRun, 0);
 
   const fillPlans = buildLadderEntryPlans({

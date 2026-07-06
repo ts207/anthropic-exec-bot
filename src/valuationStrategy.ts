@@ -821,6 +821,7 @@ function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
     sourceDate: plan.sourceDate,
     currentValuation: plan.currentValuation,
     maxEligibleValuation: plan.maxEligibleValuation,
+    sourceConfirmed: plan.sourceConfirmed,
     distancePct: plan.distancePct,
     yesAsk: plan.yesAsk,
     yesBid: plan.yesBid,
