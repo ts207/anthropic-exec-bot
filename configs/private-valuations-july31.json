@@ -19,6 +19,8 @@
   "minLiquidity": 100,
   "globalUsdCap": 100,
   "perEventUsdCap": 50,
+  "perCompanyUsdCap": 50,
+  "perDeadlineUsdCap": 100,
   "baseOrderUsd": 10,
   "defaultMaxYesPrice": 0.95,
   "minimumEdge": {

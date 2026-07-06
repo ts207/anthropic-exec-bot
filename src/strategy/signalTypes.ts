@@ -55,6 +55,8 @@ export type StrategyConfig = {
   minLiquidity: number;
   globalUsdCap: number;
   perEventUsdCap: number;
+  perCompanyUsdCap: number;
+  perDeadlineUsdCap: number;
   baseOrderUsd: number;
   defaultMaxYesPrice: number;
   minimumEdge: {

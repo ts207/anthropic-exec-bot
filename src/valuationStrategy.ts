@@ -13,7 +13,7 @@ import { calendarDominanceCandidates } from "./strategy/calendarArbitrage.ts";
 import { rankingAlertCandidates } from "./strategy/rankingSimulator.ts";
 import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
 import { executeCandidate, postedProbe } from "./strategy/betaExecution.ts";
-import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
+import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck, type CandidateLock } from "./strategy/stateStore.ts";
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
@@ -928,6 +928,12 @@ async function preflight(loaded: LoadedStrategyConfig): Promise<Record<string, u
     mode: config.mode,
     liveAckPath: liveAck,
     liveAckPresent: await filePresent(liveAck),
+    riskCaps: {
+      globalUsdCap: config.globalUsdCap,
+      perEventUsdCap: config.perEventUsdCap,
+      perCompanyUsdCap: config.perCompanyUsdCap,
+      perDeadlineUsdCap: config.perDeadlineUsdCap,
+    },
     betaSdkEnv: {
       privateKey: Boolean(process.env.PRIVATE_KEY),
       clobApiKey: Boolean(process.env.CLOB_API_KEY),
@@ -1008,21 +1014,33 @@ async function runProbe(loaded: LoadedStrategyConfig, args: Map<string, string>)
   };
 }
 
-function applyCaps(
+export function applyCaps(
   config: StrategyConfig,
   candidates: ValuationCandidate[],
-  locks: Array<{ eventSlug: string; orderUsd: number }>,
+  locks: CandidateLock[],
 ): ValuationCandidate[] {
   let globalSpent = locks.reduce((sum, lock) => sum + lock.orderUsd, 0);
   const eventSpent = new Map<string, number>();
-  for (const lock of locks) eventSpent.set(lock.eventSlug, (eventSpent.get(lock.eventSlug) ?? 0) + lock.orderUsd);
+  const companySpent = new Map<string, number>();
+  const deadlineSpent = new Map<string, number>();
+  for (const lock of locks) {
+    eventSpent.set(lock.eventSlug, (eventSpent.get(lock.eventSlug) ?? 0) + lock.orderUsd);
+    if (lock.company) companySpent.set(lock.company, (companySpent.get(lock.company) ?? 0) + lock.orderUsd);
+    if (lock.deadline) deadlineSpent.set(lock.deadline, (deadlineSpent.get(lock.deadline) ?? 0) + lock.orderUsd);
+  }
   return candidates.map((candidate) => {
     if (candidate.status !== "candidate" || candidate.orderUsd <= 0) return candidate;
     const spentForEvent = eventSpent.get(candidate.eventSlug) ?? 0;
+    const spentForCompany = companySpent.get(candidate.company) ?? 0;
+    const spentForDeadline = deadlineSpent.get(candidate.deadline) ?? 0;
     if (globalSpent + candidate.orderUsd > config.globalUsdCap) return capBlocked(candidate, "global_notional_cap_exceeded");
     if (spentForEvent + candidate.orderUsd > config.perEventUsdCap) return capBlocked(candidate, "event_notional_cap_exceeded");
+    if (spentForCompany + candidate.orderUsd > config.perCompanyUsdCap) return capBlocked(candidate, "company_notional_cap_exceeded");
+    if (spentForDeadline + candidate.orderUsd > config.perDeadlineUsdCap) return capBlocked(candidate, "deadline_notional_cap_exceeded");
     globalSpent += candidate.orderUsd;
     eventSpent.set(candidate.eventSlug, spentForEvent + candidate.orderUsd);
+    companySpent.set(candidate.company, spentForCompany + candidate.orderUsd);
+    deadlineSpent.set(candidate.deadline, spentForDeadline + candidate.orderUsd);
     return candidate;
   });
 }

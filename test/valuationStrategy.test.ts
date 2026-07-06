@@ -10,8 +10,8 @@ import { decideThresholdLeg } from "../src/strategy/valuationDecision.ts";
 import { curveMonotonicityCandidates } from "../src/strategy/curveArbitrage.ts";
 import { calendarDominanceCandidates } from "../src/strategy/calendarArbitrage.ts";
 import { rankingAlertCandidates } from "../src/strategy/rankingSimulator.ts";
-import type { BookQuote, CurvePoint, EventConfig, StrategyConfig, ValuationLeg } from "../src/strategy/signalTypes.ts";
-import { liveBlockers } from "../src/valuationStrategy.ts";
+import type { BookQuote, CurvePoint, EventConfig, StrategyConfig, ValuationCandidate, ValuationLeg } from "../src/strategy/signalTypes.ts";
+import { applyCaps, liveBlockers } from "../src/valuationStrategy.ts";
 import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/strategy/probeValidation.ts";
 import { probePath, writeJson } from "../src/strategy/stateStore.ts";
 import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketAudit.ts";
@@ -39,6 +39,10 @@ test("config loader applies safe low-risk defaults", () => {
   assert.equal(config.automation.lockTtlMs, 600_000);
   assert.equal(config.automation.maxBackoffMs, 600_000);
   assert.equal(config.automation.alertSink, "file");
+  assert.equal(config.globalUsdCap, 100);
+  assert.equal(config.perEventUsdCap, 50);
+  assert.equal(config.perCompanyUsdCap, 50);
+  assert.equal(config.perDeadlineUsdCap, 100);
   assert.equal(config.signalMultipliers.SOURCE_CONFIRMED_YES, 1);
   assert.equal(config.signalMultipliers.RANKING_INCONSISTENCY_ALERT, 0);
 });
@@ -202,6 +206,84 @@ test("live blocker audit explains why candidate is not live-eligible", async () 
   assert.equal(blockers.includes("missing_live_config_ack"), true);
   assert.equal(blockers.includes("missing_posted_probe_success"), true);
   assert.equal(blockers.includes("posting_env_not_armed"), true);
+});
+
+test("candidate caps enforce global, event, company, and deadline budgets", () => {
+  const config = normalizeConfig({
+    mode: "live",
+    globalUsdCap: 25,
+    perEventUsdCap: 15,
+    perCompanyUsdCap: 15,
+    perDeadlineUsdCap: 25,
+    events: [
+      { ...thresholdEvent("Anthropic"), slug: "event-a" },
+      { ...thresholdEvent("Anthropic"), slug: "event-b" },
+      { ...thresholdEvent("OpenAI"), slug: "event-c" },
+    ],
+    companies: [
+      { name: "Anthropic", npmCompanyId: "company-a" },
+      { name: "OpenAI", npmCompanyId: "company-b" },
+    ],
+  });
+  const companyBlocked = applyCaps(config, [
+    candidateFixture({ eventSlug: "event-a", marketSlug: "a", company: "Anthropic", orderUsd: 10 }),
+    candidateFixture({ eventSlug: "event-b", marketSlug: "b", company: "Anthropic", orderUsd: 10 }),
+  ], []);
+  assert.equal(companyBlocked[0]?.status, "candidate");
+  assert.equal(companyBlocked[1]?.status, "skip");
+  assert.equal(companyBlocked[1]?.reason, "company_notional_cap_exceeded");
+
+  const deadlineBlocked = applyCaps({ ...config, globalUsdCap: 100, perCompanyUsdCap: 100 }, [
+    candidateFixture({ eventSlug: "event-a", marketSlug: "a", company: "Anthropic", orderUsd: 15 }),
+    candidateFixture({ eventSlug: "event-c", marketSlug: "c", company: "OpenAI", orderUsd: 15 }),
+  ], []);
+  assert.equal(deadlineBlocked[1]?.status, "skip");
+  assert.equal(deadlineBlocked[1]?.reason, "deadline_notional_cap_exceeded");
+
+  const eventBlocked = applyCaps({ ...config, perCompanyUsdCap: 100, perDeadlineUsdCap: 100 }, [
+    candidateFixture({ eventSlug: "event-a", marketSlug: "a", company: "Anthropic", orderUsd: 10 }),
+    candidateFixture({ eventSlug: "event-a", marketSlug: "b", company: "Anthropic", orderUsd: 10 }),
+  ], []);
+  assert.equal(eventBlocked[1]?.reason, "event_notional_cap_exceeded");
+
+  const globalBlocked = applyCaps({ ...config, perEventUsdCap: 100, perCompanyUsdCap: 100, perDeadlineUsdCap: 100 }, [
+    candidateFixture({ eventSlug: "event-a", marketSlug: "a", company: "Anthropic", orderUsd: 15 }),
+    candidateFixture({ eventSlug: "event-c", marketSlug: "c", company: "OpenAI", orderUsd: 15 }),
+  ], []);
+  assert.equal(globalBlocked[1]?.reason, "global_notional_cap_exceeded");
+});
+
+test("candidate caps count existing locks by company and deadline", () => {
+  const config = normalizeConfig({
+    mode: "live",
+    globalUsdCap: 100,
+    perEventUsdCap: 100,
+    perCompanyUsdCap: 15,
+    perDeadlineUsdCap: 15,
+    events: [thresholdEvent("Anthropic")],
+    companies: [{ name: "Anthropic", npmCompanyId: "company-a" }],
+  });
+  const blockedByCompany = applyCaps(config, [
+    candidateFixture({ company: "Anthropic", orderUsd: 10 }),
+  ], [{
+    eventSlug: "locked-event",
+    marketSlug: "locked-market",
+    company: "Anthropic",
+    deadline: "2026-09-01T03:59:59Z",
+    orderUsd: 10,
+  }]);
+  assert.equal(blockedByCompany[0]?.reason, "company_notional_cap_exceeded");
+
+  const blockedByDeadline = applyCaps({ ...config, perCompanyUsdCap: 100 }, [
+    candidateFixture({ company: "Anthropic", deadline: "2026-08-01T03:59:59Z", orderUsd: 10 }),
+  ], [{
+    eventSlug: "locked-event",
+    marketSlug: "locked-market",
+    company: "OpenAI",
+    deadline: "2026-08-01T03:59:59Z",
+    orderUsd: 10,
+  }]);
+  assert.equal(blockedByDeadline[0]?.reason, "deadline_notional_cap_exceeded");
 });
 
 test("posted probe validation rejects malformed probe files", async () => {
@@ -1159,6 +1241,48 @@ function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): B
       { price: bestAsk, size: 100 },
       { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
     ],
+  };
+}
+
+function candidateFixture(overrides: Partial<ValuationCandidate> = {}): ValuationCandidate {
+  return {
+    signalType: "SOURCE_CONFIRMED_YES",
+    status: "candidate",
+    company: "Anthropic",
+    eventSlug: "event",
+    marketSlug: "market",
+    deadline: "2026-08-01T03:59:59Z",
+    threshold: 1_000,
+    yesTokenId: "yes-token",
+    sourceValuation: 1_010,
+    sourceDate: "2026-07-06",
+    maxEligibleValuation: 1_010,
+    maxEligibleDate: "2026-07-06",
+    distancePct: -0.01,
+    yesAsk: 0.81,
+    bestBid: 0.78,
+    spread: 0.03,
+    liquidity: 500,
+    fairPrice: 1,
+    edge: 0.19,
+    confidence: 10,
+    confidenceScore: 10,
+    edgeScore: 19,
+    maxPrice: 0.94,
+    orderUsd: 10,
+    orderTemplate: {
+      tokenId: "yes-token",
+      side: "BUY",
+      outcome: "YES",
+      orderType: "FAK",
+      amountUsd: 10,
+      maxPrice: 0.94,
+      posted: false,
+    },
+    liveAllowed: true,
+    reason: "source_confirmed",
+    ruleHash: "rule-hash",
+    ...overrides,
   };
 }
 

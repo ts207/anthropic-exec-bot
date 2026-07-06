@@ -2,6 +2,14 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
 
+export type CandidateLock = {
+  eventSlug: string;
+  marketSlug: string;
+  company?: string;
+  deadline?: string;
+  orderUsd: number;
+};
+
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -34,6 +42,8 @@ export async function lockCandidate(config: StrategyConfig, candidate: Valuation
     lockedAt: new Date().toISOString(),
     eventSlug: candidate.eventSlug,
     marketSlug: candidate.marketSlug,
+    company: candidate.company,
+    deadline: candidate.deadline,
     signalType: candidate.signalType,
     orderUsd: candidate.orderUsd,
     maxPrice: candidate.maxPrice,
@@ -59,9 +69,9 @@ export async function writeLiveAck(config: StrategyConfig, configHash: string): 
   return path;
 }
 
-export async function listLocks(config: StrategyConfig): Promise<Array<{ eventSlug: string; marketSlug: string; orderUsd: number }>> {
+export async function listLocks(config: StrategyConfig): Promise<CandidateLock[]> {
   const root = join(config.stateDir, "locks");
-  const entries: Array<{ eventSlug: string; marketSlug: string; orderUsd: number }> = [];
+  const entries: CandidateLock[] = [];
   let events: string[] = [];
   try {
     events = await readdir(root);
@@ -74,9 +84,12 @@ export async function listLocks(config: StrategyConfig): Promise<Array<{ eventSl
     for (const file of files) {
       const raw = await readJson(join(root, eventSlug, file));
       const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      const recordEventSlug = typeof record.eventSlug === "string" ? record.eventSlug : eventSlug;
       entries.push({
-        eventSlug,
+        eventSlug: recordEventSlug,
         marketSlug: String(record.marketSlug ?? file.replace(/-BUY_YES\.json$/, "")),
+        company: typeof record.company === "string" ? record.company : config.events.find((event) => event.slug === recordEventSlug)?.companyName,
+        deadline: typeof record.deadline === "string" ? record.deadline : config.events.find((event) => event.slug === recordEventSlug)?.deadlineIso,
         orderUsd: Number(record.orderUsd ?? 0),
       });
     }

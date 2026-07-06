@@ -67,6 +67,8 @@ export function normalizeConfig(value: unknown): StrategyConfig {
     minLiquidity: numberOr(record.minLiquidity, 100),
     globalUsdCap: numberOr(record.globalUsdCap, 100),
     perEventUsdCap: numberOr(record.perEventUsdCap, 50),
+    perCompanyUsdCap: numberOr(record.perCompanyUsdCap, 50),
+    perDeadlineUsdCap: numberOr(record.perDeadlineUsdCap, 100),
     baseOrderUsd: numberOr(record.baseOrderUsd, 10),
     defaultMaxYesPrice: numberOr(record.defaultMaxYesPrice, 0.95),
     minimumEdge: {
