@@ -823,6 +823,85 @@ test("ladder entry planner creates adjacent range spread paper candidate", () =>
   assert.equal(plans[0]?.range?.modelRangeProbability, 0.6);
 });
 
+test("ladder entry planner blocks curve repair paper when lower leg has structural risk", () => {
+  const config = testConfig();
+  const lower = legFixture({ threshold: 1_000, marketSlug: "lower-curve", closed: true });
+  const higher = legFixture({ threshold: 1_100, marketSlug: "higher-curve" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 990 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [lower, higher],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([
+      ["lower-curve", quoteFixture(0.4, 0.37)],
+      ["higher-curve", quoteFixture(0.68, 0.6)],
+    ]),
+    marketRows: [
+      marketAuditRowFixture({ marketSlug: "lower-curve", state: "NEAR_BOUNDARY", yesAsk: 0.4, yesBid: 0.37 }),
+      marketAuditRowFixture({ marketSlug: "higher-curve", state: "UNCROSSED", yesAsk: 0.68, yesBid: 0.6 }),
+    ],
+    forecasts: [],
+    monotonicity: [{
+      company: "Anthropic",
+      deadline: "2026-08-01T03:59:59Z",
+      lowerMarketSlug: "lower-curve",
+      higherMarketSlug: "higher-curve",
+      lowerThreshold: 1_000,
+      higherThreshold: 1_100,
+      lowerYesAsk: 0.4,
+      lowerYesBid: 0.37,
+      higherYesAsk: 0.68,
+      higherYesBid: 0.6,
+      bidBackedEdge: 0.2,
+      midEdge: 0.24,
+      askOnlyEdge: 0.28,
+      bookAgeMs: 1_000,
+      sameRuleHashFamily: true,
+      sameDirectionSemantics: true,
+      violationTier: "HARD_CROSS_MARKET_BID_VIOLATION",
+      tradeableBuyOnly: true,
+      reason: "higher_threshold_bid_exceeds_lower_threshold_ask_by_min_edge",
+    }],
+    config,
+  });
+  const plan = plans.find((item) => item.entryMode === "MAKER_CURVE_REPAIR_BID");
+  assert.equal(plan?.paperEligible, false);
+  assert.equal(plan?.blockers.includes("market_not_accepting_orders"), true);
+  assert.equal(plan?.reason, "bid_backed_curve_repair_blocked_by_structural_risk");
+});
+
+test("ladder entry planner blocks range spread paper when paired leg book is stale", () => {
+  const config = testConfig();
+  const lower = legFixture({ threshold: 1_000, marketSlug: "lower-range" });
+  const higher = legFixture({ threshold: 1_100, marketSlug: "higher-range" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 990 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [lower, higher],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([
+      ["lower-range", quoteFixture(0.2, 0.18)],
+      ["higher-range", quoteFixture(0.8, 0.75)],
+    ]),
+    marketRows: [
+      marketAuditRowFixture({ marketSlug: "lower-range", state: "NEAR_BOUNDARY", yesAsk: 0.2, yesBid: 0.18 }),
+      marketAuditRowFixture({ marketSlug: "higher-range", state: "UNCROSSED", yesAsk: 0.8, yesBid: 0.75, bookAgeMs: config.orderbookMaxAgeMs + 1 }),
+    ],
+    forecasts: [
+      forecastRowFixture({ company: "Anthropic", marketSlug: "lower-range", threshold: 1_000, pTouchByDeadline: 0.8, modelFairPrice: 0.8 }),
+      forecastRowFixture({ company: "Anthropic", marketSlug: "higher-range", threshold: 1_100, pTouchByDeadline: 0.2, modelFairPrice: 0.2 }),
+    ],
+    monotonicity: [],
+    config,
+  });
+  const plan = plans.find((item) => item.entryMode === "RANGE_SPREAD_PAPER");
+  assert.equal(plan?.paperEligible, false);
+  assert.equal(plan?.blockers.includes("paired_orderbook_stale"), true);
+  assert.equal(plan?.reason, "adjacent_threshold_range_spread_blocked_by_structural_risk");
+});
+
 test("ladder paper opens passive orders and fills only when ask reaches bid", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });

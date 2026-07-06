@@ -250,6 +250,14 @@ function curveRepairPlans(input: {
       const evidence = input.evidenceByCompany.get(leg.company);
       const quote = input.quotes.get(leg.marketSlug);
       const direction = ladderDirection(leg);
+      const structuralBlockers = structuralBlockersFor({
+        leg,
+        direction,
+        evidence,
+        quote,
+        marketRow: rows.get(leg.marketSlug),
+        config: input.config,
+      });
       const passiveBid = curveRepairPassiveBid({
         lowerYesAsk: audit.lowerYesAsk,
         bidBackedEdge: audit.bidBackedEdge,
@@ -270,10 +278,12 @@ function curveRepairPlans(input: {
         requiredEdge: input.config.minimumEdge.curve,
         passiveBidPrice: passiveBid,
         entryMode: "MAKER_CURVE_REPAIR_BID" as const,
-        paperEligible: passiveBid !== null && direction === "UP",
+        paperEligible: passiveBid !== null && structuralBlockers.length === 0,
         liveEligible: false,
-        blockers: direction === "UP" ? [] : ["direction_semantics_unknown"],
-        reason: "bid_backed_curve_repair_passive_bid_paper_only",
+        blockers: structuralBlockers,
+        reason: structuralBlockers.length
+          ? "bid_backed_curve_repair_blocked_by_structural_risk"
+          : "bid_backed_curve_repair_passive_bid_paper_only",
         pairedMarketSlug: audit.higherMarketSlug,
       }];
     });
@@ -306,13 +316,30 @@ function rangeSpreadPlans(input: {
       const lowerForecast = forecastBySlug.get(lower.marketSlug);
       const higherForecast = forecastBySlug.get(higher.marketSlug);
       if (!lowerQuote || !higherQuote || !lowerForecast || !higherForecast) continue;
+      const evidence = input.evidenceByCompany.get(lower.company);
+      const lowerBlockers = structuralBlockersFor({
+        leg: lower,
+        direction: ladderDirection(lower),
+        evidence,
+        quote: lowerQuote,
+        marketRow: rows.get(lower.marketSlug),
+        config: input.config,
+      });
+      const higherBlockers = structuralBlockersFor({
+        leg: higher,
+        direction: ladderDirection(higher),
+        evidence,
+        quote: higherQuote,
+        marketRow: rows.get(higher.marketSlug),
+        config: input.config,
+      }).map((blocker) => `paired_${blocker}`);
+      const blockers = [...new Set([...lowerBlockers, ...higherBlockers])];
       const lowerAsk = lowerQuote.bestAsk;
       const higherNoAsk = higherQuote.bestBid === null ? null : round4(1 - higherQuote.bestBid);
       if (lowerAsk === null || higherNoAsk === null) continue;
       const modelRangeProbability = Math.max(0, lowerForecast.pTouchByDeadline - higherForecast.pTouchByDeadline);
       const combinedCost = round4(lowerAsk + higherNoAsk);
       if (combinedCost >= modelRangeProbability - 0.10) continue;
-      const evidence = input.evidenceByCompany.get(lower.company);
       const base = buildLegEntryPlan({
         leg: lower,
         evidence,
@@ -329,10 +356,12 @@ function rangeSpreadPlans(input: {
         requiredEdge: 0.10,
         passiveBidPrice: combinedCost,
         entryMode: "RANGE_SPREAD_PAPER",
-        paperEligible: true,
+        paperEligible: blockers.length === 0,
         liveEligible: false,
-        blockers: [],
-        reason: "adjacent_threshold_range_spread_paper_only",
+        blockers,
+        reason: blockers.length
+          ? "adjacent_threshold_range_spread_blocked_by_structural_risk"
+          : "adjacent_threshold_range_spread_paper_only",
         range: {
           lowerMarketSlug: lower.marketSlug,
           higherMarketSlug: higher.marketSlug,
