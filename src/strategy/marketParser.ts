@@ -55,6 +55,7 @@ export function parseValuationLegs(event: GammaEvent, config: EventConfig): Valu
       liquidity,
       ruleText,
       ruleHash: sha256(normalizeRuleText(ruleText || question)),
+      ruleFamilyHash: sha256(normalizeRuleFamilyText(ruleText || question)),
     };
 
     if (config.kind === "ranking") {
@@ -155,6 +156,12 @@ function boolOr(value: unknown, fallback: boolean): boolean {
 
 function normalizeRuleText(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function normalizeRuleFamilyText(value: string): string {
+  return normalizeRuleText(value)
+    .replace(/\$\s*[0-9]+(?:\.[0-9]+)?\s*[mbt]\b/gi, "$k")
+    .replace(/\b[0-9]+(?:\.[0-9]+)?\s*(?:million|billion|trillion)\b/gi, "k");
 }
 
 function sha256(value: string): string {

@@ -15,6 +15,7 @@ import { liveBlockers } from "../src/valuationStrategy.ts";
 import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/strategy/probeValidation.ts";
 import { probePath, writeJson } from "../src/strategy/stateStore.ts";
 import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketAudit.ts";
+import { updateFixingWatch } from "../src/strategy/fixingWatch.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -241,8 +242,18 @@ test("posted probe validation accepts current beta BUY FAK probe metadata", asyn
 
 test("monotonicity audit distinguishes bid-backed hard violation from ask-only noise", () => {
   const config = testConfig();
-  const lower = legFixture({ threshold: 900_000_000_000, marketSlug: "lower" });
-  const higher = legFixture({ threshold: 950_000_000_000, marketSlug: "higher" });
+  const lower = legFixture({
+    threshold: 900_000_000_000,
+    marketSlug: "lower",
+    ruleHash: "lower-specific-rule-hash",
+    ruleFamilyHash: "same-rule-family",
+  });
+  const higher = legFixture({
+    threshold: 950_000_000_000,
+    marketSlug: "higher",
+    ruleHash: "higher-specific-rule-hash",
+    ruleFamilyHash: "same-rule-family",
+  });
   const hard = monotonicityAudits([
     { leg: lower, yesAsk: 0.52 },
     { leg: higher, yesAsk: 0.7 },
@@ -262,6 +273,28 @@ test("monotonicity audit distinguishes bid-backed hard violation from ask-only n
   ]), config, new Date("2026-07-05T00:00:01Z"));
   assert.equal(soft[0]?.violationTier, "SOFT_ASK_ONLY_VIOLATION");
   assert.equal(soft[0]?.tradeableBuyOnly, false);
+});
+
+test("market audit newly-crossed state ignores pre-window tape points", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_100_000_000_000 });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-01", implied_valuation: 1_101_000_000_000 },
+    tape_d_prices: [
+      { date: "2026-06-28", implied_valuation: 1_200_000_000_000 },
+      { date: "2026-06-30", implied_valuation: 1_090_000_000_000 },
+      { date: "2026-07-01", implied_valuation: 1_101_000_000_000 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const row = buildMarketAuditRow({
+    leg,
+    evidence,
+    quote: quoteFixture(0.81, 0.78),
+    config,
+    now: new Date("2026-07-02T00:00:00Z"),
+  });
+  assert.equal(row.previousMaxEligibleValuation, 1_090_000_000_000);
+  assert.equal(row.state, "NEWLY_CROSSED");
 });
 
 test("market audit row classifies source-confirmed stale crossed leg", () => {
@@ -285,6 +318,55 @@ test("market audit row classifies source-confirmed stale crossed leg", () => {
   assert.equal(row.crossedQuality, "SOURCE_CONFIRMED_AND_STALE");
   assert.equal(row.depthUnderCap > 0, true);
   assert.equal(row.tradeBand === "tradeable" || row.tradeBand === "maybe", true);
+});
+
+test("fixing watch records first-seen and later replay observations", () => {
+  const row = marketAuditRowFixture({
+    state: "NEWLY_CROSSED",
+    maxEligibleValuation: 1_101_000_000_000,
+    previousMaxEligibleValuation: 1_090_000_000_000,
+    yesAsk: 0.81,
+  });
+  const first = updateFixingWatch(
+    [row],
+    { generatedAt: "2026-07-01T00:00:00Z", rows: [{ ...row, maxEligibleValuation: 1_090_000_000_000 }] },
+    { version: 1, updatedAt: "2026-07-01T00:00:00Z", crosses: {} },
+    new Date("2026-07-02T00:00:00Z"),
+  );
+  assert.equal(first.newCrosses.length, 1);
+  assert.equal(first.newCrosses[0]?.observations[0]?.label, "first_seen");
+  assert.equal(first.newCrosses[0]?.observations[0]?.fakUnderCapWouldFill, true);
+
+  const later = updateFixingWatch(
+    [{ ...row, yesAsk: 0.96, settlementEdge: 0.04, crossedQuality: "SOURCE_CONFIRMED_BUT_ALREADY_PRICED", tradeBand: "alert" }],
+    first.snapshot,
+    first.state,
+    new Date("2026-07-02T00:00:31Z"),
+  );
+  const tracked = later.state.crosses[first.newCrosses[0]?.key ?? ""];
+  assert.equal(tracked?.observations.some((obs) => obs.label === "plus_5s"), true);
+  assert.equal(tracked?.observations.some((obs) => obs.label === "plus_30s"), true);
+  assert.equal(later.missedEdgeReport[0]?.repricedByLatest, 0.1499999999999999);
+});
+
+test("fixing watch baselines first run unless replay is explicit", () => {
+  const row = marketAuditRowFixture({ state: "NEWLY_CROSSED" });
+  const baseline = updateFixingWatch(
+    [row],
+    null,
+    { version: 1, updatedAt: "2026-07-01T00:00:00Z", crosses: {} },
+    new Date("2026-07-02T00:00:00Z"),
+  );
+  assert.equal(baseline.newCrosses.length, 0);
+
+  const replay = updateFixingWatch(
+    [row],
+    null,
+    { version: 1, updatedAt: "2026-07-01T00:00:00Z", crosses: {} },
+    new Date("2026-07-02T00:00:00Z"),
+    { replayExisting: true },
+  );
+  assert.equal(replay.newCrosses.length, 1);
 });
 
 function testConfig(): StrategyConfig {
@@ -336,6 +418,7 @@ function legFixture(overrides: Partial<ValuationLeg>): ValuationLeg {
     liquidity: 500,
     ruleText: "reaches or exceeds the listed amount",
     ruleHash: "rule-hash",
+    ruleFamilyHash: "rule-family-hash",
     parseStatus: "ok",
     ...overrides,
   };
@@ -365,5 +448,36 @@ function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): B
       { price: bestAsk, size: 100 },
       { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
     ],
+  };
+}
+
+function marketAuditRowFixture(overrides: Partial<ReturnType<typeof buildMarketAuditRow>> = {}): ReturnType<typeof buildMarketAuditRow> {
+  return {
+    company: "Anthropic",
+    eventSlug: "event",
+    marketSlug: "market",
+    threshold: 1_100_000_000_000,
+    deadline: "2026-08-01T03:59:59Z",
+    label: "HIGH",
+    state: "NEWLY_CROSSED",
+    crossedQuality: "SOURCE_CONFIRMED_AND_STALE",
+    latestValuation: 1_101_000_000_000,
+    latestDate: "2026-07-01",
+    maxEligibleValuation: 1_101_000_000_000,
+    maxEligibleDate: "2026-07-01",
+    previousMaxEligibleValuation: 1_090_000_000_000,
+    sourceDateAgeHours: 24,
+    yesAsk: 0.81,
+    yesBid: 0.78,
+    settlementEdge: 0.19,
+    distancePct: 0.001,
+    depthUnderCap: 100,
+    bookAgeMs: 1_000,
+    ruleConfidence: 10,
+    tradeScore: 100,
+    tradeBand: "tradeable",
+    liveBlockers: [],
+    reason: "source_confirmed_and_stale",
+    ...overrides,
   };
 }

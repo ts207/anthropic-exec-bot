@@ -16,10 +16,11 @@ import { executeCandidate, postedProbe } from "./strategy/betaExecution.ts";
 import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
+import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -57,6 +58,9 @@ async function main(): Promise<void> {
   }
   if (command === "market-audit") {
     return print(await marketAudit(loaded, args));
+  }
+  if (command === "fixing-watch") {
+    return print(await fixingWatch(loaded, args));
   }
   if (command === "run") {
     for (;;) {
@@ -331,6 +335,69 @@ export async function marketAudit(loaded: LoadedStrategyConfig, args: Map<string
   };
   await appendJsonl(join(loaded.config.logsDir, "market_audit.jsonl"), report);
   await writeJson(join(loaded.config.stateDir, "last_market_audit.json"), report);
+  return report;
+}
+
+export async function fixingWatch(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const durationMs = Math.max(0, Number(args.get("duration-ms") ?? 0));
+  const intervalMs = Math.max(1_000, Number(args.get("interval-ms") ?? loaded.config.pollMs));
+  const replayExisting = args.get("replay-existing") === "true" || args.get("replay-existing") === "1";
+  const startedAt = Date.now();
+  let latest: Record<string, unknown> | undefined;
+  do {
+    latest = await fixingWatchCycleWithOptions(loaded, replayExisting);
+    if (Date.now() - startedAt >= durationMs) break;
+    await sleep(intervalMs);
+  } while (true);
+  return {
+    ...latest,
+    durationMs,
+    intervalMs,
+  };
+}
+
+async function fixingWatchCycleWithOptions(loaded: LoadedStrategyConfig, replayExisting: boolean): Promise<Record<string, unknown>> {
+  const state = await collectValuationState(loaded.config);
+  const rows = await buildMarketAuditRows(loaded, state);
+  const previousSnapshot = parseFixingWatchSnapshot(await readJson(fixingWatchSnapshotPath(loaded.config)));
+  const priorWatchState = parseFixingWatchState(await readJson(fixingWatchStatePath(loaded.config)));
+  const update = updateFixingWatch(rows, previousSnapshot, priorWatchState, new Date(), { replayExisting });
+  await writeJson(fixingWatchStatePath(loaded.config), update.state);
+  await writeJson(fixingWatchSnapshotPath(loaded.config), update.snapshot);
+  const report = {
+    ok: true,
+    generatedAt: update.snapshot.generatedAt,
+    mode: loaded.config.mode,
+    liveEligible: false,
+    livePolicy: "fixing_watch_is_research_only",
+    replayExisting,
+    seededBaseline: previousSnapshot === null,
+    summary: {
+      legCount: rows.length,
+      sourceConfirmedLegCount: rows.filter((row) => row.state === "NEWLY_CROSSED" || row.state === "PREVIOUSLY_CROSSED").length,
+      newCrossCount: update.newCrosses.length,
+      trackedCrossCount: Object.keys(update.state.crosses).length,
+      observationsRecordedCount: update.observationsRecorded.length,
+      staleLiquidityAtDetectionCount: update.newCrosses.filter((cross) => cross.observations.some((obs) => obs.label === "first_seen" && obs.staleLiquidity)).length,
+      fakUnderCapWouldFillCount: update.newCrosses.filter((cross) => cross.observations.some((obs) => obs.label === "first_seen" && obs.fakUnderCapWouldFill)).length,
+    },
+    newCrosses: update.newCrosses.map((cross) => ({
+      company: cross.company,
+      eventSlug: cross.eventSlug,
+      marketSlug: cross.marketSlug,
+      threshold: cross.threshold,
+      sourceDate: cross.sourceDate,
+      maxEligibleValuation: cross.maxEligibleValuation,
+      previousSnapshotMaxEligibleValuation: cross.previousSnapshotMaxEligibleValuation,
+      previousTapeMaxEligibleValuation: cross.previousTapeMaxEligibleValuation,
+      firstSeenAt: cross.firstSeenAt,
+      observations: cross.observations,
+    })),
+    observationsRecorded: update.observationsRecorded,
+    missedEdgeReport: update.missedEdgeReport,
+  };
+  await appendJsonl(join(loaded.config.logsDir, "fixing_watch.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_fixing_watch.json"), report);
   return report;
 }
 
@@ -647,7 +714,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 

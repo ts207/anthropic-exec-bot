@@ -102,6 +102,7 @@ export type ValuationLeg = {
   liquidity: number;
   ruleText: string;
   ruleHash: string;
+  ruleFamilyHash: string;
   parseStatus: "ok" | "malformed_threshold" | "unsupported";
   parseReason?: string;
 };

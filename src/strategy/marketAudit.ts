@@ -99,13 +99,32 @@ export function previousEligibleMax(evidence: NpmEvidence | undefined, latestDat
   return Math.max(...previous.map((point) => point.impliedValuation));
 }
 
+export function previousEligibleMaxForLeg(
+  evidence: NpmEvidence | undefined,
+  leg: ValuationLeg,
+  latestDate: string | undefined,
+): number | undefined {
+  if (!evidence || !latestDate) return undefined;
+  const deadline = Date.parse(leg.deadlineIso);
+  const start = leg.marketWindowStartIso ? Date.parse(leg.marketWindowStartIso) : Number.NEGATIVE_INFINITY;
+  const previous = evidence.tape.filter((point) => {
+    const ts = Date.parse(`${point.date}T00:00:00Z`);
+    return Number.isFinite(ts)
+      && ts >= start
+      && ts <= deadline
+      && point.date < latestDate;
+  });
+  if (!previous.length) return undefined;
+  return Math.max(...previous.map((point) => point.impliedValuation));
+}
+
 export function classifyMarketState(
   leg: ValuationLeg,
   evidence: NpmEvidence | undefined,
 ): MarketState {
   if (leg.parseStatus !== "ok" || leg.threshold === undefined || !evidence?.identityOk) return "AMBIGUOUS";
   const maxEligible = evidence.maxEligibleValuation ?? evidence.latestValuation;
-  const previousMax = previousEligibleMax(evidence, evidence.maxEligibleDate ?? evidence.latestTapeDate);
+  const previousMax = previousEligibleMaxForLeg(evidence, leg, evidence.maxEligibleDate ?? evidence.latestTapeDate);
   if (maxEligible >= leg.threshold) {
     if (previousMax !== undefined && previousMax < leg.threshold) return "NEWLY_CROSSED";
     return "PREVIOUSLY_CROSSED";
@@ -169,7 +188,7 @@ export function buildMarketAuditRow(input: {
     latestDate: evidence?.latestTapeDate,
     maxEligibleValuation: evidence?.maxEligibleValuation ?? evidence?.latestValuation,
     maxEligibleDate: evidence?.maxEligibleDate ?? evidence?.latestTapeDate,
-    previousMaxEligibleValuation: previousEligibleMax(evidence, evidence?.maxEligibleDate ?? evidence?.latestTapeDate),
+    previousMaxEligibleValuation: previousEligibleMaxForLeg(evidence, leg, evidence?.maxEligibleDate ?? evidence?.latestTapeDate),
     sourceDateAgeHours: sourceAgeHours,
     yesAsk,
     yesBid: quote?.bestBid ?? null,
@@ -234,7 +253,7 @@ export function monotonicityAudits(
       }
       const ages = [bookAgeMs(lowerQuote, now), bookAgeMs(higherQuote, now)].filter((age): age is number => age !== undefined);
       const maxAge = ages.length ? Math.max(...ages) : null;
-      const sameRuleHashFamily = lower.leg.ruleHash === higher.leg.ruleHash;
+      const sameRuleHashFamily = (lower.leg.ruleFamilyHash ?? lower.leg.ruleHash) === (higher.leg.ruleFamilyHash ?? higher.leg.ruleHash);
       const sameDirectionSemantics = lower.leg.eventSlug === higher.leg.eventSlug && lower.leg.company === higher.leg.company && lower.leg.deadlineIso === higher.leg.deadlineIso;
       const tier = classifyViolationTier({
         bidBackedEdge,
