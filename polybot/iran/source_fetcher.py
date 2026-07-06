@@ -7,7 +7,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
 import requests
@@ -160,6 +160,38 @@ def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
     )
 
 
+def fetch_listing_article_urls(url: str, user_agent: str = "polybot/0.1", *, limit: int = 10) -> list[str]:
+    response = requests.get(url, headers={"User-Agent": user_agent}, timeout=20)
+    response.raise_for_status()
+    return extract_listing_article_urls(url, response.text, limit=limit)
+
+
+def extract_listing_article_urls(url: str, markup: str, *, limit: int = 10) -> list[str]:
+    base = urlparse(url)
+    soup = BeautifulSoup(markup, "lxml")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for link in soup.find_all("a"):
+        href = str(link.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:")):
+            continue
+        absolute = urljoin(url, href).split("#", 1)[0]
+        parsed = urlparse(absolute)
+        if parsed.netloc.lower().removeprefix("www.") != base.netloc.lower().removeprefix("www."):
+            continue
+        if absolute.rstrip("/") == url.rstrip("/"):
+            continue
+        if not _looks_like_news_article_path(parsed.path):
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        urls.append(absolute)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
 def fetch_feed_articles(
     feed_url: str,
     user_agent: str = "polybot/0.1",
@@ -305,27 +337,46 @@ def _promote_with_feed_text(article: Article, target_url: str) -> Article | None
 class ArticleStore:
     def __init__(self, articles_path: Path):
         self.articles_path = articles_path
-        self._seen = self._load_seen()
+        self._seen, self._seen_content = self._load_seen()
 
     def is_seen(self, article: Article) -> bool:
-        return article.hash in self._seen
+        return article.hash in self._seen or _content_fingerprint(article) in self._seen_content
 
     def store(self, article: Article) -> bool:
         if self.is_seen(article):
             return False
         append_jsonl(self.articles_path, article.__dict__)
         self._seen.add(article.hash)
+        self._seen_content.add(_content_fingerprint(article))
         return True
 
-    def _load_seen(self) -> set[str]:
+    def _load_seen(self) -> tuple[set[str], set[str]]:
         if not self.articles_path.exists():
-            return set()
+            return set(), set()
         seen: set[str] = set()
+        seen_content: set[str] = set()
         for line in self.articles_path.read_text(encoding="utf-8").splitlines():
             match = re.search(r'"hash":"([^"]+)"', line)
             if match:
                 seen.add(match.group(1))
-        return seen
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(raw, dict):
+                seen_content.add(_content_fingerprint(
+                    Article(
+                        url=str(raw.get("url") or ""),
+                        domain=str(raw.get("domain") or ""),
+                        title=str(raw.get("title") or ""),
+                        published_at=raw.get("published_at") if isinstance(raw.get("published_at"), str) else None,
+                        fetched_at=str(raw.get("fetched_at") or ""),
+                        raw_text=str(raw.get("raw_text") or ""),
+                        hash=str(raw.get("hash") or ""),
+                        source_kind=str(raw.get("source_kind") or "article"),
+                    )
+                ))
+        return seen, seen_content
 
 
 def _first_line(text: str) -> str:
@@ -386,6 +437,15 @@ def _clean_text(value: str) -> str:
 def _matches_any(text: str, terms: list[str]) -> bool:
     lowered = text.lower()
     return any(term.lower() in lowered for term in terms)
+
+
+def _content_fingerprint(article: Article) -> str:
+    normalized = re.sub(r"\s+", " ", f"{article.source_kind}\n{article.title}\n{article.raw_text}".strip().lower())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _looks_like_news_article_path(path: str) -> bool:
+    return bool(re.search(r"/(?:news|features|opinions|opinion|program|gallery|video|liveblog)/", path))
 
 
 def _looks_like_html(content: bytes) -> bool:

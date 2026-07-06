@@ -4,8 +4,8 @@ cd /home/tstuv/poly/anthropic-exec-bot
 set -a
 source .env
 set +a
-# So the classifier's "claude_cli" provider can find the Claude Code CLI
-# (installed to ~/.local/bin), which isn't on PATH for non-login shells.
+# So the classifier's CLI provider can find Codex/Claude binaries in
+# non-login shells.
 export PATH="$HOME/.local/bin:$PATH"
 
 mkdir -p logs

@@ -135,3 +135,25 @@ def verify_critical_outcomes(config: LocationBotConfig, verification: LocationMa
             problems.append(f"{name}: {v.mismatch_reason}")
     if problems:
         raise ValueError("location market verification failed: " + "; ".join(problems))
+
+
+def verify_all_outcomes(config: LocationBotConfig, verification: LocationMarketVerification, *, require_tradeable: bool = False) -> None:
+    """Fail closed if any configured outcome no longer matches Gamma.
+
+    The location bot carries hand-pasted token/condition IDs for every leg of
+    the grouped market. Even when only a subset is an automatic rotation target,
+    live arming should prove the whole 19-outcome map still describes the same
+    live event the classifier is reasoning about.
+    """
+    problems: list[str] = []
+    for outcome in config.outcomes:
+        v = verification.outcomes.get(outcome.name)
+        if v is None or not v.found:
+            problems.append(f"{outcome.name}: not found on live event")
+            continue
+        if v.mismatch_reason:
+            problems.append(f"{outcome.name}: {v.mismatch_reason}")
+        if require_tradeable and not v.tradeable:
+            problems.append(f"{outcome.name}: market_not_tradeable")
+    if problems:
+        raise ValueError("location market verification failed: " + "; ".join(problems))

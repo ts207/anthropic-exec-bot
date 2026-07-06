@@ -4,6 +4,8 @@ import json
 import os
 import re
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 import requests
@@ -113,8 +115,10 @@ class LLMLocationClassifier:
             raw = self._openai(prompt)
         elif provider == "anthropic":
             raw = self._anthropic(prompt)
+        elif provider in {"codex_cli", "codex-cli", "codex"}:
+            raw = self._cli_with_anthropic_fallback(lambda: self._codex_cli(prompt), "codex CLI", prompt)
         elif provider in {"claude_cli", "claude-cli", "claude_code_cli"}:
-            raw = self._claude_cli(prompt)
+            raw = self._cli_with_anthropic_fallback(lambda: self._claude_cli(prompt), "claude CLI", prompt)
         else:
             raise RuntimeError(f"unsupported classifier provider: {self.config.provider}")
         return LocationSignal.from_dict(_json_object(raw))
@@ -140,9 +144,9 @@ class LLMLocationClassifier:
                     chunks.append(content["text"])
         return "\n".join(chunks)
 
-    def _anthropic(self, prompt: str) -> str:
+    def _anthropic(self, prompt: str, *, model: str | None = None) -> str:
         response = self._anthropic_client_or_build().messages.create(
-            model=self.config.model,
+            model=model or self.config.model,
             max_tokens=8192,
             thinking={"type": "adaptive"},
             cache_control={"type": "ephemeral"},
@@ -156,6 +160,21 @@ class LLMLocationClassifier:
         if not text.strip():
             raise RuntimeError(f"anthropic classifier returned no text (stop_reason={response.stop_reason})")
         return text
+
+    def _cli_with_anthropic_fallback(self, runner: Callable[[], str], label: str, prompt: str) -> str:
+        try:
+            return runner()
+        except Exception as exc:
+            if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY")):
+                raise
+            fallback_model = os.getenv("ANTHROPIC_CLASSIFIER_FALLBACK_MODEL") or "claude-sonnet-4-6"
+            raw = self._anthropic(prompt, model=fallback_model)
+            usage = dict(self.last_usage or {})
+            usage["fallback_from"] = label
+            usage["fallback_error"] = str(exc)[:500]
+            usage["fallback_model"] = fallback_model
+            self.last_usage = usage
+            return raw
 
     def _anthropic_client_or_build(self) -> Any:
         if self._anthropic_client is None:
@@ -176,8 +195,53 @@ class LLMLocationClassifier:
         stdout = self._cli_runner(prompt) if self._cli_runner is not None else self._run_claude_cli(prompt)
         return self._extract_claude_cli_result_text(stdout)
 
+    def _codex_cli(self, prompt: str) -> str:
+        stdout = self._cli_runner(prompt) if self._cli_runner is not None else self._run_codex_cli(prompt)
+        return self._extract_codex_cli_result_text(stdout)
+
+    def _run_codex_cli(self, prompt: str) -> str:
+        binary = _cli_binary(self.config.cli_binary, provider_default="codex")
+        timeout = self.config.cli_timeout_seconds
+        with tempfile.TemporaryDirectory(prefix="location-codex-classifier-") as tmp:
+            schema_path = Path(tmp) / "schema.json"
+            output_path = Path(tmp) / "last-message.json"
+            schema_path.write_text(json.dumps(_OUTPUT_SCHEMA), encoding="utf-8")
+            try:
+                completed = subprocess.run(
+                    [
+                        binary,
+                        "exec",
+                        "--ephemeral",
+                        "--ignore-rules",
+                        "--sandbox",
+                        "read-only",
+                        "--ask-for-approval",
+                        "never",
+                        "--model",
+                        self.config.model,
+                        "--output-schema",
+                        str(schema_path),
+                        "--output-last-message",
+                        str(output_path),
+                        "-",
+                    ],
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except FileNotFoundError as exc:
+                raise RuntimeError(f"codex CLI binary {binary!r} not found; install Codex CLI and run `codex login`") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"codex CLI timed out after {timeout}s") from exc
+            if completed.returncode != 0:
+                raise RuntimeError(f"codex CLI exited {completed.returncode}: {completed.stderr.strip()[:500]}")
+            if output_path.exists():
+                return output_path.read_text(encoding="utf-8")
+            return completed.stdout
+
     def _run_claude_cli(self, prompt: str) -> str:
-        binary = self.config.cli_binary
+        binary = _cli_binary(self.config.cli_binary, provider_default="claude")
         timeout = self.config.cli_timeout_seconds
         env = {key: value for key, value in os.environ.items() if key not in {"ANTHROPIC_API_KEY", "LLM_API_KEY"}}
         try:
@@ -215,6 +279,19 @@ class LLMLocationClassifier:
         if completed.returncode != 0:
             raise RuntimeError(f"claude CLI exited {completed.returncode}: {completed.stderr.strip()[:500]}")
         return completed.stdout
+
+    def _extract_codex_cli_result_text(self, stdout: str) -> str:
+        text = stdout.strip()
+        if not text:
+            raise RuntimeError("codex CLI returned no result text")
+        try:
+            parsed: Any = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        if isinstance(parsed, dict):
+            self.last_usage = {"provider": "codex_cli"}
+            return json.dumps(parsed)
+        raise RuntimeError(f"unexpected codex CLI output shape: {stdout[:300]!r}")
 
     def _extract_claude_cli_result_text(self, stdout: str) -> str:
         try:
@@ -332,3 +409,9 @@ def _bounded_article_text(text: str, limit: int = 12000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n[article text truncated]"
+
+
+def _cli_binary(configured: str, *, provider_default: str) -> str:
+    if provider_default == "codex":
+        return os.getenv("CODEX_CLI_BINARY") or ("codex" if configured == "claude" else configured)
+    return configured or provider_default

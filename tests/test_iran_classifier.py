@@ -612,6 +612,7 @@ def test_run_once_promotes_feed_item_to_full_article_hold_signal(tmp_path, monke
             feed_urls=["https://feeds.example/reuters"],
             allow_feed_auto_trade=False,
             promote_feed_to_article=True,
+            max_trade_article_age_hours=10_000,
         ),
         data_dir=tmp_path / "data",
         logs_dir=tmp_path / "logs",

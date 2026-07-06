@@ -23,9 +23,11 @@ from polybot.location.config import (
 )
 from polybot.location.decision import LocationDecision, classify_agreement, final_decision, time_decay_decision
 from polybot.location.executor import LocationExecutor
+from polybot.location.runner import LocationProtectionBot
 from polybot.location.types import LocationSignal
 from polybot.location import market_verifier as market_verifier_mod
-from polybot.location.market_verifier import verify_critical_outcomes, verify_location_event
+from polybot.location.market_verifier import verify_all_outcomes, verify_critical_outcomes, verify_location_event
+from polybot.iran.source_fetcher import ArticleStore, extract_listing_article_urls
 
 
 def article(text: str, domain: str = "reuters.com", title: str | None = None) -> Article:
@@ -289,6 +291,51 @@ def test_claude_cli_location_classifier_error_envelope_raises() -> None:
         classifier.classify(article("test"), "rules")
 
 
+def _codex_cli_classifier(cli_runner) -> LLMLocationClassifier:
+    config = _config(classifier=ClassifierConfig(provider="codex_cli", model="gpt-5"))
+    return LLMLocationClassifier(config.classifier, config, cli_runner=cli_runner)
+
+
+def _location_payload(**overrides) -> dict:
+    payload = {
+        "source_is_trusted": True,
+        "qualifies_as_senior_round": True,
+        "round_status": "scheduled",
+        "location_country_name": "Pakistan",
+        "confirmed_location": "pakistan",
+        "evidence_strength": "confirmed_scheduled",
+        "would_resolve_held_location_yes": False,
+        "would_resolve_held_location_no": True,
+        "level": "4A",
+        "quote_supporting_trigger": "The next round will begin in Islamabad.",
+        "source_tier": "wire",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_codex_cli_location_classifier_parses_json_result() -> None:
+    classifier = _codex_cli_classifier(lambda prompt: json.dumps(_location_payload()))
+    signal = classifier.classify(article("The next round will begin in Islamabad."), "rules")
+    assert signal.confirmed_location == "pakistan"
+    assert signal.level == "4A"
+
+
+def test_codex_cli_location_classifier_falls_back_to_anthropic(monkeypatch) -> None:
+    classifier = _codex_cli_classifier(lambda prompt: (_ for _ in ()).throw(RuntimeError("cli down")))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def fake_anthropic(prompt: str, *, model: str | None = None) -> str:
+        classifier.last_usage = {"input_tokens": 10}
+        return json.dumps(_location_payload(confirmed_location="oman", location_country_name="Oman"))
+
+    monkeypatch.setattr(classifier, "_anthropic", fake_anthropic)
+    signal = classifier.classify(article("The next round will begin in Oman."), "rules")
+    assert signal.confirmed_location == "oman"
+    assert classifier.last_usage is not None
+    assert classifier.last_usage["fallback_from"] == "codex CLI"
+
+
 def test_prompt_includes_analyst_context_when_set() -> None:
     from polybot.location.classifier import _prompt
 
@@ -486,6 +533,42 @@ def test_verify_critical_outcomes_raises_on_missing_rotation_target(monkeypatch)
     verification = verify_location_event(config)
     with pytest.raises(ValueError, match="location market verification failed"):
         verify_critical_outcomes(config, verification)
+
+
+def _event_for_config(config: LocationBotConfig, *, inactive: str | None = None, wrong_token: str | None = None) -> dict:
+    markets = []
+    for outcome in config.outcomes:
+        markets.append(
+            _fake_market(
+                label=outcome.label,
+                question=f"{outcome.label}?",
+                slug=f"{outcome.name}-slug",
+                condition_id=outcome.condition_id,
+                yes_token=("WRONG-TOKEN" if outcome.name == wrong_token else outcome.yes_token_id),
+                no_token=outcome.no_token_id,
+                active=outcome.name != inactive,
+                accepting_orders=outcome.name != inactive,
+            )
+        )
+    return _fake_event(markets)
+
+
+def test_verify_all_outcomes_checks_every_configured_leg(monkeypatch) -> None:
+    config = _config()
+    event = _event_for_config(config, wrong_token="russia")
+    monkeypatch.setattr(market_verifier_mod, "fetch_event_by_slug", lambda slug, **kw: event)
+    verification = verify_location_event(config)
+    with pytest.raises(ValueError, match="russia: token_id_mismatch"):
+        verify_all_outcomes(config, verification)
+
+
+def test_verify_all_outcomes_live_requires_tradeable_markets(monkeypatch) -> None:
+    config = _config()
+    event = _event_for_config(config, inactive="oman")
+    monkeypatch.setattr(market_verifier_mod, "fetch_event_by_slug", lambda slug, **kw: event)
+    verification = verify_location_event(config)
+    with pytest.raises(ValueError, match="oman: market_not_tradeable"):
+        verify_all_outcomes(config, verification, require_tradeable=True)
 
 
 def test_verify_location_event_raises_on_pinned_rule_hash_mismatch(monkeypatch) -> None:
@@ -686,3 +769,79 @@ def test_promoted_feed_summary_allowed_when_feed_auto_trade_enabled(tmp_path) ->
     bot = _policy_bot(tmp_path, _sources(allow_feed_auto_trade=True))
     out = bot._enforce_source_policy(_aged_article(None, source_kind="promoted_feed_summary"), _trade_decision())
     assert out.action == "ROTATE_YES"
+
+
+def test_article_store_dedupes_same_extracted_text_with_different_hash(tmp_path) -> None:
+    store = ArticleStore(tmp_path / "articles.jsonl")
+    first = Article(
+        url="https://www.aljazeera.com/tag/israel-iran-conflict/",
+        domain="aljazeera.com",
+        title="Tag page",
+        published_at=None,
+        fetched_at="2026-07-06T00:00:00Z",
+        raw_text="Same extracted listing text",
+        hash="url-hash-1",
+        source_kind="article",
+    )
+    second = Article(
+        url="https://www.aljazeera.com/tag/israel-iran-conflict/?page=2",
+        domain="aljazeera.com",
+        title="Tag page",
+        published_at=None,
+        fetched_at="2026-07-06T00:01:00Z",
+        raw_text="Same   extracted\nlisting text",
+        hash="url-hash-2",
+        source_kind="article",
+    )
+    assert store.store(first) is True
+    assert store.store(second) is False
+
+
+def test_extract_listing_article_urls_keeps_same_site_articles_only() -> None:
+    markup = """
+    <main>
+      <a href="/news/2026/7/6/iran-talks">Iran talks</a>
+      <a href="/news/2026/7/6/iran-talks#updates">duplicate</a>
+      <a href="/tag/israel-iran-conflict/">tag self</a>
+      <a href="https://example.com/news/other">external</a>
+    </main>
+    """
+    urls = extract_listing_article_urls("https://www.aljazeera.com/tag/israel-iran-conflict/", markup)
+    assert urls == ["https://www.aljazeera.com/news/2026/7/6/iran-talks"]
+
+
+def test_location_feed_summary_skip_does_not_increment_classifier_budget(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources(allow_feed_auto_trade=True))
+    bot.classifier = object()  # would crash if the classifier were reached
+    decision = bot.process_article(_aged_article(None, source_kind="promoted_feed_summary"))
+    assert decision.action == "ALERT_ONLY"
+    assert decision.reason == "feed_summary_classification_disabled"
+    assert not (bot.store.data_dir / "classifier_budget.json").exists()
+
+
+class _CountingLocationClassifier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, article: Article, market_rule_text: str) -> LocationSignal:
+        self.calls += 1
+        return _signal(confirmed_location="qatar", quote_supporting_trigger="The next round will begin in Qatar.")
+
+
+def test_location_classifier_budget_persists_across_bot_instances(tmp_path) -> None:
+    classifier_config = ClassifierConfig(max_escalations_per_hour=1, max_escalations_per_day=10, max_classifier_errors_per_hour=10)
+    config = _config(classifier=classifier_config, data_dir=tmp_path / "state", logs_dir=tmp_path / "logs")
+    first = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+    first_classifier = _CountingLocationClassifier()
+    first.classifier = first_classifier
+    first_decision = first.process_article(article("The next round will begin in Qatar."))
+    assert first_decision.reason == "held_location_reinforced"
+    assert first_classifier.calls == 1
+
+    second = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+    second_classifier = _CountingLocationClassifier()
+    second.classifier = second_classifier
+    second_decision = second.process_article(article("The next round will begin in Qatar. New item."))
+    assert second_decision.action == "ALERT_ONLY"
+    assert second_decision.reason == "classifier_budget_exhausted_hourly"
+    assert second_classifier.calls == 0

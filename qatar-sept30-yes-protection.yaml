@@ -211,8 +211,8 @@ trigger:
   trusted_single_source_execution: true
 
 classifier:
-  provider: "claude_cli"
-  model: "claude-sonnet-4-6"
+  provider: "codex_cli"
+  model: "gpt-5"
   # 2-pass agreement required before any live trade fires (2026-07-06 hardening):
   # this market settles on a technical-vs-senior-level wording distinction that
   # a single classifier pass can misread. A no_meeting collapse still fast-paths
@@ -277,11 +277,12 @@ sources:
     # Reuters discovery via Google News RSS (no stable public Reuters RSS --
     # same approach as the July17 bot). Items resolve to reuters.com publisher
     # URLs; reuters.com blocks direct article fetches, so these usually stay
-    # promoted feed summaries (execution-grade while allow_feed_auto_trade
-    # is true).
+    # promoted feed summaries. With classify_feed_summaries=false, those alert
+    # without spending classifier calls until explicitly enabled.
     - "https://news.google.com/rss/search?q=site:reuters.com%20iran%20talks&hl=en-US&gl=US&ceid=US:en"
   # Flattened source levels (operator decision 2026-07-06): all sources are
-  # execution-grade, including feed items and promoted feed summaries. The
+  # execution-grade, except feed items/promoted feed summaries while
+  # classify_feed_summaries=false. The
   # remaining trade gates are the 2-pass classifier agreement, verbatim quote
   # verification, the classifier's tier-one source_tier requirement, the
   # 24h freshness gate below, and the operator gate.
@@ -289,7 +290,7 @@ sources:
   promote_feed_to_article: true
   max_trade_article_age_hours: 24
   # Without include terms every AJ all.xml item is stored and classified
-  # (claude CLI call per article). Any relevant US-Iran talks item will
+  # (Codex CLI call per article). Any relevant US-Iran talks item will
   # contain at least one of these.
   feed_include_terms:
     - "iran"

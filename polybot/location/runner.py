@@ -13,17 +13,17 @@ from polybot.log import log_event
 from polybot.iran.executor import DryRunTradingAdapter, LiveClobTradingAdapter, TradingAdapter
 from polybot.iran.notifier import TelegramNotifier
 from polybot.iran.operator import OperatorGate
-from polybot.iran.runner import _article_age_hours
-from polybot.iran.source_fetcher import ArticleStore, fetch_article, fetch_feed_articles, promote_feed_article
+from polybot.iran.runner import ClassifierBudgetStore, _article_age_hours, _is_feed_summary
+from polybot.iran.source_fetcher import ArticleStore, fetch_article, fetch_feed_articles, fetch_listing_article_urls, promote_feed_article
 from polybot.iran.storage import StateStore, append_jsonl
 from polybot.iran.types import Article
 from polybot.iran.verifier import quote_in_article
 
-from .classifier import build_location_classifier, run_location_classifier_passes
+from .classifier import build_location_classifier
 from .config import LocationBotConfig, load_location_config
 from .decision import LocationDecision, classify_agreement, final_decision, time_decay_decision
 from .executor import TERMINAL_STATES, LocationExecutor
-from .market_verifier import verify_critical_outcomes, verify_location_event
+from .market_verifier import verify_all_outcomes, verify_location_event
 
 
 def domain_allowed(domain: str, allowed: list[str]) -> bool:
@@ -86,7 +86,7 @@ def preflight_location_command(config_path: Path, live_flag: bool = False) -> in
         status.blockers.append("live_position_query_failed")
     try:
         verification = verify_location_event(config)
-        verify_critical_outcomes(config, verification)
+        verify_all_outcomes(config, verification, require_tradeable=live_flag)
         result["market_verification"] = verification.as_dict()
     except Exception as exc:
         result["market_verification_error"] = str(exc)
@@ -166,7 +166,7 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
     if live_flag and config.execution.dry_run:
         raise SystemExit("--live requires execution.dry_run=false")
     verification = verify_location_event(config)
-    verify_critical_outcomes(config, verification)
+    verify_all_outcomes(config, verification, require_tradeable=live_flag)
     if live_flag:
         held = config.held_outcome()
         held_verification = verification.outcomes.get(held.name)
@@ -198,6 +198,7 @@ class LocationProtectionBot:
         self.article_store = ArticleStore(config.logs_dir / "location_articles.jsonl")
         self.notifier = TelegramNotifier()
         self.classifier = build_location_classifier(config)
+        self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
         self.executor = LocationExecutor(config, self.store, self.notifier, adapter)
         self.operator_gate = operator_gate
         self.live_requested = live_requested
@@ -211,14 +212,10 @@ class LocationProtectionBot:
         if decay.action != "NO_ACTION" and self._decay_still_actionable(decay):
             decisions.append(self._execute_if_allowed(decay, _synthetic_article(decay.reason)))
         for url in self.config.sources.poll_urls:
-            try:
-                article = fetch_article(url, SETTINGS.user_agent)
-            except Exception as exc:
-                log_event("location_source_fetch_error", url=url, error=str(exc))
-                continue
-            if not self.article_store.store(article):
-                continue
-            decisions.append(self.process_article(article, always_notify=True))
+            for article in self._fetch_poll_articles(url):
+                if not self.article_store.store(article):
+                    continue
+                decisions.append(self.process_article(article, always_notify=True))
         for feed_url in self.config.sources.feed_urls:
             try:
                 articles = fetch_feed_articles(
@@ -263,11 +260,27 @@ class LocationProtectionBot:
         if always_notify:
             for chunk in _chunk_telegram_message(_format_live_update_message(article)):
                 self.notifier.notify(chunk, title=article.title, url=article.url, domain=article.domain, published_at=article.published_at)
+        age_hours = _article_age_hours(article)
+        max_age = self.config.sources.max_trade_article_age_hours
+        if max_age > 0 and age_hours is not None and age_hours > max_age:
+            decision = LocationDecision("ALERT_ONLY", "3", f"article_stale_skipped_classification:{age_hours:.0f}h")
+            self._log_decision(article, decision)
+            return decision
+        if _is_feed_summary(article) and not self.config.classifier.classify_feed_summaries:
+            decision = LocationDecision("ALERT_ONLY", "3", "feed_summary_classification_disabled")
+            self._log_decision(article, decision)
+            self.notifier.notify("Location protection feed summary skipped classifier", reason=decision.reason, url=article.url)
+            return decision
+        block_reason = self.classifier_budget.block_reason(self.config.classifier)
+        if block_reason is not None:
+            decision = LocationDecision("ALERT_ONLY", "3", block_reason)
+            self._log_decision(article, decision)
+            self._notify_classifier_budget_block_once(block_reason)
+            return decision
         try:
-            passes = run_location_classifier_passes(
-                self.classifier, article, self.config.event.resolution_rules, self.config.classifier.passes
-            )
+            passes = [self._classify_with_budget(article, index) for index in range(max(1, self.config.classifier.passes))]
         except Exception as exc:
+            self.classifier_budget.record_error()
             decision = LocationDecision("ALERT_ONLY", "3", f"classifier_error:{exc}")
             self._log_decision(article, decision)
             self.notifier.notify("Location classifier unavailable or failed; no trade", error=str(exc))
@@ -350,6 +363,28 @@ class LocationProtectionBot:
         self.executor.execute(decision, article)
         return decision
 
+    def _fetch_poll_articles(self, url: str) -> list[Article]:
+        if _is_listing_url(url):
+            try:
+                article_urls = fetch_listing_article_urls(url, SETTINGS.user_agent, limit=self.config.sources.max_feed_entries_per_cycle)
+            except Exception as exc:
+                log_event("location_listing_fetch_error", url=url, error=str(exc))
+                article_urls = []
+            if article_urls:
+                log_event("location_listing_articles_discovered", url=url, count=len(article_urls))
+                articles: list[Article] = []
+                for article_url in article_urls:
+                    try:
+                        articles.append(fetch_article(article_url, SETTINGS.user_agent))
+                    except Exception as exc:
+                        log_event("location_listing_article_fetch_error", listing_url=url, url=article_url, error=str(exc))
+                return articles
+        try:
+            return [fetch_article(url, SETTINGS.user_agent)]
+        except Exception as exc:
+            log_event("location_source_fetch_error", url=url, error=str(exc))
+            return []
+
     def _log_decision(self, article: Article, decision: LocationDecision) -> None:
         append_jsonl(
             self.config.logs_dir / "location_decisions.jsonl",
@@ -364,6 +399,35 @@ class LocationProtectionBot:
                 },
             },
         )
+
+    def _classify_with_budget(self, article: Article, pass_index: int) -> Any:
+        context = self.config.event.resolution_rules
+        input_chars = len(article.title) + len(article.raw_text) + len(context)
+        telemetry = {
+            "provider": self.config.classifier.provider,
+            "model": self.config.classifier.model,
+            "pass_index": pass_index,
+            "article_hash": article.hash,
+            "source_kind": article.source_kind,
+            "domain": article.domain,
+            "input_char_count": input_chars,
+            "estimated_input_tokens": max(1, input_chars // 4),
+        }
+        self.classifier_budget.record_attempt()
+        log_event("location_classifier_attempt", **telemetry)
+        if hasattr(self.classifier, "last_usage"):
+            setattr(self.classifier, "last_usage", None)
+        factors = self.classifier.classify(article, context)
+        usage = getattr(self.classifier, "last_usage", None)
+        if isinstance(usage, dict):
+            telemetry["usage"] = usage
+        log_event("location_classifier_result", **telemetry)
+        return factors
+
+    def _notify_classifier_budget_block_once(self, reason: str) -> None:
+        window = "hour" if reason in {"classifier_budget_exhausted_hourly", "classifier_error_cap_exceeded"} else "day"
+        if self.classifier_budget.mark_notified_once(reason, window):
+            self.notifier.notify("Location protection classifier budget blocked classification", reason=reason)
 
 
 def _synthetic_article(reason: str) -> Article:
@@ -385,6 +449,10 @@ def _level_meets_threshold(level: str, threshold: int) -> bool:
     if not digits:
         return False
     return int(digits) >= threshold
+
+
+def _is_listing_url(url: str) -> bool:
+    return "/tag/" in url or "/topics/" in url
 
 
 _TELEGRAM_CHUNK_CHARS = 3500
