@@ -19,6 +19,7 @@
     "valuation:market-audit": "tsx src/valuationStrategy.ts market-audit --config configs/private-valuations-july31.json",
     "valuation:fixing-watch": "tsx src/valuationStrategy.ts fixing-watch --config configs/private-valuations-july31.json",
     "valuation:forecast-audit": "tsx src/valuationStrategy.ts forecast-audit --config configs/private-valuations-july31.json",
+    "valuation:forecast-paper": "tsx src/valuationStrategy.ts forecast-paper --config configs/private-valuations-july31.json",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

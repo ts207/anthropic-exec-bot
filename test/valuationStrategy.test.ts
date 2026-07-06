@@ -17,6 +17,7 @@ import { probePath, writeJson } from "../src/strategy/stateStore.ts";
 import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketAudit.ts";
 import { updateFixingWatch } from "../src/strategy/fixingWatch.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, monteCarloTouchProbability, pCrossTomorrow, sourceFreshnessMap, tapeStats } from "../src/strategy/npmBarrierForecast.ts";
+import { isPaperOpenTrigger, updateForecastPaperTrades } from "../src/strategy/forecastPaper.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -479,6 +480,68 @@ test("barrier forecast blocks stale source data", () => {
   assert.equal(forecasts[0]?.freshnessState, "STALE_ENDPOINT");
 });
 
+test("forecast paper opens loose paper-only watchlist trigger", () => {
+  const row = forecastRowFixture({
+    signalType: "NO_FORECAST_EDGE",
+    distancePct: 0.02,
+    modelFairPrice: 0.62,
+    pTouchByDeadline: 0.62,
+    yesAsk: 0.55,
+    edge: 0.07,
+    confidenceScore: 0.55,
+  });
+  assert.equal(isPaperOpenTrigger(row), true);
+  const update = updateForecastPaperTrades({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", trades: [] },
+    forecasts: [row],
+    now: new Date("2026-07-06T17:00:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(update.opened.length, 1);
+  assert.equal(update.opened[0]?.paperTrigger, "paper_watchlist");
+  assert.equal(update.opened[0]?.entryPrice, 0.55);
+  assert.equal(update.metrics.totalTrades, 1);
+});
+
+test("forecast paper updates after fixing and scores resolved touch", () => {
+  const opened = updateForecastPaperTrades({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", trades: [] },
+    forecasts: [forecastRowFixture({
+      signalType: "NPM_MULTI_DAY_BARRIER_FORECAST_YES",
+      latestDate: "2026-07-06",
+      latestValuation: 990,
+      maxEligibleValuation: 990,
+      distancePct: 0.01,
+      modelFairPrice: 0.72,
+      pTouchByDeadline: 0.72,
+      yesAsk: 0.55,
+      edge: 0.17,
+      confidenceScore: 0.74,
+    })],
+    now: new Date("2026-07-06T17:00:00Z"),
+    sizeUsd: 1,
+  });
+  const updated = updateForecastPaperTrades({
+    previous: opened.state,
+    forecasts: [forecastRowFixture({
+      latestDate: "2026-07-07",
+      latestValuation: 1_005,
+      maxEligibleValuation: 1_005,
+      distancePct: -0.005,
+      yesAsk: 0.93,
+    })],
+    now: new Date("2026-07-07T17:00:00Z"),
+    sizeUsd: 1,
+  });
+  assert.equal(updated.updated.length, 1);
+  assert.equal(updated.updated[0]?.status, "resolved");
+  assert.equal(updated.updated[0]?.thresholdTouched, true);
+  assert.equal(updated.updated[0]?.finalResolution, true);
+  assert.equal(updated.updated[0]?.brierScore, (0.72 - 1) ** 2);
+  assert.equal(updated.metrics.resolvedTrades, 1);
+  assert.equal(updated.metrics.totalHypotheticalPnl, 0.8182);
+});
+
 function testConfig(): StrategyConfig {
   return normalizeConfig({
     events: [thresholdEvent("Anthropic")],
@@ -588,6 +651,58 @@ function marketAuditRowFixture(overrides: Partial<ReturnType<typeof buildMarketA
     tradeBand: "tradeable",
     liveBlockers: [],
     reason: "source_confirmed_and_stale",
+    ...overrides,
+  };
+}
+
+function forecastRowFixture(overrides: Partial<ReturnType<typeof buildNpmBarrierForecasts>[number]> = {}): ReturnType<typeof buildNpmBarrierForecasts>[number] {
+  return {
+    company: "OpenAI",
+    eventSlug: "event",
+    marketSlug: "forecast-market",
+    threshold: 1_000,
+    deadline: "2026-08-01T03:59:59Z",
+    state: "UNCROSSED",
+    latestValuation: 980,
+    latestDate: "2026-07-06",
+    maxEligibleValuation: 980,
+    maxEligibleDate: "2026-07-06",
+    distancePct: 0.02,
+    daysRemaining: 25,
+    sourceDateAgeHours: 12,
+    freshnessState: "MISSED_EXPECTED_UPDATE",
+    expectedNextUpdateAt: "2026-07-07T12:00:00Z",
+    lastSuccessfulFetchAt: "2026-07-06T17:00:00Z",
+    endpointChangedSinceLastFetch: false,
+    tapeAdvancedSinceLastFetch: false,
+    carryForwardLikely: false,
+    dailyDrift: 0.002,
+    medianDailyDrift: 0.002,
+    recent3DayAvgDailyDrift: 0.002,
+    recent7DayAvgDailyDrift: 0.002,
+    dailyVol: 0.005,
+    maxDailyMove: 0.01,
+    pCrossTomorrow: 0.2,
+    pTouchByDeadline: 0.62,
+    yesAsk: 0.55,
+    yesBid: 0.52,
+    modelFairPrice: 0.62,
+    edge: 0.07,
+    confidenceScore: 0.55,
+    depthUnderCap: 250,
+    signalType: "NO_FORECAST_EDGE",
+    liveEligible: false,
+    reason: "forecast_edge_below_minimum",
+    needed: ["modelFairPrice - yesAsk must be >= 0.12"],
+    paperTrade: {
+      forecastTime: "2026-07-06T17:00:00Z",
+      entryPrice: 0.55,
+      nextNpmFixingResult: null,
+      thresholdTouched: null,
+      marketPriceAfterFixing: null,
+      finalResolution: null,
+      hypotheticalPnl: null,
+    },
     ...overrides,
   };
 }

@@ -17,11 +17,12 @@ import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJ
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
-import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, parseSourceFreshnessSnapshot, sourceFreshnessMap } from "./strategy/npmBarrierForecast.ts";
+import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, parseSourceFreshnessSnapshot, sourceFreshnessMap, type ForecastAuditRow, type SourceFreshnessSnapshot } from "./strategy/npmBarrierForecast.ts";
+import { forecastPaperPath, parseForecastPaperState, updateForecastPaperTrades } from "./strategy/forecastPaper.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -65,6 +66,9 @@ async function main(): Promise<void> {
   }
   if (command === "forecast-audit") {
     return print(await forecastAudit(loaded, args));
+  }
+  if (command === "forecast-paper") {
+    return print(await forecastPaper(loaded, args));
   }
   if (command === "run") {
     for (;;) {
@@ -407,21 +411,7 @@ async function fixingWatchCycleWithOptions(loaded: LoadedStrategyConfig, replayE
 
 export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
   const top = Math.max(1, Number(args.get("top") ?? 20));
-  const state = await collectValuationState(loaded.config);
-  const marketRows = await buildMarketAuditRows(loaded, state);
-  const previousFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(loaded.config)));
-  const sourceFreshness = buildSourceFreshnessSnapshot({
-    evidenceByCompany: state.evidenceByCompany,
-    previous: previousFreshness,
-  });
-  const forecasts = buildNpmBarrierForecasts({
-    legs: state.allLegs,
-    evidenceByCompany: state.evidenceByCompany,
-    quotes: state.quotes,
-    marketRows,
-    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
-    config: loaded.config,
-  });
+  const { forecasts, sourceFreshness } = await forecastContext(loaded);
   const candidates = forecasts.filter((row) => row.signalType !== "NO_FORECAST_EDGE");
   const report = {
     ok: true,
@@ -458,6 +448,57 @@ export async function forecastAudit(loaded: LoadedStrategyConfig, args: Map<stri
   await writeJson(join(loaded.config.stateDir, "last_forecast_audit.json"), report);
   await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
   return report;
+}
+
+export async function forecastPaper(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const sizeUsd = Math.max(0.01, Number(args.get("size-usd") ?? 1));
+  const { forecasts, sourceFreshness } = await forecastContext(loaded);
+  const previous = parseForecastPaperState(await readJson(forecastPaperPath(loaded.config)));
+  const update = updateForecastPaperTrades({
+    previous,
+    forecasts,
+    sizeUsd,
+  });
+  await writeJson(forecastPaperPath(loaded.config), update.state);
+  await writeJson(sourceFreshnessPath(loaded.config), sourceFreshness);
+  const report = {
+    ok: true,
+    generatedAt: update.state.updatedAt,
+    mode: loaded.config.mode,
+    liveEligible: false,
+    livePolicy: "forecast_paper_is_research_only",
+    sizeUsd,
+    summary: update.metrics,
+    opened: update.opened,
+    updated: update.updated,
+    openTrades: update.state.trades.filter((trade) => trade.status === "open"),
+    resolvedTrades: update.state.trades.filter((trade) => trade.status === "resolved"),
+  };
+  await appendJsonl(join(loaded.config.logsDir, "forecast_paper.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_forecast_paper.json"), report);
+  return report;
+}
+
+async function forecastContext(loaded: LoadedStrategyConfig): Promise<{
+  forecasts: ForecastAuditRow[];
+  sourceFreshness: SourceFreshnessSnapshot;
+}> {
+  const state = await collectValuationState(loaded.config);
+  const marketRows = await buildMarketAuditRows(loaded, state);
+  const previousFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(loaded.config)));
+  const sourceFreshness = buildSourceFreshnessSnapshot({
+    evidenceByCompany: state.evidenceByCompany,
+    previous: previousFreshness,
+  });
+  const forecasts = buildNpmBarrierForecasts({
+    legs: state.allLegs,
+    evidenceByCompany: state.evidenceByCompany,
+    quotes: state.quotes,
+    marketRows,
+    sourceFreshnessByCompany: sourceFreshnessMap(sourceFreshness),
+    config: loaded.config,
+  });
+  return { forecasts, sourceFreshness };
 }
 
 function sourceFreshnessPath(config: StrategyConfig): string {
@@ -777,7 +818,7 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 
