@@ -18,7 +18,17 @@ from .executor import LivePosition, TradingAdapter
 
 
 VALID_MODES = {"off", "alert_only", "dry_run", "live"}
-TRADE_ACTIONS = {"SELL_NO_CONDITIONAL_BUY_YES", "SELL_NO_BUY_YES", "TRIM_YES", "EXIT_YES_ONLY", "EXIT_YES_OPTIONAL_BUY_NO"}
+TRADE_ACTIONS = {
+    "SELL_NO_CONDITIONAL_BUY_YES",
+    "SELL_NO_BUY_YES",
+    "TRIM_YES",
+    "EXIT_YES_ONLY",
+    "EXIT_YES_OPTIONAL_BUY_NO",
+    # Cross-market rotation used by the categorical location-protection bot
+    # (polybot/location): sell YES on the held outcome, buy YES on the
+    # confirmed-winning outcome of the same grouped market.
+    "ROTATE_YES",
+}
 
 
 @dataclass(frozen=True)

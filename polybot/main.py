@@ -46,6 +46,26 @@ def main(argv: list[str] | None = None) -> int:
     run_iran_parser = sub.add_parser("run-iran")
     run_iran_parser.add_argument("--config", required=True)
     run_iran_parser.add_argument("--live", action="store_true")
+    inspect_location_parser = sub.add_parser("inspect-location")
+    inspect_location_parser.add_argument("--config", required=True)
+    preflight_location_parser = sub.add_parser("preflight-location")
+    preflight_location_parser.add_argument("--config", required=True)
+    preflight_location_parser.add_argument("--live", action="store_true")
+    ack_location_live_parser = sub.add_parser("ack-location-live")
+    ack_location_live_parser.add_argument("--config", required=True)
+    ack_location_live_parser.add_argument("--note", default="")
+    set_location_mode_parser = sub.add_parser("set-location-mode")
+    set_location_mode_parser.add_argument("--config", required=True)
+    set_location_mode_parser.add_argument("--mode", required=True, choices=["off", "alert_only", "dry_run", "live"])
+    smoke_location_classifier_parser = sub.add_parser("smoke-location-classifier")
+    smoke_location_classifier_parser.add_argument("--config", required=True)
+    smoke_location_classifier_parser.add_argument("--url")
+    smoke_location_classifier_parser.add_argument("--text")
+    smoke_location_classifier_parser.add_argument("--title", default="classifier smoke")
+    smoke_location_classifier_parser.add_argument("--domain", default="reuters.com")
+    run_location_parser = sub.add_parser("run-location-protection")
+    run_location_parser.add_argument("--config", required=True)
+    run_location_parser.add_argument("--live", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "inspect":
         return inspect_command(args.slug)
@@ -89,6 +109,30 @@ def main(argv: list[str] | None = None) -> int:
         from .iran.runner import run_iran_command
 
         return run_iran_command(Path(args.config), live_flag=args.live)
+    if args.command == "inspect-location":
+        from .location.runner import inspect_location_command
+
+        return inspect_location_command(Path(args.config))
+    if args.command == "preflight-location":
+        from .location.runner import preflight_location_command
+
+        return preflight_location_command(Path(args.config), live_flag=args.live)
+    if args.command == "ack-location-live":
+        from .location.runner import ack_location_live_command
+
+        return ack_location_live_command(Path(args.config), note=args.note)
+    if args.command == "set-location-mode":
+        from .location.runner import set_location_mode_command
+
+        return set_location_mode_command(Path(args.config), mode=args.mode)
+    if args.command == "smoke-location-classifier":
+        from .location.runner import smoke_location_classifier_command
+
+        return smoke_location_classifier_command(Path(args.config), url=args.url, text=args.text, title=args.title, domain=args.domain)
+    if args.command == "run-location-protection":
+        from .location.runner import run_location_command
+
+        return run_location_command(Path(args.config), live_flag=args.live)
     return 2
 
 
