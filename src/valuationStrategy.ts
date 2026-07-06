@@ -19,10 +19,13 @@ import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type Mono
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, parseSourceFreshnessSnapshot, sourceFreshnessMap, type ForecastAuditRow, type SourceFreshnessSnapshot } from "./strategy/npmBarrierForecast.ts";
 import { forecastPaperPath, parseForecastPaperState, updateForecastPaperTrades } from "./strategy/forecastPaper.ts";
+import { parseAutomationPhase, type AutomationTask } from "./strategy/automationSchedule.ts";
+import { runAutomationCycle } from "./strategy/valuationAutomation.ts";
+import { buildDailyReport } from "./strategy/dailyReport.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
-type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper";
+type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto";
 
 type ScanResult = {
   evidence: NpmEvidence[];
@@ -69,6 +72,12 @@ async function main(): Promise<void> {
   }
   if (command === "forecast-paper") {
     return print(await forecastPaper(loaded, args));
+  }
+  if (command === "daily-report") {
+    return print(await dailyReport(loaded));
+  }
+  if (command === "auto") {
+    return print(await valuationAuto(loaded, args));
   }
   if (command === "run") {
     for (;;) {
@@ -479,6 +488,59 @@ export async function forecastPaper(loaded: LoadedStrategyConfig, args: Map<stri
   return report;
 }
 
+export async function dailyReport(loaded: LoadedStrategyConfig): Promise<Record<string, unknown>> {
+  const report = buildDailyReport({
+    generatedAt: new Date().toISOString(),
+    sourceFreshness: await readJson(sourceFreshnessPath(loaded.config)),
+    forecastAudit: await readJson(join(loaded.config.stateDir, "last_forecast_audit.json")),
+    forecastPaper: await readJson(join(loaded.config.stateDir, "last_forecast_paper.json")),
+    fixingWatch: await readJson(join(loaded.config.stateDir, "last_fixing_watch.json")),
+    marketAudit: await readJson(join(loaded.config.stateDir, "last_market_audit.json")),
+    curveAudit: await readJson(join(loaded.config.stateDir, "last_curve_audit.json")),
+  });
+  await appendJsonl(join(loaded.config.logsDir, "daily_report.jsonl"), report);
+  await writeJson(join(loaded.config.stateDir, "last_daily_report.json"), report);
+  return report;
+}
+
+export async function valuationAuto(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
+  const once = args.get("once") === "true" || args.get("once") === "1";
+  const dryRun = args.get("dry-run") === "true" || args.get("dry-run") === "1";
+  const phaseOverride = parseAutomationPhase(args.get("phase"));
+  if (once || dryRun) {
+    const cycle = await runAutomationCycle({
+      phaseOverride,
+      dryRun,
+      runTask: (task) => runAutomationTask(loaded, task),
+    });
+    await appendJsonl(join(loaded.config.logsDir, "automation.jsonl"), cycle);
+    await writeJson(join(loaded.config.stateDir, "last_automation.json"), cycle);
+    return cycle;
+  }
+  for (;;) {
+    const cycle = await runAutomationCycle({
+      phaseOverride,
+      dryRun,
+      runTask: (task) => runAutomationTask(loaded, task),
+    });
+    await appendJsonl(join(loaded.config.logsDir, "automation.jsonl"), cycle);
+    await writeJson(join(loaded.config.stateDir, "last_automation.json"), cycle);
+    console.log(JSON.stringify(cycle));
+    await sleep(cycle.nextRunInMs);
+  }
+}
+
+async function runAutomationTask(loaded: LoadedStrategyConfig, task: AutomationTask): Promise<unknown> {
+  if (task === "forecast-audit") return forecastAudit(loaded);
+  if (task === "forecast-paper") return forecastPaper(loaded);
+  if (task === "preflight") return preflight(loaded);
+  if (task === "market-audit-strict") return marketAudit(loaded, new Map([["strict", "true"]]));
+  if (task === "fixing-watch") return fixingWatch(loaded);
+  if (task === "daily-report") return dailyReport(loaded);
+  if (task === "curve-audit-strict") return curveAudit(loaded, new Map([["strict", "true"]]));
+  throw new Error(`unknown automation task: ${task}`);
+}
+
 async function forecastContext(loaded: LoadedStrategyConfig): Promise<{
   forecasts: ForecastAuditRow[];
   sourceFreshness: SourceFreshnessSnapshot;
@@ -810,15 +872,18 @@ function parseCli(argv: string[]): { command: Command; args: Map<string, string>
     if (!item?.startsWith("--")) throw new Error(`unexpected argument: ${item}`);
     const key = item.slice(2);
     const value = rest[i + 1];
-    if (!value || value.startsWith("--")) throw new Error(`missing value for --${key}`);
-    args.set(key, value);
-    i += 1;
+    if (!value || value.startsWith("--")) {
+      args.set(key, "true");
+    } else {
+      args.set(key, value);
+      i += 1;
+    }
   }
   return { command, args };
 }
 
 function parseCommand(value: string): Command {
-  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper") return value;
+  if (value === "scan" || value === "run" || value === "preflight" || value === "probe" || value === "ack" || value === "audit" || value === "curve-audit" || value === "market-audit" || value === "fixing-watch" || value === "forecast-audit" || value === "forecast-paper" || value === "daily-report" || value === "auto") return value;
   throw new Error(`unknown valuationStrategy command: ${value}`);
 }
 

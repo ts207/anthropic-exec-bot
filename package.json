@@ -20,6 +20,8 @@
     "valuation:fixing-watch": "tsx src/valuationStrategy.ts fixing-watch --config configs/private-valuations-july31.json",
     "valuation:forecast-audit": "tsx src/valuationStrategy.ts forecast-audit --config configs/private-valuations-july31.json",
     "valuation:forecast-paper": "tsx src/valuationStrategy.ts forecast-paper --config configs/private-valuations-july31.json",
+    "valuation:daily-report": "tsx src/valuationStrategy.ts daily-report --config configs/private-valuations-july31.json",
+    "valuation:auto": "tsx src/valuationStrategy.ts auto --config configs/private-valuations-july31.json",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

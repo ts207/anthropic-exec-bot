@@ -18,6 +18,8 @@ import { buildMarketAuditRow, monotonicityAudits } from "../src/strategy/marketA
 import { updateFixingWatch } from "../src/strategy/fixingWatch.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, monteCarloTouchProbability, pCrossTomorrow, sourceFreshnessMap, tapeStats } from "../src/strategy/npmBarrierForecast.ts";
 import { isPaperOpenTrigger, updateForecastPaperTrades } from "../src/strategy/forecastPaper.ts";
+import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSchedule.ts";
+import { runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -540,6 +542,28 @@ test("forecast paper updates after fixing and scores resolved touch", () => {
   assert.equal(updated.updated[0]?.brierScore, (0.72 - 1) ** 2);
   assert.equal(updated.metrics.resolvedTrades, 1);
   assert.equal(updated.metrics.totalHypotheticalPnl, 0.8182);
+});
+
+test("automation schedule resolves expected NPM fixing phases", () => {
+  const expected = new Date("2026-07-06T17:00:00Z");
+  assert.equal(phaseForNow(new Date("2026-07-06T16:15:00Z"), expected), "PRE_FIXING_PREP");
+  assert.equal(phaseForNow(new Date("2026-07-06T16:55:00Z"), expected), "FIXING_WINDOW");
+  assert.equal(phaseForNow(new Date("2026-07-06T17:30:00Z"), expected), "POST_FIXING_REVIEW");
+  assert.equal(phaseForNow(new Date("2026-07-06T20:00:00Z"), expected), "LOW_FREQUENCY_MONITOR");
+  assert.equal(expectedNpmUpdateAt(new Date("2026-07-06T18:30:00Z")).toISOString(), "2026-07-07T17:00:00.000Z");
+});
+
+test("automation dry run lists phase tasks without execution", async () => {
+  const cycle = await runAutomationCycle({
+    now: new Date("2026-07-06T17:00:00Z"),
+    dryRun: true,
+    runTask: async () => {
+      throw new Error("should not run");
+    },
+  });
+  assert.equal(cycle.phase, "FIXING_WINDOW");
+  assert.deepEqual(cycle.tasks, ["fixing-watch", "market-audit-strict", "forecast-paper"]);
+  assert.equal(cycle.results.every((result) => result.dryRun === true), true);
 });
 
 function testConfig(): StrategyConfig {
