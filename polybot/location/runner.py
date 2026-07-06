@@ -13,6 +13,7 @@ from polybot.log import log_event
 from polybot.iran.executor import DryRunTradingAdapter, LiveClobTradingAdapter, TradingAdapter
 from polybot.iran.notifier import TelegramNotifier
 from polybot.iran.operator import OperatorGate
+from polybot.iran.runner import _article_age_hours
 from polybot.iran.source_fetcher import ArticleStore, fetch_article, fetch_feed_articles, promote_feed_article
 from polybot.iran.storage import StateStore, append_jsonl
 from polybot.iran.types import Article
@@ -302,8 +303,17 @@ class LocationProtectionBot:
     def _enforce_source_policy(self, article: Article, decision: LocationDecision) -> LocationDecision:
         if decision.action not in {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}:
             return decision
-        if article.source_kind == "feed" and not self.config.sources.allow_feed_auto_trade:
+        # promoted_feed_summary is feed-derived text (publisher fetch failed),
+        # so it is gated by the same flag as raw feed items.
+        if article.source_kind in {"feed", "promoted_feed_summary"} and not self.config.sources.allow_feed_auto_trade:
             return LocationDecision("ALERT_ONLY", "3", "feed_item_auto_trade_disabled", decision.target_outcome, decision.factors)
+        # Freshness gate (ported from the iran runner): stale items can alert
+        # but not trade -- old news is already priced in, and with feed
+        # auto-trade enabled a stale feed item must never fire a sale.
+        age_hours = _article_age_hours(article)
+        max_age = self.config.sources.max_trade_article_age_hours
+        if max_age > 0 and age_hours is not None and age_hours > max_age:
+            return LocationDecision("ALERT_ONLY", "3", f"article_stale_for_auto_trade:{age_hours:.0f}h", decision.target_outcome, decision.factors)
         if domain_allowed(article.domain, self.config.sources.alert_only_domains):
             return LocationDecision("ALERT_ONLY", "3", "source_domain_alert_only", decision.target_outcome, decision.factors)
         if not domain_allowed(article.domain, self.config.sources.auto_trade_domains):

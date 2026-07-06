@@ -621,3 +621,68 @@ def test_run_once_skips_decay_after_trim_and_exit(tmp_path) -> None:
     # Subsequent cycles: trim already recorded, decay decision suppressed.
     assert bot.run_once() == []
     assert bot.run_once() == []
+
+
+# ---- source policy: freshness gate + promoted_feed_summary gating ----
+
+
+def _policy_bot(tmp_path, sources):
+    from polybot.location.runner import LocationProtectionBot
+
+    config = _config(data_dir=tmp_path / "state", logs_dir=tmp_path / "logs")
+    object.__setattr__(config, "sources", sources)
+    return LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+
+
+def _sources(**overrides):
+    import dataclasses
+
+    from polybot.location.config import SourcesConfig
+
+    base = SourcesConfig(auto_trade_domains=["reuters.com"], max_trade_article_age_hours=24)
+    return dataclasses.replace(base, **overrides)
+
+
+def _trade_decision() -> LocationDecision:
+    return LocationDecision(
+        "ROTATE_YES", "4B", "confirmed_location:pakistan", target_outcome="pakistan", factors=_signal(confirmed_location="pakistan")
+    )
+
+
+def _aged_article(published_at: str | None, source_kind: str = "article") -> Article:
+    return Article(
+        url="https://reuters.com/story",
+        domain="reuters.com",
+        title="story",
+        published_at=published_at,
+        fetched_at="2026-07-06T00:00:00Z",
+        raw_text="Officials confirm the round begins in Pakistan.",
+        hash="h1",
+        source_kind=source_kind,
+    )
+
+
+def test_stale_article_cannot_auto_trade(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources())
+    out = bot._enforce_source_policy(_aged_article("Mon, 01 Jun 2026 00:00:00 GMT"), _trade_decision())
+    assert out.action == "ALERT_ONLY"
+    assert out.reason.startswith("article_stale_for_auto_trade")
+
+
+def test_fresh_or_undated_article_passes_age_gate(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources())
+    out = bot._enforce_source_policy(_aged_article(None), _trade_decision())
+    assert out.action == "ROTATE_YES"
+
+
+def test_promoted_feed_summary_blocked_when_feed_auto_trade_disabled(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources(allow_feed_auto_trade=False))
+    out = bot._enforce_source_policy(_aged_article(None, source_kind="promoted_feed_summary"), _trade_decision())
+    assert out.action == "ALERT_ONLY"
+    assert out.reason == "feed_item_auto_trade_disabled"
+
+
+def test_promoted_feed_summary_allowed_when_feed_auto_trade_enabled(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources(allow_feed_auto_trade=True))
+    out = bot._enforce_source_policy(_aged_article(None, source_kind="promoted_feed_summary"), _trade_decision())
+    assert out.action == "ROTATE_YES"

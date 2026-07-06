@@ -40,17 +40,34 @@ event:
   # Weighed as prior context only -- the classifier still must classify
   # strictly from article text and the resolution rules above.
   analyst_context: |
-    A technical, staff-level US-Iran meeting is happening July 11 in Pakistan (Islamabad). Per the
-    resolution rules above, this does NOT qualify as a resolving round on its own (technical/staff-level/
-    implementation meetings are excluded unless part of a newly convened senior-level round) -- treat
-    reports of this specific meeting as non-resolving noise unless a source explicitly describes a NEW
-    senior-level round being convened in Pakistan.
+    Source hierarchy for this thesis (updated 2026-07-06): Dawn (dawn.com) carries the most
+    settlement-relevant sequencing -- it reports July 11 Islamabad as TECHNICAL negotiations, with the
+    next HIGH-LEVEL direct talks expected in Doha, Qatar during the third week of July, after technical
+    teams finish agreement details. Reuters reporting confirms recent Doha talks were technical only
+    (Hormuz shipping, frozen funds; nuclear file not discussed). Treat "technical talks in/through Doha"
+    as a Qatar-positive PROCESS signal that does NOT resolve the market.
 
-    Senior-level talks are expected the third week of July, in Doha, Qatar -- not yet officially confirmed
-    by either government as of 2026-07-06. Iran's negotiating delegation composition will not be decided
-    until after Ali Khamenei's multi-day state funeral concludes, which is delaying formal confirmation of
-    the Doha round's date/venue. Give more weight to reporting that ties round confirmation to Iran's
-    delegation/funeral timeline -- that is the actual bottleneck to watch for, not the Pakistan meeting.
+    A technical, staff-level US-Iran meeting is expected July 11 in Islamabad, Pakistan. Per the
+    resolution rules above, this does NOT qualify as a resolving round on its own -- treat reports of
+    this specific meeting as non-resolving noise UNLESS a source explicitly describes the July 11 meeting
+    being upgraded to, or convened as, a NEW formal senior-level round. Watch for senior principals
+    attached with mandate (e.g. Witkoff, Kushner, Vance; Araqchi, Ghalibaf, Gharibabadi) -- named senior
+    attendance at Islamabad is the main kill signal for the Qatar thesis.
+
+    Resolution nuance to apply strictly from the rules: INDIRECT in-person diplomacy through designated
+    mediators DOES qualify, provided senior representatives of both governments participate in the same
+    formally convened diplomatic process (they need not meet directly or be in the same room). Therefore
+    "Iran denies direct talks with US envoys" does NOT negate a qualifying Doha round if a senior-level
+    round is formally convened there via Qatari mediation.
+
+    Iran's negotiating delegation composition will not be decided until after Ali Khamenei's multi-day
+    state funeral concludes; that is the bottleneck delaying official confirmation of the Doha round's
+    date/venue. Weight reporting tied to the delegation/funeral timeline over generic venue speculation.
+
+    Qualifying-language examples for qatar: "high-level direct talks in Doha", "formal senior-level
+    round begins/convened in Doha", "Qatar to host the next senior US-Iran round". Non-resolving
+    language: "technical teams", "working group", "implementation talks", "mediators met",
+    "preparatory", "deconfliction".
 
 # All 19 location outcomes of the grouped ("neg risk") market, pulled directly
 # from Polymarket's Gamma API (event id 624242) on 2026-07-06. Prices at that
@@ -254,7 +271,21 @@ sources:
     - "https://www.aljazeera.com/tag/israel-iran-conflict/"
   feed_urls:
     - "https://www.aljazeera.com/xml/rss/all.xml"
-  allow_feed_auto_trade: false
+    # Dawn: most settlement-relevant sequencing source for this thesis (see
+    # analyst_context).
+    - "https://www.dawn.com/feeds/home"
+    # Reuters discovery via Google News RSS (no stable public Reuters RSS --
+    # same approach as the July17 bot). Items resolve to reuters.com publisher
+    # URLs; reuters.com blocks direct article fetches, so these usually stay
+    # promoted feed summaries (execution-grade while allow_feed_auto_trade
+    # is true).
+    - "https://news.google.com/rss/search?q=site:reuters.com%20iran%20talks&hl=en-US&gl=US&ceid=US:en"
+  # Flattened source levels (operator decision 2026-07-06): all sources are
+  # execution-grade, including feed items and promoted feed summaries. The
+  # remaining trade gates are the 2-pass classifier agreement, verbatim quote
+  # verification, the classifier's tier-one source_tier requirement, the
+  # 24h freshness gate below, and the operator gate.
+  allow_feed_auto_trade: true
   promote_feed_to_article: true
   max_trade_article_age_hours: 24
   # Without include terms every AJ all.xml item is stored and classified
@@ -278,6 +309,11 @@ sources:
     - "consular"
     - "passport"
     - "allowances"
+  # All sources at the same level per operator decision 2026-07-06. Note the
+  # decision engine still requires the classifier to rate the source_tier as
+  # wire/mediator_government/official_government before any trade -- an X or
+  # IRNA item only trades if the classifier judges it to carry an official
+  # statement.
   auto_trade_domains:
     - "aljazeera.com"
     - "reuters.com"
@@ -289,11 +325,12 @@ sources:
     - "mofa.gov.qa"
     - "fm.gov.om"
     - "mofa.gov.pk"
-  alert_only_domains:
+    - "dawn.com"
     - "x.com"
     - "twitter.com"
     - "t.me"
     - "irna.ir"
+  alert_only_domains: []
 
 data_dir: "data/location-protection-bot"
 logs_dir: "logs"
