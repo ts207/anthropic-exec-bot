@@ -818,6 +818,8 @@ function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
     threshold: plan.threshold,
     deadline: plan.deadline,
     direction: plan.direction,
+    yesTokenId: plan.yesTokenId,
+    noTokenId: plan.noTokenId,
     sourceDate: plan.sourceDate,
     currentValuation: plan.currentValuation,
     maxEligibleValuation: plan.maxEligibleValuation,

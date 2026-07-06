@@ -10,6 +10,9 @@ export type LadderPaperOrder = {
   eventSlug: string;
   marketSlug: string;
   pairedMarketSlug?: string;
+  yesTokenId?: string;
+  noTokenId?: string;
+  pairedNoTokenId?: string;
   threshold?: number;
   pairedThreshold?: number;
   deadline?: string;
@@ -210,6 +213,9 @@ function openOrder(plan: EntryPlan, now: Date, sizeUsd: number): LadderPaperOrde
     eventSlug: plan.eventSlug,
     marketSlug: plan.marketSlug,
     pairedMarketSlug: plan.pairedMarketSlug,
+    yesTokenId: plan.yesTokenId,
+    noTokenId: plan.noTokenId,
+    pairedNoTokenId: plan.range?.higherNoTokenId,
     threshold: plan.threshold,
     pairedThreshold: plan.range?.higherThreshold,
     deadline: plan.range?.deadline,

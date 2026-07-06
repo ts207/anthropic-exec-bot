@@ -710,6 +710,38 @@ test("ladder entry planner blocks near-boundary paper bid on low visible liquidi
   assert.equal(plans[0]?.reason, "near_boundary_passive_bid_blocked_by_structural_risk");
 });
 
+test("ladder entry planner blocks paper entries without YES token mapping", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "stripe-175", yesTokenId: undefined });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["stripe-175", quoteFixture(0.97, 0.4)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "stripe-175", state: "NEAR_BOUNDARY", yesAsk: 0.97, yesBid: 0.4 })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "stripe-175",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      yesAsk: 0.97,
+      yesBid: 0.4,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "MAKER_NEAR_BOUNDARY_BID");
+  assert.equal(plans[0]?.paperEligible, false);
+  assert.equal(plans[0]?.blockers.includes("missing_yes_token"), true);
+  assert.equal(plans[0]?.yesTokenId, undefined);
+});
+
 test("ladder entry planner annotates market shape and nearest ladder thresholds", () => {
   const config = testConfig();
   const lower = legFixture({ threshold: 900, marketSlug: "lower-900" });
@@ -855,7 +887,42 @@ test("ladder entry planner creates adjacent range spread paper candidate", () =>
   assert.equal(plans[0]?.paperEligible, true);
   assert.equal(plans[0]?.liveEligible, false);
   assert.equal(plans[0]?.passiveBidPrice, 0.45);
+  assert.equal(plans[0]?.range?.lowerYesTokenId, "yes-token");
+  assert.equal(plans[0]?.range?.higherNoTokenId, "no-token");
+  assert.equal(plans[0]?.range?.lowerYesAsk, 0.2);
+  assert.equal(plans[0]?.range?.higherNoAsk, 0.25);
   assert.equal(plans[0]?.range?.modelRangeProbability, 0.6);
+});
+
+test("ladder entry planner blocks range spread paper without paired NO token mapping", () => {
+  const config = testConfig();
+  const lower = legFixture({ threshold: 1_000, marketSlug: "lower-range" });
+  const higher = legFixture({ threshold: 1_100, marketSlug: "higher-range", noTokenId: undefined });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 990 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [lower, higher],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([
+      ["lower-range", quoteFixture(0.2, 0.18)],
+      ["higher-range", quoteFixture(0.8, 0.75)],
+    ]),
+    marketRows: [
+      marketAuditRowFixture({ marketSlug: "lower-range", state: "NEAR_BOUNDARY", yesAsk: 0.2, yesBid: 0.18 }),
+      marketAuditRowFixture({ marketSlug: "higher-range", state: "UNCROSSED", yesAsk: 0.8, yesBid: 0.75 }),
+    ],
+    forecasts: [
+      forecastRowFixture({ company: "Anthropic", marketSlug: "lower-range", threshold: 1_000, pTouchByDeadline: 0.8, modelFairPrice: 0.8 }),
+      forecastRowFixture({ company: "Anthropic", marketSlug: "higher-range", threshold: 1_100, pTouchByDeadline: 0.2, modelFairPrice: 0.2 }),
+    ],
+    monotonicity: [],
+    config,
+  });
+  const plan = plans.find((item) => item.entryMode === "RANGE_SPREAD_PAPER");
+  assert.equal(plan?.paperEligible, false);
+  assert.equal(plan?.blockers.includes("paired_missing_no_token"), true);
+  assert.equal(plan?.range?.higherNoTokenId, undefined);
 });
 
 test("ladder entry planner blocks curve repair paper when lower leg has structural risk", () => {

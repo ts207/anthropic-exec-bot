@@ -46,6 +46,8 @@ export type EntryPlan = {
   threshold?: number;
   deadline: string;
   direction: LadderDirection;
+  yesTokenId?: string;
+  noTokenId?: string;
   sourceDate?: string;
   currentValuation?: number;
   maxEligibleValuation?: number;
@@ -77,7 +79,11 @@ export type EntryPlan = {
     higherMarketSlug: string;
     lowerThreshold: number;
     higherThreshold: number;
+    lowerYesTokenId?: string;
+    higherNoTokenId?: string;
     deadline: string;
+    lowerYesAsk: number;
+    higherNoAsk: number;
     modelRangeProbability: number;
     combinedCost: number;
     currentMarkPrice: number | null;
@@ -343,7 +349,11 @@ function rangeSpreadPlans(input: {
         marketRow: rows.get(higher.marketSlug),
         config: input.config,
       }).map((blocker) => `paired_${blocker}`);
-      const blockers = [...new Set([...lowerBlockers, ...higherBlockers])];
+      const tokenBlockers = [
+        lower.yesTokenId ? null : "missing_yes_token",
+        higher.noTokenId ? null : "paired_missing_no_token",
+      ].filter((blocker): blocker is string => blocker !== null);
+      const blockers = [...new Set([...lowerBlockers, ...higherBlockers, ...tokenBlockers])];
       const lowerAsk = lowerQuote.bestAsk;
       const higherNoAsk = higherQuote.bestBid === null ? null : round4(1 - higherQuote.bestBid);
       if (lowerAsk === null || higherNoAsk === null) continue;
@@ -377,7 +387,11 @@ function rangeSpreadPlans(input: {
           higherMarketSlug: higher.marketSlug,
           lowerThreshold: lower.threshold,
           higherThreshold: higher.threshold,
+          lowerYesTokenId: lower.yesTokenId,
+          higherNoTokenId: higher.noTokenId,
           deadline: lower.deadlineIso,
+          lowerYesAsk: lowerAsk,
+          higherNoAsk,
           modelRangeProbability: round4(modelRangeProbability),
           combinedCost,
           currentMarkPrice: higherQuote.bestAsk === null ? null : round4((lowerQuote.bestBid ?? 0) + (1 - higherQuote.bestAsk)),
@@ -416,6 +430,7 @@ function structuralBlockersFor(input: {
   const blockers: string[] = [];
   if (input.leg.parseStatus !== "ok" || input.leg.threshold === undefined) blockers.push("malformed_or_unsupported_leg");
   if (!input.leg.active || input.leg.closed || !input.leg.acceptingOrders) blockers.push("market_not_accepting_orders");
+  if (!input.leg.yesTokenId) blockers.push("missing_yes_token");
   if (!input.evidence?.identityOk) blockers.push("missing_or_unverified_npm_evidence");
   if (!input.quote) blockers.push("missing_orderbook");
   if (input.quote && input.quote.liquidity < input.config.minLiquidity) blockers.push("orderbook_liquidity_below_minimum");
@@ -448,6 +463,8 @@ function planBase(input: {
     threshold: input.leg.threshold,
     deadline: input.leg.deadlineIso,
     direction: input.direction,
+    yesTokenId: input.leg.yesTokenId,
+    noTokenId: input.leg.noTokenId,
     sourceDate: input.sourceDate,
     currentValuation: input.currentValuation,
     maxEligibleValuation: input.maxEligibleValuation,
