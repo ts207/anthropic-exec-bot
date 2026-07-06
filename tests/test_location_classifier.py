@@ -16,6 +16,9 @@ from polybot.location.config import (
     LocationBotConfig,
     OutcomeMarket,
     PositionConfig,
+    MonitoringConfig,
+    PriceAlertConfig,
+    HeartbeatConfig,
     SellConfig,
     BuyRotationConfig,
     TimeDecayConfig,
@@ -845,3 +848,53 @@ def test_location_classifier_budget_persists_across_bot_instances(tmp_path) -> N
     assert second_decision.action == "ALERT_ONLY"
     assert second_decision.reason == "classifier_budget_exhausted_hourly"
     assert second_classifier.calls == 0
+
+
+def _monitoring_bot(tmp_path, adapter: DryRunTradingAdapter, monitoring: MonitoringConfig):
+    config = _config(
+        monitoring=monitoring,
+        sources=_sources(),
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+    )
+    bot = LocationProtectionBot(config=config, adapter=adapter)
+    notified: list[tuple[str, dict]] = []
+
+    class _Notifier:
+        def notify(self, message, **fields):
+            notified.append((message, fields))
+
+    bot.notifier = _Notifier()  # type: ignore[assignment]
+    return bot, notified
+
+
+def test_price_band_alert_fires_only_on_crossing(tmp_path) -> None:
+    adapter = DryRunTradingAdapter(yes_bid=0.25, yes_ask=0.25)
+    bot, notified = _monitoring_bot(
+        tmp_path,
+        adapter,
+        MonitoringConfig(price_alerts=PriceAlertConfig(enabled=True, outcome="qatar", thresholds=[0.28, 0.40])),
+    )
+    bot.run_once()
+    assert notified == []
+    adapter.yes_bid_value = 0.29
+    adapter.yes_ask_value = 0.29
+    bot.run_once()
+    assert notified[-1][0] == "Location price band crossed"
+    assert notified[-1][1]["threshold"] == 0.28
+    bot.run_once()
+    assert len(notified) == 1
+
+
+def test_daily_heartbeat_persists_last_sent_time(tmp_path) -> None:
+    adapter = DryRunTradingAdapter(yes_bid=0.25, yes_ask=0.27)
+    bot, notified = _monitoring_bot(
+        tmp_path,
+        adapter,
+        MonitoringConfig(heartbeat=HeartbeatConfig(enabled=True, interval_hours=24)),
+    )
+    bot.run_once()
+    bot.run_once()
+    heartbeats = [item for item in notified if item[0] == "Location protection heartbeat"]
+    assert len(heartbeats) == 1
+    assert heartbeats[0][1]["held_outcome"] == "Qatar"

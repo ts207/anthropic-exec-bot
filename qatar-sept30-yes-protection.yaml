@@ -239,6 +239,15 @@ time_decay:
   min_trim_price: 0.05
   min_exit_price: 0.10
 
+monitoring:
+  price_alerts:
+    enabled: true
+    outcome: "qatar"
+    thresholds: [0.28, 0.40]
+  heartbeat:
+    enabled: true
+    interval_hours: 24
+
 execution:
   # Dry-run until you review and explicitly ack live via set-location-mode /
   # ack-location-live -- same safety posture as the July17 bot.

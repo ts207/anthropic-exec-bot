@@ -33,14 +33,14 @@
     "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/client": "^0.1.0-beta.12",
     "@polymarket/clob-client-v2": "^1.0.8",
-    "dotenv": "latest",
-    "playwright": "latest",
-    "tsx": "latest",
-    "typescript": "latest",
-    "viem": "latest"
+    "dotenv": "17.4.2",
+    "playwright": "1.61.1",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3",
+    "viem": "2.54.1"
   },
   "devDependencies": {
-    "@types/node": "latest"
+    "@types/node": "26.1.0"
   },
   "overrides": {
     "ws": "^8.21.0"

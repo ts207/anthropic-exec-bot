@@ -90,6 +90,25 @@ class TimeDecayConfig:
 
 
 @dataclass(frozen=True)
+class PriceAlertConfig:
+    enabled: bool = False
+    outcome: str = ""
+    thresholds: list[float] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class HeartbeatConfig:
+    enabled: bool = False
+    interval_hours: float = 24.0
+
+
+@dataclass(frozen=True)
+class MonitoringConfig:
+    price_alerts: PriceAlertConfig = field(default_factory=PriceAlertConfig)
+    heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+
+
+@dataclass(frozen=True)
 class LocationBotConfig:
     event: EventConfig
     outcomes: list[OutcomeMarket] = field(default_factory=list)
@@ -98,6 +117,7 @@ class LocationBotConfig:
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     time_decay: TimeDecayConfig = field(default_factory=TimeDecayConfig)
+    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     data_dir: Path = Path("data/location-protection-bot")
@@ -129,6 +149,7 @@ def load_location_config(path: Path) -> LocationBotConfig:
         raise ValueError("outcomes must be a list")
     outcomes = [OutcomeMarket(**_normalize_outcome(item)) for item in outcomes_raw]
     execution_raw = _section(raw, "execution")
+    monitoring_raw = _section(raw, "monitoring")
     return LocationBotConfig(
         event=EventConfig(**_section(raw, "event")),
         outcomes=outcomes,
@@ -141,6 +162,10 @@ def load_location_config(path: Path) -> LocationBotConfig:
             buy_rotation=BuyRotationConfig(**_section(execution_raw, "buy_rotation")),
         ),
         time_decay=TimeDecayConfig(**_section(raw, "time_decay")),
+        monitoring=MonitoringConfig(
+            price_alerts=PriceAlertConfig(**_section(monitoring_raw, "price_alerts")),
+            heartbeat=HeartbeatConfig(**_section(monitoring_raw, "heartbeat")),
+        ),
         safety=SafetyConfig(**_section(raw, "safety")),
         sources=SourcesConfig(**_section(raw, "sources")),
         data_dir=Path(str(raw.get("data_dir", "data/location-protection-bot"))),

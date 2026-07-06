@@ -207,6 +207,7 @@ class LocationProtectionBot:
         if self.operator_gate is not None and self.operator_gate.current_mode() == "off":
             log_event("location_operator_off_cycle_skip")
             return []
+        self._process_monitoring()
         decisions: list[LocationDecision] = []
         decay = time_decay_decision(self.config)
         if decay.action != "NO_ACTION" and self._decay_still_actionable(decay):
@@ -385,6 +386,99 @@ class LocationProtectionBot:
             log_event("location_source_fetch_error", url=url, error=str(exc))
             return []
 
+    def _process_monitoring(self) -> None:
+        self._process_price_alerts()
+        self._process_heartbeat()
+
+    def _process_price_alerts(self) -> None:
+        price_config = self.config.monitoring.price_alerts
+        if not price_config.enabled or not price_config.thresholds:
+            return
+        outcome = self.config.outcome(price_config.outcome or self.config.event.held_location)
+        if outcome is None:
+            log_event("location_price_alert_skip", reason="outcome_not_found", outcome=price_config.outcome)
+            return
+        bid = self.executor.adapter.yes_best_bid(outcome.yes_token_id)
+        ask = self.executor.adapter.yes_best_ask(outcome.yes_token_id)
+        price = _monitor_price(bid, ask)
+        if price is None:
+            log_event("location_price_alert_skip", reason="price_unavailable", outcome=outcome.name)
+            return
+        state = self._monitoring_state()
+        price_state = state.setdefault("price_alerts", {})
+        key = outcome.name
+        previous_raw = price_state.get(key, {}).get("last_price") if isinstance(price_state.get(key), dict) else None
+        previous = _as_float(previous_raw)
+        crossed = [
+            threshold
+            for threshold in sorted(float(item) for item in price_config.thresholds)
+            if previous is not None and _crossed(previous, price, threshold)
+        ]
+        price_state[key] = {
+            "last_price": price,
+            "yes_best_bid": bid,
+            "yes_best_ask": ask,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._write_monitoring_state(state)
+        for threshold in crossed:
+            direction = "up" if price > previous else "down"
+            self.notifier.notify(
+                "Location price band crossed",
+                outcome=outcome.label,
+                threshold=threshold,
+                direction=direction,
+                price=price,
+                yes_best_bid=bid,
+                yes_best_ask=ask,
+            )
+            log_event("location_price_band_crossed", outcome=outcome.name, threshold=threshold, direction=direction, price=price)
+
+    def _process_heartbeat(self) -> None:
+        heartbeat = self.config.monitoring.heartbeat
+        if not heartbeat.enabled:
+            return
+        state = self._monitoring_state()
+        raw = state.get("heartbeat")
+        last_sent = _parse_iso(raw.get("last_sent_at")) if isinstance(raw, dict) else None
+        now = datetime.now(timezone.utc)
+        interval_seconds = max(1.0, heartbeat.interval_hours * 3600.0)
+        if last_sent is not None and (now - last_sent).total_seconds() < interval_seconds:
+            return
+        held = self.config.held_outcome()
+        bid = self.executor.adapter.yes_best_bid(held.yes_token_id)
+        ask = self.executor.adapter.yes_best_ask(held.yes_token_id)
+        budget = self.classifier_budget.status(self.config.classifier)
+        self.notifier.notify(
+            "Location protection heartbeat",
+            held_outcome=held.label,
+            dry_run=self.config.execution.dry_run,
+            yes_best_bid=bid,
+            yes_best_ask=ask,
+            classifier_budget=budget,
+        )
+        state["heartbeat"] = {"last_sent_at": now.isoformat()}
+        self._write_monitoring_state(state)
+        log_event("location_heartbeat_sent", held_outcome=held.name, yes_best_bid=bid, yes_best_ask=ask)
+
+    def _monitoring_state_path(self) -> Path:
+        return self.store.data_dir / "monitoring.json"
+
+    def _monitoring_state(self) -> dict[str, Any]:
+        path = self._monitoring_state_path()
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _write_monitoring_state(self, state: dict[str, Any]) -> None:
+        path = self._monitoring_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
     def _log_decision(self, article: Article, decision: LocationDecision) -> None:
         append_jsonl(
             self.config.logs_dir / "location_decisions.jsonl",
@@ -453,6 +547,37 @@ def _level_meets_threshold(level: str, threshold: int) -> bool:
 
 def _is_listing_url(url: str) -> bool:
     return "/tag/" in url or "/topics/" in url
+
+
+def _monitor_price(bid: float | None, ask: float | None) -> float | None:
+    if bid is not None and ask is not None:
+        return round((bid + ask) / 2.0, 4)
+    return bid if bid is not None else ask
+
+
+def _crossed(previous: float, current: float, threshold: float) -> bool:
+    return (previous < threshold <= current) or (previous > threshold >= current)
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 _TELEGRAM_CHUNK_CHARS = 3500

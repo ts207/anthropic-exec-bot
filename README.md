@@ -21,10 +21,13 @@ Verified locally:
 - `post_order(order, OrderType.FAK)`
 - `get_balance_allowance(BalanceAllowanceParams(...))`
 
-Important: the public `Polymarket/py-clob-client` repository is marked
-archived and no longer recommended for new integrations. This bot remains
-dry-run first and should be rechecked against current Polymarket docs before
-live use.
+Important: rechecked against current Polymarket trading docs on 2026-07-06.
+The live Python path still uses `py-clob-client==0.34.6`; its public GitHub
+repo is archived, so keep treating it as legacy. Its FAK market-order usage
+matches current docs: FOK/FAK execute immediately against resting liquidity,
+BUY amounts are dollars, and SELL amounts are shares. Prefer the maintained
+`@polymarket/clob-client-v2` path for new execution work once the
+deposit-wallet signer/API-key mismatch is resolved.
 
 ## Environment
 
