@@ -33,7 +33,7 @@ from polybot.location.types import LocationSignal
 from polybot.location import market_verifier as market_verifier_mod
 from polybot.location import runner as runner_mod
 from polybot.location.market_verifier import verify_all_outcomes, verify_critical_outcomes, verify_location_event
-from polybot.iran.source_fetcher import ArticleStore, extract_listing_article_urls
+from polybot.iran.source_fetcher import ArticleStore, extract_listing_article_urls, _extract_published_at
 
 
 def article(text: str, domain: str = "reuters.com", title: str | None = None) -> Article:
@@ -448,6 +448,89 @@ def test_relevant_feed_article_is_also_notified_with_full_text(tmp_path) -> None
     feed_article = article("The next round of talks will begin in Qatar next week.", domain="dawn.com")
     bot.process_article(feed_article)
     assert any(feed_article.raw_text in message for message in notified)
+
+
+def _listing_article(text: str, url: str = "https://www.aljazeera.com/liveblog/2026/7/7/live-updates") -> Article:
+    return Article(
+        url=url,
+        domain="aljazeera.com",
+        title="Live updates",
+        published_at=None,
+        fetched_at="2026-07-07T00:00:00Z",
+        raw_text=text,
+        hash=str(abs(hash((url, text)))),
+        source_kind="listing_article",
+    )
+
+
+def test_listing_article_first_sighting_gets_full_text(tmp_path) -> None:
+    # First time a liveblog URL is seen, there's nothing to diff against, so
+    # the full text should go to Telegram.
+    bot, notified = _spy_bot(tmp_path)
+    first = _listing_article("Update 1: talks will resume in Qatar next week.")
+    bot.process_article(first)
+    assert any("Update 1: talks will resume in Qatar next week." in message for message in notified)
+
+
+def test_listing_article_resend_only_notifies_new_lines(tmp_path) -> None:
+    # A liveblog refetch that grew (new entry prepended, old ones still
+    # present) must only push the new line(s) to Telegram, not the whole
+    # accumulated page again.
+    bot, notified = _spy_bot(tmp_path)
+    first = _listing_article("Update 1: talks will resume in Qatar next week.")
+    bot.process_article(first)
+    notified.clear()
+    second = _listing_article("Update 2: delegation lands in Doha today.\nUpdate 1: talks will resume in Qatar next week.")
+    bot.process_article(second)
+    assert any("Update 2: delegation lands in Doha today." in message for message in notified)
+    assert not any("Update 1: talks will resume in Qatar next week." in message for message in notified)
+
+
+def test_listing_article_classifier_still_sees_full_accumulated_text(tmp_path) -> None:
+    # The Telegram diff must never leak into what the classifier/quote
+    # verification see -- those must keep operating on the full raw_text.
+    bot, notified = _spy_bot(tmp_path)
+    bot.classifier = _CountingLocationClassifier()
+    first = _listing_article("Update 1: talks will resume in Qatar next week.")
+    bot.process_article(first)
+    second_text = "Update 2: delegation lands in Doha today.\nUpdate 1: talks will resume in Qatar next week."
+    second = _listing_article(second_text)
+    decision = bot.process_article(second)
+    assert decision.factors is not None
+    assert bot.classifier.calls == 2
+
+
+def test_extract_published_at_prefers_most_recent_of_published_and_modified() -> None:
+    # A liveblog's article:published_time is pinned to when the page first
+    # went live; article:modified_time keeps advancing as new entries land.
+    # Freshness gating must reflect the most recent, not the first match.
+    # Timestamps are computed relative to "now" (not hardcoded) so this test
+    # doesn't become a time bomb the day after it's written.
+    published = (datetime.now(timezone.utc) - timedelta(days=6)).isoformat().replace("+00:00", "Z")
+    modified = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    markup = (
+        "<html><head>"
+        f'<meta property="article:published_time" content="{published}" />'
+        f'<meta property="article:modified_time" content="{modified}" />'
+        "</head><body>Live updates.</body></html>"
+    )
+    result = _extract_published_at(markup)
+    assert result is not None
+    parsed = datetime.fromisoformat(result)
+    expected = datetime.fromisoformat(modified.replace("Z", "+00:00"))
+    assert abs((parsed - expected).total_seconds()) < 2
+
+
+def test_extract_published_at_discards_bogus_future_timestamp() -> None:
+    markup = (
+        "<html><head>"
+        '<meta property="article:published_time" content="2026-07-01T00:00:00Z" />'
+        '<meta property="article:modified_time" content="2099-01-01T00:00:00Z" />'
+        "</head><body>Live updates.</body></html>"
+    )
+    result = _extract_published_at(markup)
+    assert result is not None
+    assert result.startswith("2026-07-01T00:00:00")
 
 
 # ---- rotation buy capped by confirmed sale proceeds (2026-07-06 hardening) ----
@@ -980,6 +1063,48 @@ def test_price_band_alert_fires_only_on_crossing(tmp_path) -> None:
     assert notified[-1][1]["threshold"] == 0.28
     bot.run_once()
     assert len(notified) == 1
+
+
+def test_price_band_alert_can_use_live_clob_quote_in_dry_run(tmp_path, monkeypatch) -> None:
+    class _Book:
+        snapshots = [
+            {"best_bid": 0.25, "best_ask": 0.25},
+            {"best_bid": 0.14, "best_ask": 0.14},
+        ]
+
+        def __init__(self, token_ids):
+            self.token_ids = token_ids
+            self.calls = 0
+
+        def rest_snapshot(self, token_id):
+            self.calls += 1
+
+        def snapshot_state(self, token_id):
+            index = min(self.calls - 1, len(self.snapshots) - 1)
+            return self.snapshots[index]
+
+    monkeypatch.setattr(runner_mod, "BookCache", _Book)
+    adapter = DryRunTradingAdapter(yes_bid=0.50, yes_ask=0.50)
+    bot, notified = _monitoring_bot(
+        tmp_path,
+        adapter,
+        MonitoringConfig(
+            price_alerts=PriceAlertConfig(
+                enabled=True,
+                outcome="qatar",
+                thresholds=[0.15],
+                live_quotes_in_dry_run=True,
+            )
+        ),
+    )
+
+    bot.run_once()
+    bot.run_once()
+
+    assert notified[-1][0] == "Location price band crossed"
+    assert notified[-1][1]["direction"] == "down"
+    assert notified[-1][1]["price"] == 0.14
+    assert notified[-1][1]["quote_source"] == "live_clob_book"
 
 
 def test_daily_heartbeat_persists_last_sent_time(tmp_path) -> None:

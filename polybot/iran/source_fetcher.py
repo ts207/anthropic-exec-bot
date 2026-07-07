@@ -26,6 +26,7 @@ _ALWAYS_CHROME_TAGS = ["script", "style", "noscript", "nav", "aside", "form", "b
 _SITE_CHROME_TAGS = ["header", "footer"]
 _MAIN_TAGS = ["article", "main"]
 _MIN_MAIN_TEXT_CHARS = 400
+_FULL_TEXT_FEED_MIN_WORDS = 120
 
 
 class _TextExtractor:
@@ -100,12 +101,22 @@ def _extract_published_at(markup: str) -> str | None:
     Graph, plain meta tags, <time datetime>, or JSON-LD. The trading bots treat
     missing timestamps conservatively, so this function should return None when
     the page is ambiguous instead of guessing from page text.
+
+    Returns the MOST RECENT of every valid timestamp found (not the first
+    match). Long-running liveblogs keep their original article:published_time
+    pinned to when the page first went live while article:modified_time /
+    dateModified keeps advancing as new entries are added; a first-match
+    strategy would permanently understate freshness and eventually trip the
+    staleness gate even as the page keeps getting genuinely new updates.
+    Candidates further in the future than a small clock-skew tolerance are
+    discarded as bogus rather than treated as "freshest".
     """
     soup = BeautifulSoup(markup, "lxml")
     meta_keys = [
         "article:published_time",
         "article:modified_time",
         "og:published_time",
+        "og:updated_time",
         "datePublished",
         "dateModified",
         "pubdate",
@@ -115,25 +126,36 @@ def _extract_published_at(markup: str) -> str | None:
         "dcterms.created",
         "sailthru.date",
     ]
+    candidates: list[datetime] = []
+
+    def _consider(normalized: str | None) -> None:
+        if not normalized:
+            return
+        try:
+            candidates.append(datetime.fromisoformat(normalized))
+        except ValueError:
+            pass
+
     for key in meta_keys:
-        value = _meta_content(soup, key)
-        normalized = _normalize_datetime(value)
-        if normalized:
-            return normalized
+        _consider(_normalize_datetime(_meta_content(soup, key)))
 
     for tag in soup.find_all("time"):
         for attr in ("datetime", "content"):
-            normalized = _normalize_datetime(str(tag.get(attr) or ""))
-            if normalized:
-                return normalized
+            _consider(_normalize_datetime(str(tag.get(attr) or "")))
 
     for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
         raw = script.string or script.get_text() or ""
         for candidate in _jsonld_date_candidates(raw):
-            normalized = _normalize_datetime(candidate)
-            if normalized:
-                return normalized
-    return None
+            _consider(_normalize_datetime(candidate))
+
+    if not candidates:
+        return None
+    now = datetime.now(timezone.utc)
+    tolerance_seconds = 300
+    valid = [dt for dt in candidates if (dt - now).total_seconds() <= tolerance_seconds]
+    if not valid:
+        return None
+    return max(valid).isoformat()
 
 
 def _meta_content(soup: BeautifulSoup, key: str) -> str | None:
@@ -409,7 +431,9 @@ def promote_feed_article(article: Article, user_agent: str = "polybot/0.1") -> A
         promoted = fetch_article(target_url, user_agent)
     except requests.RequestException:
         # Publishers like reuters.com reject direct fetches; the resolved URL and
-        # domain are still useful for alerts, but the text is only feed-derived.
+        # domain are still useful for alerts. First-party feeds such as Dawn's
+        # can carry the article body in the feed, so those should remain
+        # classifier-eligible even when the web page blocks direct fetches.
         return _promote_with_feed_text(article, target_url)
     if not promoted.raw_text:
         return _promote_with_feed_text(article, target_url)
@@ -428,6 +452,7 @@ def promote_feed_article(article: Article, user_agent: str = "polybot/0.1") -> A
 def _promote_with_feed_text(article: Article, target_url: str) -> Article | None:
     if not article.raw_text.strip():
         return None
+    source_kind = "article" if _looks_like_full_text_first_party_feed(article, target_url) else "promoted_feed_summary"
     return Article(
         url=target_url,
         domain=urlparse(target_url).netloc.lower().removeprefix("www."),
@@ -436,8 +461,16 @@ def _promote_with_feed_text(article: Article, target_url: str) -> Article | None
         fetched_at=datetime.now(timezone.utc).isoformat(),
         raw_text=article.raw_text,
         hash=hashlib.sha256(f"promoted-summary\n{target_url}\n{article.title}\n{article.raw_text}".encode("utf-8")).hexdigest(),
-        source_kind="promoted_feed_summary",
+        source_kind=source_kind,
     )
+
+
+def _looks_like_full_text_first_party_feed(article: Article, target_url: str) -> bool:
+    original_domain = urlparse(article.url).netloc.lower().removeprefix("www.")
+    target_domain = urlparse(target_url).netloc.lower().removeprefix("www.")
+    if not original_domain or original_domain.endswith("news.google.com") or original_domain != target_domain:
+        return False
+    return len(re.findall(r"\w+", article.raw_text)) >= _FULL_TEXT_FEED_MIN_WORDS
 
 
 class ArticleStore:

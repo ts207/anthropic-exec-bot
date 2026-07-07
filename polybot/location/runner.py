@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import time
 from dataclasses import asdict
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from polybot.book import BookCache
 from polybot.config import SETTINGS
 from polybot.log import log_event
 
@@ -205,6 +207,8 @@ class LocationProtectionBot:
         self.executor = LocationExecutor(config, self.store, self.notifier, adapter)
         self.operator_gate = operator_gate
         self.live_requested = live_requested
+        self._monitoring_books: dict[str, BookCache] = {}
+        self._listing_text_cache_path = self.store.data_dir / "listing_article_text_cache.json"
 
     def run_once(self) -> list[LocationDecision]:
         if self.operator_gate is not None and self.operator_gate.current_mode() == "off":
@@ -276,7 +280,17 @@ class LocationProtectionBot:
         # got this, so relevant Dawn/AJ-RSS/Reuters items were silently only
         # summarized via the terse "alert only" message, never their actual
         # text.
-        for chunk in _chunk_telegram_message(_format_live_update_message(article)):
+        #
+        # listing_article sources (the AJ tag page, including liveblogs) are
+        # refetched in full every cycle -- the publisher re-renders the whole
+        # page, not just the new entry -- so without diffing, every poll where
+        # the page grows would resend the same old paragraphs alongside the
+        # new ones. _listing_update_notify_text sends only the new/changed
+        # lines on repeat sightings of the same URL; classification below
+        # still runs on the untouched, full article.raw_text.
+        notify_text, is_incremental = self._listing_update_notify_text(article)
+        message = _format_live_update_message(article, body_text=notify_text, incremental=is_incremental)
+        for chunk in _chunk_telegram_message(message):
             self.notifier.notify(chunk, title=article.title, url=article.url, domain=article.domain, published_at=article.published_at)
         age_hours = _article_age_hours(article)
         max_age = self.config.sources.max_trade_article_age_hours
@@ -426,6 +440,53 @@ class LocationProtectionBot:
             log_event("location_source_fetch_error", url=url, error=str(exc))
             return []
 
+    def _listing_update_notify_text(self, article: Article) -> tuple[str, bool]:
+        """Returns (text_to_notify, is_incremental) for the Telegram push.
+
+        Only listing_article sources (currently the AJ tag page, which is
+        where liveblogs live) get diffed: those URLs are refetched in full on
+        every poll cycle, so the first sighting of a URL still gets the full
+        text (for context) but every later sighting of the *same* URL only
+        surfaces the new/changed lines since the last time we notified about
+        it. Non-listing sources (RSS feed items, promoted articles) are
+        one-shot per URL already via ArticleStore's content-hash dedupe, so
+        they always get the full text.
+        """
+        if article.source_kind != "listing_article":
+            return article.raw_text, False
+        cache = self._load_listing_text_cache()
+        previous = cache.get(article.url)
+        cache[article.url] = {"text": article.raw_text, "updated_at": datetime.now(timezone.utc).isoformat()}
+        self._save_listing_text_cache(cache)
+        if not isinstance(previous, dict):
+            return article.raw_text, False
+        delta = _new_lines_since(str(previous.get("text") or ""), article.raw_text)
+        if not delta:
+            # No new lines detected (e.g. formatting-only change) -- fall
+            # back to the full text rather than sending an empty message.
+            return article.raw_text, False
+        return delta, True
+
+    def _load_listing_text_cache(self) -> dict[str, Any]:
+        path = self._listing_text_cache_path
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _save_listing_text_cache(self, cache: dict[str, Any]) -> None:
+        path = self._listing_text_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Bound growth over a long-running process: keep only the most
+        # recently updated URLs.
+        if len(cache) > 500:
+            ordered = sorted(cache.items(), key=lambda kv: str(kv[1].get("updated_at", "")) if isinstance(kv[1], dict) else "", reverse=True)
+            cache = dict(ordered[:500])
+        path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     def _process_monitoring(self) -> None:
         self._process_price_alerts()
         self._process_market_verification()
@@ -439,8 +500,7 @@ class LocationProtectionBot:
         if outcome is None:
             log_event("location_price_alert_skip", reason="outcome_not_found", outcome=price_config.outcome)
             return
-        bid = self.executor.adapter.yes_best_bid(outcome.yes_token_id)
-        ask = self.executor.adapter.yes_best_ask(outcome.yes_token_id)
+        bid, ask, quote_source = self._price_alert_quote(outcome.yes_token_id)
         price = _monitor_price(bid, ask)
         if price is None:
             log_event("location_price_alert_skip", reason="price_unavailable", outcome=outcome.name)
@@ -459,6 +519,7 @@ class LocationProtectionBot:
             "last_price": price,
             "yes_best_bid": bid,
             "yes_best_ask": ask,
+            "quote_source": quote_source,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._write_monitoring_state(state)
@@ -472,8 +533,36 @@ class LocationProtectionBot:
                 price=price,
                 yes_best_bid=bid,
                 yes_best_ask=ask,
+                quote_source=quote_source,
             )
-            log_event("location_price_band_crossed", outcome=outcome.name, threshold=threshold, direction=direction, price=price)
+            log_event(
+                "location_price_band_crossed",
+                outcome=outcome.name,
+                threshold=threshold,
+                direction=direction,
+                price=price,
+                quote_source=quote_source,
+            )
+
+    def _price_alert_quote(self, token_id: str) -> tuple[float | None, float | None, str]:
+        price_config = self.config.monitoring.price_alerts
+        if self.config.execution.dry_run and price_config.live_quotes_in_dry_run:
+            try:
+                book = self._monitoring_books.get(token_id)
+                if book is None:
+                    book = BookCache([token_id])
+                    self._monitoring_books[token_id] = book
+                book.rest_snapshot(token_id)
+                snapshot = book.snapshot_state(token_id)
+                return _as_float(snapshot.get("best_bid")), _as_float(snapshot.get("best_ask")), "live_clob_book"
+            except Exception as exc:
+                log_event("location_price_alert_live_quote_error", token_id=token_id, error=str(exc))
+                return None, None, "live_clob_book_error"
+        return (
+            self.executor.adapter.yes_best_bid(token_id),
+            self.executor.adapter.yes_best_ask(token_id),
+            "execution_adapter",
+        )
 
     def _process_market_verification(self) -> None:
         verification_config = self.config.monitoring.market_verification
@@ -680,9 +769,29 @@ def _parse_iso(value: Any) -> datetime | None:
 _TELEGRAM_CHUNK_CHARS = 3500
 
 
-def _format_live_update_message(article: Article) -> str:
-    parts = [article.title.strip(), "", article.raw_text.strip(), "", f"Source: {article.url}"]
+def _format_live_update_message(article: Article, *, body_text: str | None = None, incremental: bool = False) -> str:
+    body = (body_text if body_text is not None else article.raw_text).strip()
+    label = "Live update (new since last check):" if incremental else None
+    parts = [article.title.strip(), "", label, body, "", f"Source: {article.url}"]
     return "\n".join(part for part in parts if part)
+
+
+def _new_lines_since(old_text: str, new_text: str) -> str:
+    """Returns only the lines in new_text that weren't in old_text, in order.
+
+    Liveblog pages commonly prepend new entries above older ones (reverse
+    chronological), so a naive suffix/prefix diff would miss updates; a
+    line-level SequenceMatcher handles insertion at either end (or in the
+    middle) generically.
+    """
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    added: list[str] = []
+    for tag, _, _, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "replace"):
+            added.extend(new_lines[j1:j2])
+    return "\n".join(added).strip()
 
 
 def _chunk_telegram_message(message: str, limit: int = _TELEGRAM_CHUNK_CHARS) -> list[str]:
