@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import types
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -398,6 +399,36 @@ def test_location_keyword_gate_skips_unrelated_article() -> None:
     from polybot.location.keyword_gate import should_escalate_location_article
 
     assert should_escalate_location_article(article("Oil exports rose after a regional statement."), _config()) is False
+
+
+# ---- keyword gate runs before Telegram notify and before codex classification ----
+
+
+def _spy_bot(tmp_path):
+    from polybot.location.runner import LocationProtectionBot
+
+    config = _config(data_dir=tmp_path / "state", logs_dir=tmp_path / "logs")
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+    notified: list[str] = []
+    bot.notifier = types.SimpleNamespace(notify=lambda message, **fields: notified.append(message))
+    return bot, notified
+
+
+def test_irrelevant_poll_article_is_not_notified_or_classified(tmp_path) -> None:
+    # Reproduces the World Cup/FIFA noise seen on the AJ tag-page listing:
+    # an unrelated article must not reach Telegram or spend classifier budget.
+    bot, notified = _spy_bot(tmp_path)
+    decision = bot.process_article(article("Ronaldo scores as Portugal beats Uzbekistan at the World Cup."), always_notify=True)
+    assert decision.reason == "keyword_gate_no_location_trigger"
+    assert notified == []
+
+
+def test_relevant_poll_article_is_notified_and_classified(tmp_path) -> None:
+    # A genuinely relevant update still gets pushed to Telegram and goes on
+    # to the real classifier ("low classifier" keyword filter, then codex).
+    bot, notified = _spy_bot(tmp_path)
+    bot.process_article(article("The next round of talks will begin in Qatar next week."), always_notify=True)
+    assert notified  # the live-update chunk(s) were pushed
 
 
 # ---- rotation buy capped by confirmed sale proceeds (2026-07-06 hardening) ----

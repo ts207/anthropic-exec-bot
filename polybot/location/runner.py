@@ -261,6 +261,15 @@ class LocationProtectionBot:
         return True
 
     def process_article(self, article: Article, *, always_notify: bool = False) -> LocationDecision:
+        # Cheap deterministic keyword pre-filter runs FIRST, before spending a
+        # Telegram push or any classifier budget: only articles that mention a
+        # tracked location/meeting term (or a collapse term) go any further.
+        # This is the "low classifier" stage -- it selects relevant articles
+        # and updates; codex only ever sees what passes it.
+        if not should_escalate_location_article(article, self.config):
+            decision = LocationDecision("ALERT_ONLY", "1", "keyword_gate_no_location_trigger")
+            self._log_decision(article, decision)
+            return decision
         if always_notify:
             for chunk in _chunk_telegram_message(_format_live_update_message(article)):
                 self.notifier.notify(chunk, title=article.title, url=article.url, domain=article.domain, published_at=article.published_at)
@@ -274,10 +283,6 @@ class LocationProtectionBot:
             decision = LocationDecision("ALERT_ONLY", "3", "feed_summary_classification_disabled")
             self._log_decision(article, decision)
             self.notifier.notify("Location protection feed summary skipped classifier", reason=decision.reason, url=article.url)
-            return decision
-        if not should_escalate_location_article(article, self.config):
-            decision = LocationDecision("ALERT_ONLY", "1", "keyword_gate_no_location_trigger")
-            self._log_decision(article, decision)
             return decision
         block_reason = self.classifier_budget.block_reason(self.config.classifier)
         if block_reason is not None:
