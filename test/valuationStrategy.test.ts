@@ -25,6 +25,7 @@ import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuatio
 import { STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS, updateLadderPaperOrders, type LadderPaperOrder } from "../src/strategy/ladderPaper.ts";
 import { discoverValuationUniverse } from "../src/strategy/valuationUniverseDiscovery.ts";
 import { buildDailyReport } from "../src/strategy/dailyReport.ts";
+import { executeCandidate } from "../src/strategy/betaExecution.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -206,6 +207,26 @@ test("live blocker audit explains why candidate is not live-eligible", async () 
   assert.equal(blockers.includes("missing_live_config_ack"), true);
   assert.equal(blockers.includes("missing_posted_probe_success"), true);
   assert.equal(blockers.includes("posting_env_not_armed"), true);
+});
+
+test("live gate allows only source-confirmed stale YES policy", async () => {
+  const config = normalizeConfig({
+    ...testConfig(),
+    mode: "live",
+  });
+  const curveCandidate = candidateFixture({
+    signalType: "CURVE_MONOTONICITY_YES",
+    reason: "bid_backed_curve_repair",
+  });
+  const blockers = await liveBlockers(curveCandidate, config, "test-config-hash");
+  assert.equal(blockers.includes("source_confirmed_stale_yes_only_live_policy"), true);
+
+  const execution = await executeCandidate(curveCandidate, config, "test-config-hash");
+  assert.deepEqual(execution, {
+    posted: false,
+    skipped: true,
+    reason: "source_confirmed_stale_yes_only_live_policy",
+  });
 });
 
 test("candidate caps enforce global, event, company, and deadline budgets", () => {

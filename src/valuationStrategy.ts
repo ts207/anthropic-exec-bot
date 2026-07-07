@@ -985,9 +985,7 @@ export async function liveBlockers(
   if (config.mode !== "live") blockers.push(`operator_mode_${config.mode}`);
   if (candidate.signalType === "NPM_DRIFT_MODEL_YES") blockers.push("drift_model_alert_only");
   if (candidate.signalType === "RANKING_INCONSISTENCY_ALERT") blockers.push("ranking_market_alert_only");
-  if (!["SOURCE_CONFIRMED_YES", "CURVE_MONOTONICITY_YES", "CALENDAR_DOMINANCE_YES"].includes(candidate.signalType)) {
-    blockers.push("signal_not_live_enabled");
-  }
+  if (candidate.signalType !== "SOURCE_CONFIRMED_YES") blockers.push("source_confirmed_stale_yes_only_live_policy");
   if (!candidate.yesTokenId) blockers.push("missing_yes_token");
   if (!candidate.orderTemplate) blockers.push("missing_order_template");
   if (candidate.yesAsk === null || candidate.yesAsk === undefined) blockers.push("missing_yes_ask");

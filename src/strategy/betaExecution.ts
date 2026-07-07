@@ -24,7 +24,10 @@ export async function executeCandidate(
 ): Promise<ExecutionResult> {
   const mode = config.mode;
   if (mode === "off") return { posted: false, skipped: true, reason: "operator_mode_off" };
-  if (!candidate.liveAllowed || candidate.signalType === "NPM_DRIFT_MODEL_YES" || candidate.signalType === "RANKING_INCONSISTENCY_ALERT") {
+  if (candidate.signalType !== "SOURCE_CONFIRMED_YES") {
+    return { posted: false, skipped: true, reason: "source_confirmed_stale_yes_only_live_policy" };
+  }
+  if (!candidate.liveAllowed) {
     return { posted: false, skipped: true, reason: "candidate_alert_or_not_live_allowed" };
   }
   if (mode === "alert_only") return { posted: false, skipped: true, reason: "operator_mode_alert_only" };
