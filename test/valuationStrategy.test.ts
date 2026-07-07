@@ -826,6 +826,39 @@ test("ladder entry planner allows source-confirmed taker only for strict stale l
   assert.equal(plans[0]?.liveEligible, true);
 });
 
+test("ladder entry planner blocks source-confirmed taker below depth floor", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "crossed-shallow" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 1_010 },
+    tape_d_prices: [
+      { date: "2026-07-05", implied_valuation: 990 },
+      { date: "2026-07-06", implied_valuation: 1_010 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["crossed-shallow", quoteFixture(0.81, 0.78, { liquidity: config.minLiquidity })]]),
+    marketRows: [marketAuditRowFixture({
+      marketSlug: "crossed-shallow",
+      state: "NEWLY_CROSSED",
+      crossedQuality: "SOURCE_CONFIRMED_AND_STALE",
+      yesAsk: 0.81,
+      yesBid: 0.78,
+      depthUnderCap: config.minLiquidity - 1,
+      liveBlockers: [],
+    })],
+    forecasts: [],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "TAKER_SOURCE_CONFIRMED");
+  assert.equal(plans[0]?.liveEligible, false);
+  assert.equal(plans[0]?.blockers.includes("depth_under_taker_cap_below_minimum"), true);
+  assert.equal(plans[0]?.reason, "source_confirmed_but_live_blocked");
+});
+
 test("ladder entry planner keeps far optionality as paper-only passive bid", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_200, marketSlug: "far" });
@@ -1659,7 +1692,7 @@ function rankingLegFixture(company: string, ranking: 1 | 2 | 3): ValuationLeg {
   };
 }
 
-function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): BookQuote {
+function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03), overrides: Partial<BookQuote> = {}): BookQuote {
   return {
     tokenId: "yes-token",
     bestBid,
@@ -1672,6 +1705,7 @@ function quoteFixture(bestAsk: number, bestBid = Math.max(0, bestAsk - 0.03)): B
       { price: bestAsk, size: 100 },
       { price: Math.min(0.99, bestAsk + 0.02), size: 200 },
     ],
+    ...overrides,
   };
 }
 

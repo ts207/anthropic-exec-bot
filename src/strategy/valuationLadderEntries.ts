@@ -173,7 +173,7 @@ function buildLegEntryPlan(input: {
     ladderContext: input.ladderContext,
   });
   const structuralBlockers = structuralBlockersFor({ leg, direction, evidence, quote, marketRow, config });
-  const sourceTaker = sourceConfirmedTakerPlan(base, marketRow, structuralBlockers);
+  const sourceTaker = sourceConfirmedTakerPlan(base, marketRow, structuralBlockers, config);
   if (sourceTaker) return sourceTaker;
   const near = nearBoundaryMakerPlan(base, structuralBlockers);
   if (near) return near;
@@ -186,11 +186,12 @@ function sourceConfirmedTakerPlan(
   base: EntryPlan,
   marketRow: MarketAuditRow | undefined,
   structuralBlockers: string[],
+  config: StrategyConfig,
 ): EntryPlan | null {
   const blockers = [...structuralBlockers];
   if (base.direction === "UNKNOWN") blockers.push("direction_semantics_unknown");
   if (base.yesAsk === null || base.maxTakerPrice === null || base.yesAsk > base.maxTakerPrice) blockers.push("yes_ask_above_source_confirmed_taker_cap");
-  if (!marketRow || marketRow.depthUnderCap <= 0) blockers.push("no_depth_under_taker_cap");
+  if (!marketRow || marketRow.depthUnderCap < config.minLiquidity) blockers.push("depth_under_taker_cap_below_minimum");
   if (marketRow?.bookAgeMs !== undefined && marketRow.bookAgeMs > 15_000) blockers.push("orderbook_stale");
   if (marketRow?.crossedQuality !== "SOURCE_CONFIRMED_AND_STALE") blockers.push("not_strict_stale_source_confirmed");
   if (marketRow?.liveBlockers.length) blockers.push(...marketRow.liveBlockers);
