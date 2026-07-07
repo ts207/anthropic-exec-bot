@@ -20,6 +20,7 @@ export function decideThresholdLeg(
   if (quote.spread !== null && quote.spread > config.maxSpread) return noAction(base, "SKIP_WIDE_SPREAD");
   if (quote.liquidity < config.minLiquidity) return noAction(base, "SKIP_LOW_LIQUIDITY");
   if (locked) return noAction(base, "SKIP_DUPLICATE_LOCK");
+  if (base.direction !== "UP") return alert(base, "STALE_SOURCE_ALERT", "downside_or_ambiguous_direction_requires_ladder_validation", 7);
 
   const crossedValue = evidence.maxEligibleValuation ?? evidence.latestValuation;
   const crossedDate = evidence.maxEligibleDate ?? evidence.latestTapeDate;
@@ -80,6 +81,7 @@ function candidateBase(
     marketSlug: leg.marketSlug,
     deadline: leg.deadlineIso,
     threshold: leg.threshold,
+    direction: thresholdDirection(leg),
     yesTokenId: leg.yesTokenId,
     sourceValuation: evidence?.latestValuation,
     sourceDate: evidence?.latestTapeDate,
@@ -98,6 +100,16 @@ function candidateBase(
     reason: "not_evaluated",
     ruleHash: leg.ruleHash,
   };
+}
+
+function thresholdDirection(leg: ValuationLeg): "UP" | "DOWN" | "UNKNOWN" {
+  const text = `${leg.question}\n${leg.ruleText}`.toLowerCase();
+  const hasDownCue = /[↓↘]|down|below|less than|at or below|falls? to/.test(text);
+  const hasConfirmedDownRule = /at or below|less than or equal|falls? to or below|below the listed amount/.test(text);
+  if (hasConfirmedDownRule) return "DOWN";
+  if (hasDownCue) return "UNKNOWN";
+  if (/reaches or exceeds|exceeds|surpass|hit/.test(text)) return "UP";
+  return "UNKNOWN";
 }
 
 function noAction(base: ReturnType<typeof candidateBase>, reason: string): ValuationCandidate {

@@ -44,6 +44,9 @@ export async function executeCandidate(
 export function sourceConfirmedLivePolicyBlockers(candidate: ValuationCandidate, config: StrategyConfig): string[] {
   const blockers: string[] = [];
   if (candidate.signalType !== "SOURCE_CONFIRMED_YES") blockers.push("source_confirmed_stale_yes_only_live_policy");
+  if (candidate.signalType === "SOURCE_CONFIRMED_YES" && candidate.direction !== "UP") {
+    blockers.push("direction_semantics_not_up");
+  }
   if (candidate.threshold === undefined || candidate.maxEligibleValuation === undefined) {
     blockers.push("missing_source_confirmation_fields");
   } else if (candidate.maxEligibleValuation < candidate.threshold) {

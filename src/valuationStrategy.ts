@@ -191,6 +191,7 @@ function compactCandidate(candidate: ValuationCandidate): Record<string, unknown
     marketSlug: candidate.marketSlug,
     deadline: candidate.deadline,
     threshold: candidate.threshold,
+    direction: candidate.direction,
     yesAsk: candidate.yesAsk,
     depthUnderCap: candidate.depthUnderCap,
     bookAgeMs: candidate.bookAgeMs,
@@ -895,6 +896,7 @@ export async function auditCandidates(
       ruleEvidence: {
         ruleHash: candidate.ruleHash,
         threshold: candidate.threshold,
+        direction: candidate.direction,
         deadline: candidate.deadline,
       },
       market: {

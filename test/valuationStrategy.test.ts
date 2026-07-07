@@ -103,6 +103,7 @@ test("source-confirmed crossed threshold creates BUY YES candidate", () => {
   const candidate = decideThresholdLeg(leg, evidence, quoteFixture(0.81), config);
   assert.equal(candidate.signalType, "SOURCE_CONFIRMED_YES");
   assert.equal(candidate.status, "candidate");
+  assert.equal(candidate.direction, "UP");
   assert.equal(candidate.liveAllowed, true);
   assert.equal(candidate.orderUsd > 0, true);
   assert.equal(candidate.distancePct !== undefined && candidate.distancePct < 0.001, true);
@@ -119,6 +120,24 @@ test("source-confirmed crossed threshold creates BUY YES candidate", () => {
     maxPrice: 0.95,
     posted: false,
   });
+});
+
+test("legacy threshold decision alerts ambiguous downside legs instead of trading", () => {
+  const config = testConfig();
+  const leg = legFixture({
+    question: "Will Stripe's valuation fall below $170B by July 31?",
+    ruleText: "This market resolves based on whether the valuation falls below the listed amount.",
+    threshold: 170_000_000_000,
+  });
+  const evidence = parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-01", implied_valuation: 171_000_000_000 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" });
+  const candidate = decideThresholdLeg(leg, evidence, quoteFixture(0.81), config);
+  assert.equal(candidate.signalType, "STALE_SOURCE_ALERT");
+  assert.equal(candidate.status, "alert");
+  assert.equal(candidate.direction, "DOWN");
+  assert.equal(candidate.liveAllowed, false);
+  assert.equal(candidate.reason, "downside_or_ambiguous_direction_requires_ladder_validation");
 });
 
 test("non-crossed threshold no-actions unless drift edge exists", () => {
@@ -252,6 +271,15 @@ test("source-confirmed live gate requires depth and fresh orderbook", async () =
     posted: false,
     skipped: true,
     reason: "orderbook_stale",
+  });
+
+  const ambiguousDirection = candidateFixture({ direction: "UNKNOWN" });
+  const directionBlockers = await liveBlockers(ambiguousDirection, config, "test-config-hash");
+  assert.equal(directionBlockers.includes("direction_semantics_not_up"), true);
+  assert.deepEqual(await executeCandidate(ambiguousDirection, config, "test-config-hash"), {
+    posted: false,
+    skipped: true,
+    reason: "direction_semantics_not_up",
   });
 });
 
@@ -2022,6 +2050,7 @@ function candidateFixture(overrides: Partial<ValuationCandidate> = {}): Valuatio
     marketSlug: "market",
     deadline: "2026-08-01T03:59:59Z",
     threshold: 1_000,
+    direction: "UP",
     yesTokenId: "yes-token",
     sourceValuation: 1_010,
     sourceDate: "2026-07-06",

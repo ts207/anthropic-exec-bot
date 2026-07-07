@@ -150,6 +150,7 @@ export type ValuationCandidate = {
   marketSlug: string;
   deadline: string;
   threshold?: number;
+  direction?: "UP" | "DOWN" | "UNKNOWN";
   yesTokenId?: string;
   sourceValuation?: number;
   sourceDate?: string;
