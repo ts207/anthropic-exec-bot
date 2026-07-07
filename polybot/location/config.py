@@ -94,6 +94,9 @@ class PriceAlertConfig:
     enabled: bool = False
     outcome: str = ""
     thresholds: list[float] = field(default_factory=list)
+    # When execution is dry-run, use public live CLOB books for monitoring
+    # alerts instead of the synthetic DryRunTradingAdapter quote.
+    live_quotes_in_dry_run: bool = False
 
 
 @dataclass(frozen=True)

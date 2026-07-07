@@ -247,7 +247,12 @@ monitoring:
   price_alerts:
     enabled: true
     outcome: "qatar"
-    thresholds: [0.28, 0.40]
+    # 0.15 is the stop-loss wakeup band: a crash below it likely means the
+    # order book moved before a classifiable article reached the bot.
+    thresholds: [0.15, 0.28, 0.40]
+    # Keep trade execution simulated, but monitor real public CLOB quotes so
+    # price alerts are not based on the dry-run adapter's synthetic 0.50 book.
+    live_quotes_in_dry_run: true
   heartbeat:
     enabled: true
     interval_hours: 24
@@ -264,7 +269,10 @@ execution:
     trim_fraction: 0.25
   buy_rotation:
     enabled: true
-    max_price: 0.95
+    # Rotation is only worth the extra resolution-dispute risk if the bot gets
+    # there early enough to buy the confirmed venue below the post-confirmation
+    # late-price zone. Otherwise degrade to clean sell-only exit.
+    max_price: 0.85
     usd_budget: 900
     skip_if_above_cap: true
 

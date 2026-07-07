@@ -935,6 +935,33 @@ def test_promote_google_news_item_uses_resolved_publisher_url(monkeypatch) -> No
     assert "postponed past July 17" in promoted.raw_text
 
 
+def test_promote_first_party_full_text_feed_as_article_when_publisher_blocks(monkeypatch) -> None:
+    from polybot.iran import source_fetcher
+
+    body = " ".join(["Senior diplomats will meet in Doha for formal talks."] * 25)
+    feed_item = Article(
+        url="https://www.dawn.com/news/2013507/pakistan-taking-on-mantle-of-mediation",
+        domain="dawn.com",
+        title="Dawn full text item",
+        published_at="Tue, 07 Jul 2026 07:24:14 +0500",
+        fetched_at="2026-07-07T00:00:00Z",
+        raw_text=body,
+        hash="dawn-feedhash",
+        source_kind="feed",
+    )
+
+    def blocked_fetch(url, ua):
+        import requests
+        raise requests.RequestException("403 Client Error")
+
+    monkeypatch.setattr(source_fetcher, "fetch_article", blocked_fetch)
+    promoted = source_fetcher.promote_feed_article(feed_item, "ua")
+    assert promoted is not None
+    assert promoted.domain == "dawn.com"
+    assert promoted.source_kind == "article"
+    assert "formal talks" in promoted.raw_text
+
+
 def test_promote_google_news_item_unresolvable_returns_none(monkeypatch) -> None:
     from polybot.iran import source_fetcher
 
