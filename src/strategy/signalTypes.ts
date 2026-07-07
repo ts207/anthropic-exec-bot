@@ -160,6 +160,8 @@ export type ValuationCandidate = {
   bestBid: number | null;
   spread: number | null;
   liquidity: number;
+  depthUnderCap?: number;
+  bookAgeMs?: number;
   fairPrice: number;
   edge: number;
   confidence: number;

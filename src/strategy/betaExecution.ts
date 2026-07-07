@@ -24,9 +24,8 @@ export async function executeCandidate(
 ): Promise<ExecutionResult> {
   const mode = config.mode;
   if (mode === "off") return { posted: false, skipped: true, reason: "operator_mode_off" };
-  if (candidate.signalType !== "SOURCE_CONFIRMED_YES") {
-    return { posted: false, skipped: true, reason: "source_confirmed_stale_yes_only_live_policy" };
-  }
+  const policyBlockers = sourceConfirmedLivePolicyBlockers(candidate, config);
+  if (policyBlockers.length > 0) return { posted: false, skipped: true, reason: policyBlockers.join(",") };
   if (!candidate.liveAllowed) {
     return { posted: false, skipped: true, reason: "candidate_alert_or_not_live_allowed" };
   }
@@ -37,12 +36,35 @@ export async function executeCandidate(
   const probe = await validatePostedProbeForCandidate(config, candidate);
   if (!probe.ok) return { posted: false, skipped: true, reason: probe.blockers.join(",") };
   requireMutationAllowed();
-  if (!candidate.yesAsk || candidate.yesAsk > candidate.maxPrice) {
-    return { posted: false, skipped: true, reason: "best_ask_above_max_price" };
-  }
   const response = await placeFakBuy(requiredToken(candidate), candidate.orderUsd, candidate.maxPrice);
   await lockCandidate(config, candidate, response);
   return { posted: true, response };
+}
+
+export function sourceConfirmedLivePolicyBlockers(candidate: ValuationCandidate, config: StrategyConfig): string[] {
+  const blockers: string[] = [];
+  if (candidate.signalType !== "SOURCE_CONFIRMED_YES") blockers.push("source_confirmed_stale_yes_only_live_policy");
+  if (candidate.threshold === undefined || candidate.maxEligibleValuation === undefined) {
+    blockers.push("missing_source_confirmation_fields");
+  } else if (candidate.maxEligibleValuation < candidate.threshold) {
+    blockers.push("source_not_confirmed");
+  }
+  if (candidate.yesAsk === null || candidate.yesAsk === undefined) {
+    blockers.push("missing_yes_ask");
+  } else if (candidate.yesAsk > candidate.maxPrice) {
+    blockers.push("best_ask_above_cap");
+  }
+  if (candidate.depthUnderCap === undefined) {
+    blockers.push("missing_depth_under_cap");
+  } else if (candidate.depthUnderCap < config.minLiquidity) {
+    blockers.push("depth_under_taker_cap_below_minimum");
+  }
+  if (candidate.bookAgeMs === undefined) {
+    blockers.push("missing_orderbook_age");
+  } else if (candidate.bookAgeMs > config.orderbookMaxAgeMs) {
+    blockers.push("orderbook_stale");
+  }
+  return [...new Set(blockers)];
 }
 
 export async function postedProbe(

@@ -106,6 +106,8 @@ test("source-confirmed crossed threshold creates BUY YES candidate", () => {
   assert.equal(candidate.liveAllowed, true);
   assert.equal(candidate.orderUsd > 0, true);
   assert.equal(candidate.distancePct !== undefined && candidate.distancePct < 0.001, true);
+  assert.equal(candidate.depthUnderCap !== undefined && candidate.depthUnderCap >= config.minLiquidity, true);
+  assert.equal(candidate.bookAgeMs !== undefined, true);
   assert.equal(candidate.confidenceScore, 10);
   assert.equal(candidate.edgeScore > 0, true);
   assert.deepEqual(candidate.orderTemplate, {
@@ -226,6 +228,30 @@ test("live gate allows only source-confirmed stale YES policy", async () => {
     posted: false,
     skipped: true,
     reason: "source_confirmed_stale_yes_only_live_policy",
+  });
+});
+
+test("source-confirmed live gate requires depth and fresh orderbook", async () => {
+  const config = normalizeConfig({
+    ...testConfig(),
+    mode: "live",
+  });
+  const lowDepth = candidateFixture({ depthUnderCap: config.minLiquidity - 1 });
+  const lowDepthBlockers = await liveBlockers(lowDepth, config, "test-config-hash");
+  assert.equal(lowDepthBlockers.includes("depth_under_taker_cap_below_minimum"), true);
+  assert.deepEqual(await executeCandidate(lowDepth, config, "test-config-hash"), {
+    posted: false,
+    skipped: true,
+    reason: "depth_under_taker_cap_below_minimum",
+  });
+
+  const staleBook = candidateFixture({ bookAgeMs: config.orderbookMaxAgeMs + 1 });
+  const staleBlockers = await liveBlockers(staleBook, config, "test-config-hash");
+  assert.equal(staleBlockers.includes("orderbook_stale"), true);
+  assert.deepEqual(await executeCandidate(staleBook, config, "test-config-hash"), {
+    posted: false,
+    skipped: true,
+    reason: "orderbook_stale",
   });
 });
 
@@ -2006,6 +2032,8 @@ function candidateFixture(overrides: Partial<ValuationCandidate> = {}): Valuatio
     bestBid: 0.78,
     spread: 0.03,
     liquidity: 500,
+    depthUnderCap: 250,
+    bookAgeMs: 1_000,
     fairPrice: 1,
     edge: 0.19,
     confidence: 10,

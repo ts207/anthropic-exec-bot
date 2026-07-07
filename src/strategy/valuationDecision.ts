@@ -1,6 +1,7 @@
 import type { BookQuote, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./signalTypes.ts";
 import { allocateCandidate } from "./candidateAllocator.ts";
 import { driftCandidate } from "./npmDriftModel.ts";
+import { bookAgeMs, depthUnderCap } from "./marketAudit.ts";
 
 export function decideThresholdLeg(
   leg: ValuationLeg,
@@ -9,7 +10,7 @@ export function decideThresholdLeg(
   config: StrategyConfig,
   locked = false,
 ): ValuationCandidate {
-  const base = candidateBase(leg, evidence, quote);
+  const base = candidateBase(leg, evidence, quote, config);
   if (leg.closed || !leg.active) return noAction(base, "SKIP_CLOSED_OR_INACTIVE");
   if (!leg.acceptingOrders) return noAction(base, "SKIP_NOT_ACCEPTING_ORDERS");
   if (leg.parseStatus !== "ok" || leg.threshold === undefined) return alert(base, "STALE_SOURCE_ALERT", "malformed_or_unsupported_threshold_leg", 4);
@@ -64,7 +65,13 @@ export function decideThresholdLeg(
   }, config);
 }
 
-function candidateBase(leg: ValuationLeg, evidence: NpmEvidence | undefined, quote: BookQuote | undefined) {
+function candidateBase(
+  leg: ValuationLeg,
+  evidence: NpmEvidence | undefined,
+  quote: BookQuote | undefined,
+  config: StrategyConfig,
+) {
+  const sourceConfirmedCap = config.maxYesPriceBySignal.SOURCE_CONFIRMED_YES ?? config.defaultMaxYesPrice;
   return {
     signalType: "NO_ACTION" as const,
     status: "skip" as const,
@@ -83,6 +90,8 @@ function candidateBase(leg: ValuationLeg, evidence: NpmEvidence | undefined, quo
     bestBid: quote?.bestBid ?? null,
     spread: quote?.spread ?? null,
     liquidity: quote?.liquidity ?? leg.liquidity,
+    depthUnderCap: depthUnderCap(quote, sourceConfirmedCap),
+    bookAgeMs: bookAgeMs(quote),
     fairPrice: 0,
     edge: 0,
     confidence: 0,

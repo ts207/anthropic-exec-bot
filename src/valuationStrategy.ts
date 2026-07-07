@@ -12,7 +12,7 @@ import { curveMonotonicityCandidates } from "./strategy/curveArbitrage.ts";
 import { calendarDominanceCandidates } from "./strategy/calendarArbitrage.ts";
 import { rankingAlertCandidates } from "./strategy/rankingSimulator.ts";
 import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
-import { executeCandidate, postedProbe } from "./strategy/betaExecution.ts";
+import { executeCandidate, postedProbe, sourceConfirmedLivePolicyBlockers } from "./strategy/betaExecution.ts";
 import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck, type CandidateLock } from "./strategy/stateStore.ts";
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
@@ -192,6 +192,8 @@ function compactCandidate(candidate: ValuationCandidate): Record<string, unknown
     deadline: candidate.deadline,
     threshold: candidate.threshold,
     yesAsk: candidate.yesAsk,
+    depthUnderCap: candidate.depthUnderCap,
+    bookAgeMs: candidate.bookAgeMs,
     distancePct: candidate.distancePct,
     fairPrice: candidate.fairPrice,
     edge: candidate.edge,
@@ -900,6 +902,8 @@ export async function auditCandidates(
         bestBid: candidate.bestBid,
         spread: candidate.spread,
         liquidity: candidate.liquidity,
+        depthUnderCap: candidate.depthUnderCap,
+        bookAgeMs: candidate.bookAgeMs,
         cap: candidate.maxPrice,
       },
       scores: {
@@ -985,13 +989,9 @@ export async function liveBlockers(
   if (config.mode !== "live") blockers.push(`operator_mode_${config.mode}`);
   if (candidate.signalType === "NPM_DRIFT_MODEL_YES") blockers.push("drift_model_alert_only");
   if (candidate.signalType === "RANKING_INCONSISTENCY_ALERT") blockers.push("ranking_market_alert_only");
-  if (candidate.signalType !== "SOURCE_CONFIRMED_YES") blockers.push("source_confirmed_stale_yes_only_live_policy");
+  blockers.push(...sourceConfirmedLivePolicyBlockers(candidate, config));
   if (!candidate.yesTokenId) blockers.push("missing_yes_token");
   if (!candidate.orderTemplate) blockers.push("missing_order_template");
-  if (candidate.yesAsk === null || candidate.yesAsk === undefined) blockers.push("missing_yes_ask");
-  if (candidate.status === "candidate" && candidate.yesAsk !== null && candidate.yesAsk !== undefined && candidate.yesAsk > candidate.maxPrice) {
-    blockers.push("best_ask_above_cap");
-  }
   if (candidate.orderUsd <= 0) blockers.push("zero_order_usd");
   if (!await hasLiveAck(config, configHash)) blockers.push("missing_live_config_ack");
   if (await isCandidateLocked(config, candidate)) blockers.push("duplicate_lock");
