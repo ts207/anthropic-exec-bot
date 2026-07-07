@@ -397,9 +397,13 @@ function ladderPaperMetrics(
   }, {});
   const filledOrResolved = orders.filter((order) => order.status === "filled" || order.status === "resolved");
   const resolved = orders.filter((order) => order.status === "resolved");
+  const liveProofOrders = orders.filter(isPassiveMakerLiveProofOrder);
+  const liveProofFilledOrResolved = liveProofOrders.filter((order) => order.status === "filled" || order.status === "resolved");
+  const liveProofResolved = liveProofOrders.filter((order) => order.status === "resolved");
   const totalHypotheticalPnl = round4(orders.reduce((sum, order) => sum + (order.hypotheticalPnl ?? 0), 0));
-  const staleSourceErrorCount = orders.filter(hasStaleSourceError).length;
-  const readyForManualReview = filledOrResolved.length >= 30 && totalHypotheticalPnl > 0 && staleSourceErrorCount === 0;
+  const liveProofHypotheticalPnl = round4(liveProofOrders.reduce((sum, order) => sum + (order.hypotheticalPnl ?? 0), 0));
+  const staleSourceErrorCount = liveProofOrders.filter(hasStaleSourceError).length;
+  const readyForManualReview = liveProofFilledOrResolved.length >= 30 && liveProofHypotheticalPnl > 0 && staleSourceErrorCount === 0;
   return {
     totalOrders: orders.length,
     workingOrders: orders.filter((order) => order.status === "working").length,
@@ -421,22 +425,27 @@ function ladderPaperMetrics(
     byModeProof: modeProofRows(orders),
     proofBeforeLive: {
       minimumFilledOrders: 30,
-      currentFilledOrders: filledOrResolved.length,
-      currentResolvedOrders: resolved.length,
-      totalHypotheticalPnl,
+      currentFilledOrders: liveProofFilledOrResolved.length,
+      currentResolvedOrders: liveProofResolved.length,
+      totalHypotheticalPnl: liveProofHypotheticalPnl,
       positivePnlRequired: true,
       staleSourceErrorCount,
       readyForManualReview,
       readyForLive: false,
       requirements: [
-        "30+ filled passive ladder paper orders",
+        "30+ filled passive maker ladder paper orders excluding range-spread and curve-repair diagnostics",
         "positive hypothetical PnL after spread and missed-fill assumptions",
-        "separate calibration for near-boundary, far-optionality, and curve-repair orders",
+        "separate calibration for near-boundary and far-optionality passive orders",
+        "range-spread and curve-repair rows remain paper-only diagnostics",
         "no stale-source false fills",
         "manual promotion before any maker live mode",
       ],
     },
   };
+}
+
+function isPassiveMakerLiveProofOrder(order: LadderPaperOrder): boolean {
+  return order.entryMode === "MAKER_NEAR_BOUNDARY_BID" || order.entryMode === "MAKER_FAR_OPTIONALITY_BID";
 }
 
 function activeOrders(orders: LadderPaperOrder[]): LadderPaperOrder[] {

@@ -1279,6 +1279,31 @@ test("ladder paper proof summarizes passive-fill evidence without enabling live"
   assert.equal(stale.metrics.proofBeforeLive.readyForManualReview, false);
 });
 
+test("ladder paper live proof excludes range and curve diagnostics", () => {
+  const diagnosticOrders = Array.from({ length: 30 }, (_, index) => ladderPaperOrderFixture({
+    id: `range-${index}`,
+    entryMode: "RANGE_SPREAD_PAPER",
+    hypotheticalPnl: 0.1,
+  }));
+  const curveOrders = Array.from({ length: 30 }, (_, index) => ladderPaperOrderFixture({
+    id: `curve-${index}`,
+    entryMode: "MAKER_CURVE_REPAIR_BID",
+    hypotheticalPnl: 0.1,
+  }));
+  const update = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [...diagnosticOrders, ...curveOrders] },
+    plans: [],
+    now: new Date("2026-07-07T00:00:00Z"),
+  });
+  assert.equal(update.metrics.totalHypotheticalPnl, 6);
+  assert.equal(update.metrics.proofBeforeLive.currentFilledOrders, 0);
+  assert.equal(update.metrics.proofBeforeLive.currentResolvedOrders, 0);
+  assert.equal(update.metrics.proofBeforeLive.totalHypotheticalPnl, 0);
+  assert.equal(update.metrics.proofBeforeLive.readyForManualReview, false);
+  assert.equal(update.metrics.byModeProof.some((row) => row.entryMode === "RANGE_SPREAD_PAPER" && row.readyForManualReview), true);
+  assert.equal(update.metrics.byModeProof.some((row) => row.entryMode === "MAKER_CURVE_REPAIR_BID" && row.readyForManualReview), true);
+});
+
 test("ladder direction rejects ambiguous down-arrow reaches-or-exceeds legs", () => {
   const leg = legFixture({
     question: "Will Stripe's valuation hit ↓$170B by July 31?",
