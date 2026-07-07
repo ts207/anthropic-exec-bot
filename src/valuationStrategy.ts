@@ -25,7 +25,7 @@ import { buildDailyReport } from "./strategy/dailyReport.ts";
 import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, type EntryPlan } from "./strategy/valuationLadderEntries.ts";
 import { discoverValuationUniverse } from "./strategy/valuationUniverseDiscovery.ts";
-import { ladderPaperPath, parseLadderPaperState, updateLadderPaperOrders } from "./strategy/ladderPaper.ts";
+import { STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS, ladderPaperPath, parseLadderPaperState, updateLadderPaperOrders } from "./strategy/ladderPaper.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
 
@@ -545,7 +545,7 @@ export async function entryAudit(loaded: LoadedStrategyConfig, args: Map<string,
 }
 
 export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
-  const sizeUsd = Math.max(0.01, Number(args.get("size-usd") ?? 1));
+  const sizeUsd = Math.max(0.01, Number(args.get("size-usd") ?? loaded.config.baseOrderUsd));
   const now = new Date();
   const { plans, sourceFreshness } = await entryPlanContext(loaded);
   const previous = parseLadderPaperState(await readJson(ladderPaperPath(loaded.config)));
@@ -554,6 +554,7 @@ export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string
     plans,
     now,
     sizeUsd,
+    sizeMultipliers: STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS,
     nextFixingAt: expectedNpmUpdateAt(now, loaded.config.npmUpdate),
     cancelBeforeFixingMs: 10 * 60_000,
     caps: loaded.config,
@@ -567,6 +568,8 @@ export async function ladderPaper(loaded: LoadedStrategyConfig, args: Map<string
     liveEligible: false,
     livePolicy: "ladder_paper_is_research_only_until_passive_fills_prove_ev",
     sizeUsd,
+    baseSizeUsd: sizeUsd,
+    sizeMultipliers: STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS,
     summary: update.metrics,
     opened: update.opened,
     filled: update.filled,

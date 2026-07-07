@@ -22,7 +22,7 @@ import { expectedNpmUpdateAt, phaseForNow } from "../src/strategy/automationSche
 import { meaningfulAlerts, runAutomationCycle } from "../src/strategy/valuationAutomation.ts";
 import { acquireAutomationLock, automationHeartbeatPath, writeAutomationHeartbeat } from "../src/strategy/automationRuntime.ts";
 import { buildLadderEntryPlans, ladderDirection } from "../src/strategy/valuationLadderEntries.ts";
-import { updateLadderPaperOrders, type LadderPaperOrder } from "../src/strategy/ladderPaper.ts";
+import { STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS, updateLadderPaperOrders, type LadderPaperOrder } from "../src/strategy/ladderPaper.ts";
 import { discoverValuationUniverse } from "../src/strategy/valuationUniverseDiscovery.ts";
 import { buildDailyReport } from "../src/strategy/dailyReport.ts";
 
@@ -1191,6 +1191,65 @@ test("ladder paper opens passive orders and fills only when ask reaches bid", ()
   });
   assert.equal(noDuplicate.opened.length, 0);
   assert.equal(noDuplicate.state.orders.length, 1);
+});
+
+test("ladder paper applies strategy size multipliers by entry mode", () => {
+  const config = testConfig();
+  const nearLeg = legFixture({ threshold: 1_000, marketSlug: "near-paper" });
+  const farLeg = legFixture({ threshold: 1_200, marketSlug: "far-paper" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [nearLeg, farLeg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([
+      ["near-paper", quoteFixture(0.97, 0.4)],
+      ["far-paper", quoteFixture(0.12, 0.08)],
+    ]),
+    marketRows: [
+      marketAuditRowFixture({ marketSlug: "near-paper", state: "NEAR_BOUNDARY", yesAsk: 0.97, yesBid: 0.4 }),
+      marketAuditRowFixture({ marketSlug: "far-paper", state: "FAR_ABOVE", yesAsk: 0.12, yesBid: 0.08 }),
+    ],
+    forecasts: [
+      forecastRowFixture({
+        company: "Anthropic",
+        marketSlug: "near-paper",
+        threshold: 1_000,
+        state: "NEAR_BOUNDARY",
+        latestValuation: 993,
+        maxEligibleValuation: 993,
+        distancePct: 0.007,
+        modelFairPrice: 0.68,
+      }),
+      forecastRowFixture({
+        company: "Anthropic",
+        marketSlug: "far-paper",
+        threshold: 1_200,
+        state: "FAR_ABOVE",
+        latestValuation: 993,
+        maxEligibleValuation: 993,
+        distancePct: 0.1725,
+        yesAsk: 0.12,
+        yesBid: 0.08,
+        modelFairPrice: 0.18,
+      }),
+    ],
+    monotonicity: [],
+    config,
+  });
+  const opened = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans,
+    now: new Date("2026-07-06T12:00:00Z"),
+    sizeUsd: 10,
+    sizeMultipliers: STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS,
+  });
+  const near = opened.opened.find((order) => order.entryMode === "MAKER_NEAR_BOUNDARY_BID");
+  const far = opened.opened.find((order) => order.entryMode === "MAKER_FAR_OPTIONALITY_BID");
+  assert.equal(near?.sizeUsd, 2.5);
+  assert.equal(far?.sizeUsd, 0.5);
+  assert.equal(opened.metrics.activeExposureUsd, 3);
 });
 
 test("ladder paper enforces company event deadline and global paper caps before opening", () => {

@@ -53,6 +53,14 @@ export type LadderPaperUpdate = {
 };
 
 export type LadderPaperCaps = Pick<StrategyConfig, "globalUsdCap" | "perEventUsdCap" | "perCompanyUsdCap" | "perDeadlineUsdCap">;
+export type LadderPaperSizeMultipliers = Partial<Record<EntryMode, number>>;
+
+export const STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS: LadderPaperSizeMultipliers = {
+  MAKER_NEAR_BOUNDARY_BID: 0.25,
+  MAKER_FAR_OPTIONALITY_BID: 0.05,
+  MAKER_CURVE_REPAIR_BID: 1,
+  RANGE_SPREAD_PAPER: 1,
+};
 
 export type LadderPaperOpenBlock = {
   company: string;
@@ -130,6 +138,7 @@ export function updateLadderPaperOrders(input: {
   plans: EntryPlan[];
   now?: Date;
   sizeUsd?: number;
+  sizeMultipliers?: LadderPaperSizeMultipliers;
   nextFixingAt?: Date;
   cancelBeforeFixingMs?: number;
   caps?: LadderPaperCaps;
@@ -167,12 +176,13 @@ export function updateLadderPaperOrders(input: {
     if (!isLadderPaperOpenTrigger(plan)) continue;
     const id = planKey(plan);
     if (knownIds.has(id)) continue;
-    const capBlock = paperCapBlock(plan, orders, sizeUsd, input.caps);
+    const planSizeUsd = sizeUsdForPlan(plan, sizeUsd, input.sizeMultipliers);
+    const capBlock = paperCapBlock(plan, orders, planSizeUsd, input.caps);
     if (capBlock) {
       blocked.push(capBlock);
       continue;
     }
-    const order = openOrder(plan, now, sizeUsd);
+    const order = openOrder(plan, now, planSizeUsd);
     orders.push(order);
     opened.push(order);
     if (order.status === "filled") filled.push(order);
@@ -192,6 +202,11 @@ export function updateLadderPaperOrders(input: {
     blocked,
     metrics: ladderPaperMetrics(orders, opened.length, filled.length, updated.length, blocked.length),
   };
+}
+
+export function sizeUsdForPlan(plan: EntryPlan, baseSizeUsd: number, multipliers: LadderPaperSizeMultipliers | undefined): number {
+  const multiplier = multipliers?.[plan.entryMode] ?? 1;
+  return round4(Math.max(0.01, baseSizeUsd * multiplier));
 }
 
 export function isLadderPaperOpenTrigger(plan: EntryPlan): boolean {
