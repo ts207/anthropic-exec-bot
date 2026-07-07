@@ -859,6 +859,67 @@ test("ladder entry planner blocks source-confirmed taker below depth floor", () 
   assert.equal(plans[0]?.reason, "source_confirmed_but_live_blocked");
 });
 
+test("ladder entry planner refuses stale-YES taker when source is not confirmed", () => {
+  const config = testConfig();
+  const leg = legFixture({ threshold: 1_000, marketSlug: "inconsistent-crossed" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 990 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["inconsistent-crossed", quoteFixture(0.81, 0.78)]]),
+    marketRows: [marketAuditRowFixture({
+      marketSlug: "inconsistent-crossed",
+      state: "NEWLY_CROSSED",
+      crossedQuality: "SOURCE_CONFIRMED_AND_STALE",
+      yesAsk: 0.81,
+      yesBid: 0.78,
+      depthUnderCap: config.minLiquidity,
+      liveBlockers: [],
+    })],
+    forecasts: [],
+    monotonicity: [],
+    config,
+  });
+  assert.notEqual(plans[0]?.entryMode, "TAKER_SOURCE_CONFIRMED");
+  assert.equal(plans[0]?.sourceConfirmed, false);
+  assert.equal(plans[0]?.liveEligible, false);
+});
+
+test("ladder entry planner uses configured book age for source-confirmed taker", () => {
+  const config = { ...testConfig(), orderbookMaxAgeMs: 60_000 };
+  const leg = legFixture({ threshold: 1_000, marketSlug: "crossed-slow-book" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 1_010 },
+    tape_d_prices: [
+      { date: "2026-07-05", implied_valuation: 990 },
+      { date: "2026-07-06", implied_valuation: 1_010 },
+    ],
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const plans = buildLadderEntryPlans({
+    legs: [leg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["crossed-slow-book", quoteFixture(0.81, 0.78)]]),
+    marketRows: [marketAuditRowFixture({
+      marketSlug: "crossed-slow-book",
+      state: "NEWLY_CROSSED",
+      crossedQuality: "SOURCE_CONFIRMED_AND_STALE",
+      yesAsk: 0.81,
+      yesBid: 0.78,
+      depthUnderCap: config.minLiquidity,
+      bookAgeMs: 30_000,
+      liveBlockers: [],
+    })],
+    forecasts: [],
+    monotonicity: [],
+    config,
+  });
+  assert.equal(plans[0]?.entryMode, "TAKER_SOURCE_CONFIRMED");
+  assert.equal(plans[0]?.liveEligible, true);
+  assert.equal(plans[0]?.blockers.includes("orderbook_stale"), false);
+});
+
 test("ladder entry planner keeps far optionality as paper-only passive bid", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_200, marketSlug: "far" });

@@ -188,21 +188,23 @@ function sourceConfirmedTakerPlan(
   structuralBlockers: string[],
   config: StrategyConfig,
 ): EntryPlan | null {
+  if (!base.sourceConfirmed) return null;
   const blockers = [...structuralBlockers];
   if (base.direction === "UNKNOWN") blockers.push("direction_semantics_unknown");
   if (base.yesAsk === null || base.maxTakerPrice === null || base.yesAsk > base.maxTakerPrice) blockers.push("yes_ask_above_source_confirmed_taker_cap");
   if (!marketRow || marketRow.depthUnderCap < config.minLiquidity) blockers.push("depth_under_taker_cap_below_minimum");
-  if (marketRow?.bookAgeMs !== undefined && marketRow.bookAgeMs > 15_000) blockers.push("orderbook_stale");
+  if (marketRow?.bookAgeMs !== undefined && marketRow.bookAgeMs > config.orderbookMaxAgeMs) blockers.push("orderbook_stale");
   if (marketRow?.crossedQuality !== "SOURCE_CONFIRMED_AND_STALE") blockers.push("not_strict_stale_source_confirmed");
   if (marketRow?.liveBlockers.length) blockers.push(...marketRow.liveBlockers);
   if (marketRow?.state !== "NEWLY_CROSSED" && marketRow?.state !== "PREVIOUSLY_CROSSED") return null;
+  const uniqueBlockers = [...new Set(blockers)];
   return {
     ...base,
     entryMode: "TAKER_SOURCE_CONFIRMED",
     paperEligible: false,
-    liveEligible: blockers.length === 0,
-    blockers,
-    reason: blockers.length ? "source_confirmed_but_live_blocked" : "source_confirmed_stale_yes_taker",
+    liveEligible: uniqueBlockers.length === 0,
+    blockers: uniqueBlockers,
+    reason: uniqueBlockers.length ? "source_confirmed_but_live_blocked" : "source_confirmed_stale_yes_taker",
   };
 }
 
