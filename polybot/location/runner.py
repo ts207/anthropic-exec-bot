@@ -219,7 +219,7 @@ class LocationProtectionBot:
             for article in self._fetch_poll_articles(url):
                 if not self.article_store.store(article):
                     continue
-                decisions.append(self.process_article(article, always_notify=True))
+                decisions.append(self.process_article(article))
         for feed_url in self.config.sources.feed_urls:
             try:
                 articles = fetch_feed_articles(
@@ -260,7 +260,7 @@ class LocationProtectionBot:
             return False
         return True
 
-    def process_article(self, article: Article, *, always_notify: bool = False) -> LocationDecision:
+    def process_article(self, article: Article) -> LocationDecision:
         # Cheap deterministic keyword pre-filter runs FIRST, before spending a
         # Telegram push or any classifier budget: only articles that mention a
         # tracked location/meeting term (or a collapse term) go any further.
@@ -270,9 +270,14 @@ class LocationProtectionBot:
             decision = LocationDecision("ALERT_ONLY", "1", "keyword_gate_no_location_trigger")
             self._log_decision(article, decision)
             return decision
-        if always_notify:
-            for chunk in _chunk_telegram_message(_format_live_update_message(article)):
-                self.notifier.notify(chunk, title=article.title, url=article.url, domain=article.domain, published_at=article.published_at)
+        # Every article/update that clears the gate gets its full text pushed
+        # to Telegram, regardless of source (poll_urls tag page, RSS feeds,
+        # or promoted feed summaries) -- previously only poll_urls articles
+        # got this, so relevant Dawn/AJ-RSS/Reuters items were silently only
+        # summarized via the terse "alert only" message, never their actual
+        # text.
+        for chunk in _chunk_telegram_message(_format_live_update_message(article)):
+            self.notifier.notify(chunk, title=article.title, url=article.url, domain=article.domain, published_at=article.published_at)
         age_hours = _article_age_hours(article)
         max_age = self.config.sources.max_trade_article_age_hours
         if max_age > 0 and age_hours is not None and age_hours > max_age:

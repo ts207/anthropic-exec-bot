@@ -426,7 +426,7 @@ def test_irrelevant_poll_article_is_not_notified_or_classified(tmp_path) -> None
     # Reproduces the World Cup/FIFA noise seen on the AJ tag-page listing:
     # an unrelated article must not reach Telegram or spend classifier budget.
     bot, notified = _spy_bot(tmp_path)
-    decision = bot.process_article(article("Ronaldo scores as Portugal beats Uzbekistan at the World Cup."), always_notify=True)
+    decision = bot.process_article(article("Ronaldo scores as Portugal beats Uzbekistan at the World Cup."))
     assert decision.reason == "keyword_gate_no_location_trigger"
     assert notified == []
 
@@ -435,8 +435,19 @@ def test_relevant_poll_article_is_notified_and_classified(tmp_path) -> None:
     # A genuinely relevant update still gets pushed to Telegram and goes on
     # to the real classifier ("low classifier" keyword filter, then codex).
     bot, notified = _spy_bot(tmp_path)
-    bot.process_article(article("The next round of talks will begin in Qatar next week."), always_notify=True)
+    bot.process_article(article("The next round of talks will begin in Qatar next week."))
     assert notified  # the live-update chunk(s) were pushed
+
+
+def test_relevant_feed_article_is_also_notified_with_full_text(tmp_path) -> None:
+    # Previously only poll_urls (the AJ tag page) got the full-text push;
+    # RSS-sourced articles (Dawn, AJ all.xml, Reuters via Google News) only
+    # got the terse "alert only" summary. Any source should get the full
+    # text once it clears the keyword gate.
+    bot, notified = _spy_bot(tmp_path)
+    feed_article = article("The next round of talks will begin in Qatar next week.", domain="dawn.com")
+    bot.process_article(feed_article)
+    assert any(feed_article.raw_text in message for message in notified)
 
 
 # ---- rotation buy capped by confirmed sale proceeds (2026-07-06 hardening) ----
