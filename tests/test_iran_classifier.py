@@ -1170,3 +1170,67 @@ def test_telegram_notifier_redacts_token_from_delivery_errors(monkeypatch) -> No
     assert notify_errors
     assert token not in notify_errors[-1]["error"]
     assert "<redacted>" in notify_errors[-1]["error"]
+
+
+def test_render_telegram_message_includes_fields_not_already_in_text() -> None:
+    from polybot.iran.notifier import render_telegram_message
+
+    text = render_telegram_message(
+        "Location protection alert only; no trade",
+        {"level": "3", "reason": "keyword_gate_no_location_trigger", "url": "https://reuters.com/story"},
+    )
+    assert "Level: 3" in text
+    assert "Reason: keyword_gate_no_location_trigger" in text
+    assert "Url: https://reuters.com/story" in text
+
+
+def test_render_telegram_message_skips_fields_already_visible_in_text() -> None:
+    from polybot.iran.notifier import render_telegram_message
+
+    article_body = "Talks headline\n\nBody text here.\n\nSource: https://aljazeera.com/news/story"
+    text = render_telegram_message(article_body, {"title": "Talks headline", "url": "https://aljazeera.com/news/story", "domain": "aljazeera.com"})
+    # title/url/domain are all already visible in the body -- must not be
+    # re-appended as redundant "Title: ..." / "Url: ..." lines.
+    assert "Title:" not in text
+    assert "Url:" not in text
+    assert "Domain:" not in text
+    assert text == article_body
+
+
+def test_render_telegram_message_drops_none_and_empty_fields() -> None:
+    from polybot.iran.notifier import render_telegram_message
+
+    text = render_telegram_message("Location protection heartbeat", {"current_reason": None, "position_query_error": ""})
+    assert "Current reason" not in text
+    assert "Position query error" not in text
+
+
+def test_render_telegram_message_adds_type_emoji_marker() -> None:
+    from polybot.iran.notifier import render_telegram_message
+
+    assert render_telegram_message("Location protection heartbeat", {}).startswith("\U0001F493")
+    assert render_telegram_message("Location price band crossed", {}).startswith("\U0001F4C8")
+    assert render_telegram_message("[1/2]\nSome liveblog title", {}).startswith("\U0001F4F0")
+
+
+def test_telegram_notifier_sends_rendered_text_with_fields(monkeypatch) -> None:
+    from polybot.iran.notifier import TelegramNotifier
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_post(url, json, timeout):
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr("polybot.iran.notifier.requests.post", fake_post)
+    TelegramNotifier().notify("Location price band crossed", outcome="Qatar", threshold=0.4, price=0.41)
+    sent_text = captured["json"]["text"]
+    assert "Outcome: Qatar" in sent_text
+    assert "Threshold: 0.4" in sent_text
+    assert "Price: 0.41" in sent_text
