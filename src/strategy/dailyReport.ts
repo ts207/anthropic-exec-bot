@@ -116,10 +116,14 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
     },
     ladderPaper: {
       summary: ladderPaperSummary,
+      baseSizeUsd: ladderPaper.baseSizeUsd ?? ladderPaper.sizeUsd ?? null,
+      sizeMultipliers: ladderPaper.sizeMultipliers ?? null,
       opened: arrayOfRecords(ladderPaper.opened).map(ladderPaperOrderSummary),
       filled: arrayOfRecords(ladderPaper.filled).map(ladderPaperOrderSummary),
+      blocked: arrayOfRecords(ladderPaper.blocked).map(ladderPaperBlockSummary),
       workingOrders: arrayOfRecords(ladderPaper.workingOrders).map(ladderPaperOrderSummary),
       filledOrders: arrayOfRecords(ladderPaper.filledOrders).map(ladderPaperOrderSummary),
+      resolvedOrders: arrayOfRecords(ladderPaper.resolvedOrders).map(ladderPaperOrderSummary),
     },
     discovery: {
       discoveredEventCount: discovery.discoveredEventCount ?? 0,
@@ -153,6 +157,7 @@ export function buildDailyReport(input: DailyReportInput): Record<string, unknow
 function ladderPaperOrderSummary(row: Record<string, unknown>): Record<string, unknown> {
   return {
     company: row.company,
+    eventSlug: row.eventSlug,
     marketSlug: row.marketSlug,
     pairedMarketSlug: row.pairedMarketSlug,
     yesTokenId: row.yesTokenId,
@@ -160,14 +165,35 @@ function ladderPaperOrderSummary(row: Record<string, unknown>): Record<string, u
     pairedNoTokenId: row.pairedNoTokenId,
     threshold: row.threshold,
     pairedThreshold: row.pairedThreshold,
+    deadline: row.deadline,
     entryMode: row.entryMode,
     sourceConfirmed: row.sourceConfirmed,
     passiveBidPrice: row.passiveBidPrice,
     modelFair: row.modelFair,
+    requiredEdge: row.requiredEdge,
+    sizeUsd: row.sizeUsd,
     status: row.status,
     filledAt: row.filledAt,
+    fillPrice: row.fillPrice,
+    currentMarkPrice: row.currentMarkPrice,
+    finalResolution: row.finalResolution,
     hypotheticalPnl: row.hypotheticalPnl,
+    cancelReason: row.cancelReason,
     reason: row.reason,
+  };
+}
+
+function ladderPaperBlockSummary(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    company: row.company,
+    eventSlug: row.eventSlug,
+    marketSlug: row.marketSlug,
+    deadline: row.deadline,
+    entryMode: row.entryMode,
+    reason: row.reason,
+    sizeUsd: row.sizeUsd,
+    usedUsd: row.usedUsd,
+    capUsd: row.capUsd,
   };
 }
 

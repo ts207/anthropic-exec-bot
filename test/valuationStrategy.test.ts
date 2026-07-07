@@ -1684,17 +1684,37 @@ test("daily report preserves ladder source-confirmed state and activation trigge
       }],
     },
     ladderPaper: {
+      baseSizeUsd: 10,
+      sizeMultipliers: {
+        MAKER_NEAR_BOUNDARY_BID: 0.25,
+        MAKER_FAR_OPTIONALITY_BID: 0.05,
+      },
       summary: {},
       workingOrders: [{
         company: "Stripe",
+        eventSlug: "stripe-event",
         marketSlug: "stripe-175",
         threshold: 175_000_000_000,
+        deadline: "2026-08-01T03:59:59Z",
         entryMode: "MAKER_NEAR_BOUNDARY_BID",
         sourceConfirmed: false,
         passiveBidPrice: 0.56,
         modelFair: 0.68,
+        requiredEdge: 0.12,
+        sizeUsd: 2.5,
         status: "working",
         reason: "near_boundary_passive_bid_paper_only",
+      }],
+      blocked: [{
+        company: "Stripe",
+        eventSlug: "stripe-event",
+        marketSlug: "stripe-180",
+        deadline: "2026-08-01T03:59:59Z",
+        entryMode: "MAKER_NEAR_BOUNDARY_BID",
+        reason: "paper_deadline_notional_cap_exceeded",
+        sizeUsd: 2.5,
+        usedUsd: 10,
+        capUsd: 10,
       }],
     },
   });
@@ -1707,8 +1727,22 @@ test("daily report preserves ladder source-confirmed state and activation trigge
     alertIfAskBelow: 0.94,
   });
   const ladderPaper = report.ladderPaper as Record<string, unknown>;
+  assert.equal(ladderPaper.baseSizeUsd, 10);
+  assert.deepEqual(ladderPaper.sizeMultipliers, {
+    MAKER_NEAR_BOUNDARY_BID: 0.25,
+    MAKER_FAR_OPTIONALITY_BID: 0.05,
+  });
   const workingOrders = ladderPaper.workingOrders as Record<string, unknown>[];
   assert.equal(workingOrders[0]?.sourceConfirmed, false);
+  assert.equal(workingOrders[0]?.eventSlug, "stripe-event");
+  assert.equal(workingOrders[0]?.deadline, "2026-08-01T03:59:59Z");
+  assert.equal(workingOrders[0]?.sizeUsd, 2.5);
+  assert.equal(workingOrders[0]?.requiredEdge, 0.12);
+  const blocked = ladderPaper.blocked as Record<string, unknown>[];
+  assert.equal(blocked[0]?.reason, "paper_deadline_notional_cap_exceeded");
+  assert.equal(blocked[0]?.sizeUsd, 2.5);
+  assert.equal(blocked[0]?.usedUsd, 10);
+  assert.equal(blocked[0]?.capUsd, 10);
 });
 
 test("automation schedule resolves expected NPM fixing phases", () => {
