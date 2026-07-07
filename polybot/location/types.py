@@ -26,11 +26,11 @@ class LocationSignal:
     # Free-text country name as reported (e.g. "Oman", "Kazakhstan"), independent
     # of whether it's one of the actively-rotated locations.
     location_country_name: str
-    # Normalized bucket: one of the tracked rotation targets' keys (lowercase,
-    # e.g. "qatar", "pakistan", "switzerland", "oman"), "other_specific" for any
-    # other real, named country, "no_meeting" if the article indicates no
-    # qualifying round will occur by the deadline, or "none" if no location is
-    # confirmed/implied at all.
+    # Normalized bucket for the QUALIFYING formal/senior-round venue only: one
+    # of the configured outcome keys, "other_specific" for a different named
+    # country, "no_meeting" if no qualifying round will occur by the deadline,
+    # or "none" when no qualifying venue is confirmed. Technical/preparatory
+    # venue hints belong in technical_location, not here.
     confirmed_location: str
     evidence_strength: EvidenceStrength
     would_resolve_held_location_yes: bool
@@ -38,6 +38,15 @@ class LocationSignal:
     level: Level
     quote_supporting_trigger: str
     source_tier: str = "other"
+    # Extra body-aware venue fields used to prevent headline-driven false
+    # rotation. Example: a headline says "Islamabad frontrunner" but the body
+    # says Islamabad is only for technical talks and the high-level round is
+    # expected in Doha. In that case confirmed_location must remain "none",
+    # technical_location="pakistan", future_expected_formal_location="qatar".
+    headline_location: str = "none"
+    technical_location: str = "none"
+    future_expected_formal_location: str = "none"
+    final_decision_announced: bool = True
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "LocationSignal":
@@ -53,6 +62,10 @@ class LocationSignal:
             level=_level(str(raw.get("level") or "3")),
             quote_supporting_trigger=str(raw.get("quote_supporting_trigger") or ""),
             source_tier=str(raw.get("source_tier") or "other"),
+            headline_location=_confirmed_location(str(raw.get("headline_location") or "none")),
+            technical_location=_confirmed_location(str(raw.get("technical_location") or "none")),
+            future_expected_formal_location=_confirmed_location(str(raw.get("future_expected_formal_location") or "none")),
+            final_decision_announced=bool(raw.get("final_decision_announced", True)),
         )
 
 

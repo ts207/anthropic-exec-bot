@@ -103,9 +103,16 @@ class HeartbeatConfig:
 
 
 @dataclass(frozen=True)
+class MarketVerificationMonitorConfig:
+    enabled: bool = False
+    interval_minutes: float = 30.0
+
+
+@dataclass(frozen=True)
 class MonitoringConfig:
     price_alerts: PriceAlertConfig = field(default_factory=PriceAlertConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    market_verification: MarketVerificationMonitorConfig = field(default_factory=MarketVerificationMonitorConfig)
 
 
 @dataclass(frozen=True)
@@ -165,6 +172,7 @@ def load_location_config(path: Path) -> LocationBotConfig:
         monitoring=MonitoringConfig(
             price_alerts=PriceAlertConfig(**_section(monitoring_raw, "price_alerts")),
             heartbeat=HeartbeatConfig(**_section(monitoring_raw, "heartbeat")),
+            market_verification=MarketVerificationMonitorConfig(**_section(monitoring_raw, "market_verification")),
         ),
         safety=SafetyConfig(**_section(raw, "safety")),
         sources=SourcesConfig(**_section(raw, "sources")),

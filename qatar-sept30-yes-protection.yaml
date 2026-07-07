@@ -212,7 +212,11 @@ trigger:
 
 classifier:
   provider: "codex_cli"
-  model: "gpt-5"
+  # Not "gpt-5" -- this ChatGPT-auth Codex account rejects that model name
+  # with a 400 ("not supported when using Codex with a ChatGPT account").
+  # gpt-5.5 is what this account's own ~/.codex/config.toml already uses and
+  # is confirmed working end-to-end as of 2026-07-07.
+  model: "gpt-5.5"
   # 2-pass agreement required before any live trade fires (2026-07-06 hardening):
   # this market settles on a technical-vs-senior-level wording distinction that
   # a single classifier pass can misread. A no_meeting collapse still fast-paths

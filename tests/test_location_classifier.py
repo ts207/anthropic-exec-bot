@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -19,6 +19,7 @@ from polybot.location.config import (
     MonitoringConfig,
     PriceAlertConfig,
     HeartbeatConfig,
+    MarketVerificationMonitorConfig,
     SellConfig,
     BuyRotationConfig,
     TimeDecayConfig,
@@ -29,6 +30,7 @@ from polybot.location.executor import LocationExecutor
 from polybot.location.runner import LocationProtectionBot
 from polybot.location.types import LocationSignal
 from polybot.location import market_verifier as market_verifier_mod
+from polybot.location import runner as runner_mod
 from polybot.location.market_verifier import verify_all_outcomes, verify_critical_outcomes, verify_location_event
 from polybot.iran.source_fetcher import ArticleStore, extract_listing_article_urls
 
@@ -363,6 +365,39 @@ def test_prompt_omits_analyst_context_section_when_blank() -> None:
     config = _config()  # default EventConfig has analyst_context=""
     prompt = _prompt(article("test"), "rules", config)
     assert "Analyst context" not in prompt
+
+
+def test_prompt_lists_held_location_even_when_not_rotation_target() -> None:
+    from dataclasses import replace
+    from polybot.location.classifier import _prompt
+
+    outcomes = [replace(outcome, rotation_target=False) if outcome.name == "qatar" else outcome for outcome in _outcomes()]
+    config = _config(outcomes=outcomes)
+    prompt = _prompt(article("test"), "rules", config)
+    assert '"qatar" (Qatar)' in prompt
+    assert 'If the article confirms the held venue Qatar, set confirmed_location to "qatar"' in prompt
+    assert 'Automatic rotation buy targets only:' in prompt
+
+
+# ---- keyword gate ----
+
+
+def test_location_keyword_gate_escalates_meeting_with_tracked_location() -> None:
+    from polybot.location.keyword_gate import should_escalate_location_article
+
+    assert should_escalate_location_article(article("The next round of talks will begin in Qatar next week."), _config()) is True
+
+
+def test_location_keyword_gate_escalates_no_meeting_language_without_location() -> None:
+    from polybot.location.keyword_gate import should_escalate_location_article
+
+    assert should_escalate_location_article(article("Officials said the negotiations were called off."), _config()) is True
+
+
+def test_location_keyword_gate_skips_unrelated_article() -> None:
+    from polybot.location.keyword_gate import should_escalate_location_article
+
+    assert should_escalate_location_article(article("Oil exports rose after a regional statement."), _config()) is False
 
 
 # ---- rotation buy capped by confirmed sale proceeds (2026-07-06 hardening) ----
@@ -755,8 +790,15 @@ def test_stale_article_cannot_auto_trade(tmp_path) -> None:
     assert out.reason.startswith("article_stale_for_auto_trade")
 
 
-def test_fresh_or_undated_article_passes_age_gate(tmp_path) -> None:
+def test_undated_article_cannot_auto_trade_by_default(tmp_path) -> None:
     bot = _policy_bot(tmp_path, _sources())
+    out = bot._enforce_source_policy(_aged_article(None), _trade_decision())
+    assert out.action == "ALERT_ONLY"
+    assert out.reason == "article_age_unknown_for_auto_trade"
+
+
+def test_undated_article_can_be_allowed_by_explicit_source_flag(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources(allow_unknown_age_poll_auto_trade=True))
     out = bot._enforce_source_policy(_aged_article(None), _trade_decision())
     assert out.action == "ROTATE_YES"
 
@@ -768,9 +810,13 @@ def test_promoted_feed_summary_blocked_when_feed_auto_trade_disabled(tmp_path) -
     assert out.reason == "feed_item_auto_trade_disabled"
 
 
-def test_promoted_feed_summary_allowed_when_feed_auto_trade_enabled(tmp_path) -> None:
+def test_promoted_feed_summary_allowed_when_feed_auto_trade_enabled_and_timestamped(tmp_path) -> None:
     bot = _policy_bot(tmp_path, _sources(allow_feed_auto_trade=True))
-    out = bot._enforce_source_policy(_aged_article(None, source_kind="promoted_feed_summary"), _trade_decision())
+    # Must stay well within max_trade_article_age_hours (24h) regardless of
+    # what day the suite runs on -- a hardcoded absolute timestamp here was a
+    # time bomb that started failing the day after it was written.
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    out = bot._enforce_source_policy(_aged_article(fresh, source_kind="promoted_feed_summary"), _trade_decision())
     assert out.action == "ROTATE_YES"
 
 
@@ -898,3 +944,225 @@ def test_daily_heartbeat_persists_last_sent_time(tmp_path) -> None:
     heartbeats = [item for item in notified if item[0] == "Location protection heartbeat"]
     assert len(heartbeats) == 1
     assert heartbeats[0][1]["held_outcome"] == "Qatar"
+
+
+# ---- runner policy/logging hardening ----
+
+
+def test_operator_blocked_location_trade_is_logged_as_blocked(tmp_path) -> None:
+    config = _config(data_dir=tmp_path / "state", logs_dir=tmp_path / "logs")
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+
+    class _Gate:
+        def check(self, decision, *, live_requested: bool):
+            from polybot.iran.operator import GateResult
+            return GateResult(False, "alert_only", "operator_mode_alert_only")
+        def log_block_once(self, result, decision):
+            return False
+
+    bot.operator_gate = _Gate()  # type: ignore[assignment]
+    decision = LocationDecision("ROTATE_YES", "4B", "confirmed_location:pakistan", target_outcome="pakistan", factors=_signal(confirmed_location="pakistan"))
+    out = bot._execute_if_allowed(decision, article("The next round will begin in Pakistan."))
+    assert out.action == "ALERT_ONLY"
+    assert out.reason == "operator_block:operator_mode_alert_only"
+    log_path = tmp_path / "logs" / "location_decisions.jsonl"
+    assert "operator_block:operator_mode_alert_only" in log_path.read_text(encoding="utf-8")
+
+
+def test_quote_verification_applies_to_trade_actions_below_level_4(tmp_path) -> None:
+    bot = _policy_bot(tmp_path, _sources(allow_unknown_age_poll_auto_trade=True))
+    decision = LocationDecision(
+        "ROTATE_YES",
+        "3",
+        "confirmed_location:pakistan",
+        target_outcome="pakistan",
+        factors=_signal(confirmed_location="pakistan", level="3", quote_supporting_trigger="missing quote"),
+    )
+    out = bot._verify_quote_or_alert(decision, article("The next round will begin in Pakistan."))
+    assert out.action == "ALERT_ONLY"
+    assert out.reason == "quote_verification_failed"
+
+
+# ---- source timestamp extraction ----
+
+
+def test_extract_published_at_from_meta_tag() -> None:
+    from polybot.iran.source_fetcher import _extract_published_at
+
+    markup = '<html><head><meta property="article:published_time" content="2026-07-06T12:34:56Z"></head><body>x</body></html>'
+    assert _extract_published_at(markup) == "2026-07-06T12:34:56+00:00"
+
+
+def test_extract_published_at_from_json_ld() -> None:
+    from polybot.iran.source_fetcher import _extract_published_at
+
+    markup = '<script type="application/ld+json">{"@type":"NewsArticle","datePublished":"Mon, 06 Jul 2026 12:34:56 GMT"}</script>'
+    assert _extract_published_at(markup) == "2026-07-06T12:34:56+00:00"
+
+
+# ---- continued hardening: execution audit + market-verification monitor ----
+
+
+def test_rotated_state_records_execution_audit_fields(tmp_path) -> None:
+    config = _config(position=PositionConfig(held_yes_shares=1000.0, max_yes_shares_to_sell=1000.0, max_rotation_usd_to_buy=500.0))
+    adapter = DryRunTradingAdapter(yes_shares=1000.0, yes_bid=0.10, yes_ask=0.40)
+    executor = _executor(tmp_path, config, adapter)
+    decision = LocationDecision("ROTATE_YES", "4B", "confirmed_location:pakistan", target_outcome="pakistan", factors=_signal(confirmed_location="pakistan"))
+
+    assert executor.execute(decision, article("Officials confirm the round begins in Pakistan.")) == "ROTATED"
+
+    current = executor.store.current()
+    assert current is not None
+    payload = current.payload
+    assert payload["pre_trade_yes_best_bid"] == 0.10
+    assert payload["pre_trade_yes_best_ask"] == 0.40
+    assert payload["sell_min_price"] == config.execution.sell.min_price
+    assert payload["sale_price_used"] == 0.10
+    assert payload["confirmed_proceeds"] == pytest.approx(100.0)
+    assert payload["target_best_ask"] == 0.40
+    assert payload["target_max_price"] == config.execution.buy_rotation.max_price
+    assert payload["rotation_usd_budget"] == pytest.approx(100.0)
+    assert payload["configured_rotation_usd_budget"] == config.execution.buy_rotation.usd_budget
+    assert payload["max_rotation_usd_to_buy"] == config.position.max_rotation_usd_to_buy
+
+
+def test_heartbeat_reports_position_state_and_market_verification(tmp_path) -> None:
+    adapter = DryRunTradingAdapter(yes_shares=321.0, no_shares=2.0, yes_bid=0.25, yes_ask=0.27)
+    bot, notified = _monitoring_bot(
+        tmp_path,
+        adapter,
+        MonitoringConfig(heartbeat=HeartbeatConfig(enabled=True, interval_hours=24)),
+    )
+    bot.store.write("EXITED", reason="test_exit")
+    state = bot._monitoring_state()
+    state["market_verification"] = {"status": "ok"}
+    bot._write_monitoring_state(state)
+
+    bot.run_once()
+
+    heartbeat = [item for item in notified if item[0] == "Location protection heartbeat"][-1][1]
+    assert heartbeat["held_yes_shares"] == 321.0
+    assert heartbeat["held_no_shares"] == 2.0
+    assert heartbeat["current_state"] == "EXITED"
+    assert heartbeat["current_reason"] == "test_exit"
+    assert heartbeat["market_verification_status"] == "ok"
+
+
+def test_market_verification_monitor_records_failure_and_blocks_trade_policy(tmp_path, monkeypatch) -> None:
+    config = _config(
+        monitoring=MonitoringConfig(market_verification=MarketVerificationMonitorConfig(enabled=True, interval_minutes=30)),
+        sources=_sources(),
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+    notified: list[tuple[str, dict]] = []
+
+    class _Notifier:
+        def notify(self, message, **fields):
+            notified.append((message, fields))
+
+    bot.notifier = _Notifier()  # type: ignore[assignment]
+    monkeypatch.setattr(runner_mod, "verify_location_event", lambda config: (_ for _ in ()).throw(ValueError("rule hash drift")))
+
+    bot.run_once()
+
+    monitor_state = bot._monitoring_state()["market_verification"]
+    assert monitor_state["status"] == "blocked"
+    assert "rule hash drift" in monitor_state["error"]
+    assert notified[-1][0] == "Location market verification failed"
+    decision = bot._enforce_execution_policy(_trade_decision())
+    assert decision.action == "ALERT_ONLY"
+    assert decision.reason.startswith("market_verification_blocked:rule hash drift")
+
+
+def test_market_verification_monitor_records_recovery(tmp_path, monkeypatch) -> None:
+    config = _config(
+        monitoring=MonitoringConfig(market_verification=MarketVerificationMonitorConfig(enabled=True, interval_minutes=30)),
+        sources=_sources(),
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+    notified: list[tuple[str, dict]] = []
+
+    class _Notifier:
+        def notify(self, message, **fields):
+            notified.append((message, fields))
+
+    bot.notifier = _Notifier()  # type: ignore[assignment]
+    state = bot._monitoring_state()
+    state["market_verification"] = {"status": "blocked", "error": "old error", "last_checked_at": "2020-01-01T00:00:00+00:00"}
+    bot._write_monitoring_state(state)
+    event = _event_for_config(config)
+    monkeypatch.setattr(runner_mod, "verify_location_event", lambda config: market_verifier_mod.LocationMarketVerification(
+        event_slug="test-slug",
+        event_title="Test event",
+        rule_text="rules text",
+        rule_text_sha256="abc",
+        outcomes=verify_location_event(config).outcomes,
+    ))
+    monkeypatch.setattr(runner_mod, "verify_all_outcomes", lambda config, verification, *, require_tradeable=False: None)
+    monkeypatch.setattr(market_verifier_mod, "fetch_event_by_slug", lambda slug, **kw: event)
+
+    bot.run_once()
+
+    monitor_state = bot._monitoring_state()["market_verification"]
+    assert monitor_state["status"] == "ok"
+    assert monitor_state["rule_text_sha256"] == "abc"
+    assert notified[-1][0] == "Location market verification recovered"
+
+
+def test_dawn_headline_islamabad_but_body_technical_and_doha_high_level_does_not_rotate() -> None:
+    config = _config()
+    classifier = RuleBasedFixtureLocationClassifier(config)
+    text = (
+        "Islamabad has emerged as a frontrunner to host the next round of technical negotiations. "
+        "Officials said the July 11 discussions would be technical talks, and the final decision has not been announced. "
+        "High-level direct talks are expected to take place in Doha during the third week of July after technical teams finish details."
+    )
+    signal = classifier.classify(article(text, domain="dawn.com", title="Islamabad frontrunner to host US-Iran talks"), "rules")
+    assert signal.headline_location == "pakistan"
+    assert signal.technical_location == "pakistan"
+    assert signal.future_expected_formal_location == "qatar"
+    assert signal.final_decision_announced is False
+    assert signal.qualifies_as_senior_round is False
+    assert signal.confirmed_location == "none"
+
+    decision = final_decision(config, signal)
+    assert decision.action == "NO_ACTION"
+    assert decision.reason == "technical_location_not_qualifying_held_future_expected"
+    assert decision.target_outcome is None
+
+
+def test_prompt_instructs_body_over_headline_and_technical_location_extraction() -> None:
+    from polybot.location.classifier import _prompt
+
+    prompt = _prompt(article("test"), "rules", _config())
+    assert "Never classify from the headline alone" in prompt
+    assert "technical_location" in prompt
+    assert "future_expected_formal_location" in prompt
+    assert "final_decision_announced=false" in prompt
+
+
+def test_classifier_pass_agreement_includes_body_aware_location_fields() -> None:
+    config = _config(classifier=ClassifierConfig(provider="rule_based", require_pass_agreement=True, passes=2))
+    first = _signal(
+        qualifies_as_senior_round=False,
+        round_status="technical_only",
+        confirmed_location="none",
+        technical_location="pakistan",
+        future_expected_formal_location="qatar",
+        final_decision_announced=False,
+    )
+    second = _signal(
+        qualifies_as_senior_round=False,
+        round_status="technical_only",
+        confirmed_location="none",
+        technical_location="pakistan",
+        future_expected_formal_location="none",
+        final_decision_announced=False,
+    )
+    decision = classify_agreement(config, [first, second])
+    assert decision.action == "ALERT_ONLY"
+    assert "future_expected_formal_location" in decision.reason

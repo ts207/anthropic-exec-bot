@@ -6,6 +6,7 @@ import html
 import json
 import re
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
@@ -92,6 +93,109 @@ def _is_descendant(node, ancestor) -> bool:
     return False
 
 
+def _extract_published_at(markup: str) -> str | None:
+    """Best-effort extraction of a machine-readable article timestamp.
+
+    Directly fetched publisher pages often include freshness metadata in Open
+    Graph, plain meta tags, <time datetime>, or JSON-LD. The trading bots treat
+    missing timestamps conservatively, so this function should return None when
+    the page is ambiguous instead of guessing from page text.
+    """
+    soup = BeautifulSoup(markup, "lxml")
+    meta_keys = [
+        "article:published_time",
+        "article:modified_time",
+        "og:published_time",
+        "datePublished",
+        "dateModified",
+        "pubdate",
+        "publishdate",
+        "timestamp",
+        "dc.date",
+        "dcterms.created",
+        "sailthru.date",
+    ]
+    for key in meta_keys:
+        value = _meta_content(soup, key)
+        normalized = _normalize_datetime(value)
+        if normalized:
+            return normalized
+
+    for tag in soup.find_all("time"):
+        for attr in ("datetime", "content"):
+            normalized = _normalize_datetime(str(tag.get(attr) or ""))
+            if normalized:
+                return normalized
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        for candidate in _jsonld_date_candidates(raw):
+            normalized = _normalize_datetime(candidate)
+            if normalized:
+                return normalized
+    return None
+
+
+def _meta_content(soup: BeautifulSoup, key: str) -> str | None:
+    key_lower = key.lower()
+    for attrs in ({"property": key}, {"name": key}, {"itemprop": key}):
+        tag = soup.find("meta", attrs=attrs)
+        if tag is not None:
+            value = tag.get("content")
+            if value:
+                return str(value)
+    for tag in soup.find_all("meta"):
+        names = [str(tag.get(attr) or "").lower() for attr in ("property", "name", "itemprop")]
+        if key_lower in names:
+            value = tag.get("content")
+            if value:
+                return str(value)
+    return None
+
+
+def _jsonld_date_candidates(raw: str) -> list[str]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    out: list[str] = []
+
+    def walk(value) -> None:
+        if isinstance(value, dict):
+            for key in ("datePublished", "dateModified", "uploadDate"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    out.append(candidate)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(parsed)
+    return out
+
+
+def _normalize_datetime(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _apollo_state(markup: str) -> dict | None:
     """Decode a React/Apollo SSR state blob embedded as base64 in the page.
 
@@ -134,14 +238,16 @@ def _apollo_post_text(state: dict, url: str) -> str | None:
 def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
     response = requests.get(url, headers={"User-Agent": user_agent}, timeout=20)
     response.raise_for_status()
+    markup = response.text
     parser = _TextExtractor()
-    parser.feed(response.text)
+    parser.feed(markup)
     raw_text = parser.text()
     title = parser.title or _first_line(raw_text) or url
+    published_at = _extract_published_at(markup)
 
     # Prefer the untruncated Apollo-state body over the DOM text whenever it's
     # available and actually more complete; never regress below the DOM parse.
-    state = _apollo_state(response.text)
+    state = _apollo_state(markup)
     if state is not None:
         apollo_text = _apollo_post_text(state, url)
         if apollo_text and len(apollo_text) > len(raw_text):
@@ -152,7 +258,7 @@ def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
         url=url,
         domain=urlparse(url).netloc.lower().removeprefix("www."),
         title=title,
-        published_at=None,
+        published_at=published_at,
         fetched_at=fetched_at,
         raw_text=raw_text,
         hash=digest,

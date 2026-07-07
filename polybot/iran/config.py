@@ -183,8 +183,12 @@ class SourcesConfig:
     promote_feed_to_article: bool = True
     # Trade actions are downgraded to ALERT_ONLY for articles published more
     # than this many hours ago (0 disables). Alerts and hold signals are
-    # unaffected.
+    # unaffected. Location protection also treats missing published_at as
+    # non-executable by default; the opt-in below is for manually pinned poll
+    # URLs that are operationally reviewed as fresh even when the page exposes
+    # no machine-readable timestamp.
     max_trade_article_age_hours: float = 24.0
+    allow_unknown_age_poll_auto_trade: bool = False
 
 
 @dataclass(frozen=True)

@@ -32,6 +32,10 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "level": {"type": "string", "enum": ["0", "1", "2", "3", "4A", "4B"]},
         "quote_supporting_trigger": {"type": "string"},
         "source_tier": {"type": "string", "enum": ["wire", "mediator_government", "official_government", "state_media", "other"]},
+        "headline_location": {"type": "string"},
+        "technical_location": {"type": "string"},
+        "future_expected_formal_location": {"type": "string"},
+        "final_decision_announced": _bool_field(),
     },
     "required": [
         "source_is_trusted",
@@ -45,6 +49,10 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "level",
         "quote_supporting_trigger",
         "source_tier",
+        "headline_location",
+        "technical_location",
+        "future_expected_formal_location",
+        "final_decision_announced",
     ],
     "additionalProperties": False,
 }
@@ -65,31 +73,92 @@ class RuleBasedFixtureLocationClassifier:
         text = f"{article.title}\n{article.raw_text}".lower()
         held = self.config.event.held_location
         tracked_names = {o.name: o.label.lower() for o in self.config.outcomes}
-        technical = any(term in text for term in ("technical talks", "working group", "staff-level", "staff level", "implementation", "deconfliction", "monitoring"))
+        technical = any(
+            term in text
+            for term in (
+                "technical talks",
+                "technical negotiations",
+                "technical meeting",
+                "working group",
+                "staff-level",
+                "staff level",
+                "implementation",
+                "deconfliction",
+                "monitoring",
+            )
+        )
         no_meeting = any(term in text for term in ("no meeting", "talks collapsed", "talks suspended indefinitely", "negotiations called off"))
+        final_decision_announced = not any(
+            term in text
+            for term in (
+                "final decision has not been announced",
+                "final decision has yet to be announced",
+                "final decision is yet to be announced",
+                "venue has not been announced",
+                "venue has yet to be announced",
+                "not final",
+            )
+        )
+
+        headline_location = _first_location(article.title.lower(), tracked_names)
+        technical_location = "none"
+        future_expected_formal_location = "none"
         confirmed = "none"
-        for name, label in tracked_names.items():
-            if label in text and any(term in text for term in ("will meet in", "to meet in", "begin in", "begins in", "began in", "scheduled in", "underway in")):
-                confirmed = name
-                break
-        strength = "confirmed_scheduled" if confirmed != "none" else "speculative"
-        status = "scheduled" if confirmed != "none" else ("technical_only" if technical else ("none" if no_meeting else "unclear"))
-        trusted = article.domain in {"reuters.com", "apnews.com", "afp.com", "aljazeera.com"}
+
+        # Technical/preparatory venue hints must not be promoted into
+        # confirmed_location. This is the Dawn failure mode: the headline can
+        # say Islamabad is frontrunner while the body reveals the July 11 item
+        # is only technical talks.
+        if technical:
+            technical_location = _technical_location(text, tracked_names)
+
+        future_expected_formal_location = _expected_formal_location(text, tracked_names)
+
+        if no_meeting:
+            confirmed = "no_meeting"
+        elif not technical:
+            for name, label in tracked_names.items():
+                if label in text and any(
+                    term in text
+                    for term in (
+                        "will meet in",
+                        "to meet in",
+                        "begin in",
+                        "begins in",
+                        "began in",
+                        "scheduled in",
+                        "underway in",
+                        "will be held in",
+                        "round will be held in",
+                        "round begins in",
+                    )
+                ):
+                    confirmed = name
+                    break
+
+        strength = "confirmed_scheduled" if confirmed not in {"none", "no_meeting"} else ("denied" if confirmed == "no_meeting" else "speculative")
+        status = "scheduled" if confirmed not in {"none", "no_meeting"} else ("technical_only" if technical else ("none" if no_meeting else "unclear"))
+        trusted = article.domain in {"reuters.com", "apnews.com", "afp.com", "aljazeera.com", "dawn.com"}
         would_yes = confirmed == held
-        would_no = confirmed != "none" and confirmed != held
+        would_no = confirmed not in {"none", held}
         level = "4A" if confirmed != "none" and trusted else "1"
+        quote = article.raw_text.split(".")[0].strip() if article.raw_text else ""
         return LocationSignal(
             source_is_trusted=trusted,
-            qualifies_as_senior_round=confirmed != "none" and not technical,
+            qualifies_as_senior_round=confirmed not in {"none", "no_meeting"} and not technical,
             round_status=status,  # type: ignore[arg-type]
-            location_country_name=confirmed,
+            location_country_name=confirmed if confirmed != "none" else (technical_location if technical_location != "none" else future_expected_formal_location),
             confirmed_location=confirmed,
             evidence_strength=strength,  # type: ignore[arg-type]
             would_resolve_held_location_yes=would_yes,
             would_resolve_held_location_no=would_no,
             level=level,  # type: ignore[arg-type]
-            quote_supporting_trigger=article.raw_text.split(".")[0].strip() if article.raw_text else "",
+            quote_supporting_trigger=quote,
             source_tier="wire" if article.domain in {"reuters.com", "apnews.com", "afp.com"} else "other",
+            headline_location=headline_location,
+            technical_location=technical_location,
+            future_expected_formal_location=future_expected_formal_location,
+            final_decision_announced=final_decision_announced,
         )
 
 
@@ -213,10 +282,17 @@ class LLMLocationClassifier:
                         "exec",
                         "--ephemeral",
                         "--ignore-rules",
+                        "--skip-git-repo-check",
                         "--sandbox",
                         "read-only",
-                        "--ask-for-approval",
-                        "never",
+                        # NOTE: --ask-for-approval is not a valid flag under `codex
+                        # exec` (only under the top-level `codex` command) as of
+                        # codex-cli 0.142.5 -- it errors with "unexpected argument"
+                        # and previously made every real call fail over to the
+                        # Anthropic API fallback. Non-interactive approval is
+                        # instead controlled by the project-local
+                        # .codex/config.toml's approval_policy = "never", which
+                        # `codex exec` does read.
                         "--model",
                         self.config.model,
                         "--output-schema",
@@ -316,6 +392,59 @@ class LLMLocationClassifier:
         return result_text
 
 
+def _first_location(text: str, tracked_names: dict[str, str]) -> str:
+    for name, label in tracked_names.items():
+        aliases = {label, name.replace("_", " ")}
+        if name == "pakistan":
+            aliases.add("islamabad")
+        elif name == "qatar":
+            aliases.add("doha")
+        elif name == "switzerland":
+            aliases.update({"geneva", "burgenstock", "bürgenstock"})
+        elif name == "oman":
+            aliases.add("muscat")
+        if any(alias and alias in text for alias in aliases):
+            return name
+    return "none"
+
+
+def _technical_location(text: str, tracked_names: dict[str, str]) -> str:
+    technical_terms = (
+        "technical talks",
+        "technical negotiations",
+        "technical meeting",
+        "working group",
+        "staff-level",
+        "staff level",
+        "implementation",
+        "deconfliction",
+        "monitoring",
+    )
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
+    for sentence in sentences:
+        if not any(term in sentence for term in technical_terms):
+            continue
+        location = _first_location(sentence, tracked_names)
+        if location != "none":
+            return location
+    return "none"
+
+
+def _expected_formal_location(text: str, tracked_names: dict[str, str]) -> str:
+    formal_terms = ("high-level", "high level", "senior-level", "senior level", "formal", "direct talks", "next round")
+    expectation_terms = ("expected", "slated", "set to", "scheduled", "will take place", "will be held", "to be held")
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
+    for sentence in sentences:
+        if not any(term in sentence for term in formal_terms):
+            continue
+        if not any(term in sentence for term in expectation_terms):
+            continue
+        location = _first_location(sentence, tracked_names)
+        if location != "none":
+            return location
+    return "none"
+
+
 def build_location_classifier(config: LocationBotConfig) -> LocationClassifierProtocol:
     if config.classifier.provider == "rule_based":
         return RuleBasedFixtureLocationClassifier(config)
@@ -361,29 +490,37 @@ def _json_object(raw: str) -> dict:
 
 
 def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig) -> str:
-    tracked = [o for o in config.outcomes if o.rotation_target]
-    tracked_labels = ", ".join(f'"{o.name}" ({o.label})' for o in tracked)
+    all_locations = list(config.outcomes)
+    all_location_labels = ", ".join(f'"{o.name}" ({o.label})' for o in all_locations)
+    rotation_targets = config.rotation_targets()
+    rotation_target_labels = ", ".join(f'"{o.name}" ({o.label})' for o in rotation_targets) or "none"
     held = config.held_outcome()
     schema_hint = {
         "source_is_trusted": True,
         "qualifies_as_senior_round": True,
         "round_status": "none | rumor | scheduled | underway | concluded | technical_only | unclear",
         "location_country_name": "free-text country name as reported, or empty string",
-        "confirmed_location": f"one of: {tracked_labels}, other_specific, no_meeting, none",
+        "confirmed_location": f"one of the configured location keys: {all_location_labels}; or other_specific, no_meeting, none",
         "evidence_strength": "confirmed_started | confirmed_scheduled | reported_indirect | speculative | denied",
         "would_resolve_held_location_yes": True,
         "would_resolve_held_location_no": False,
         "level": "0 | 1 | 2 | 3 | 4A | 4B",
         "quote_supporting_trigger": "exact quote from article",
         "source_tier": "wire | mediator_government | official_government | state_media | other",
+        "headline_location": "configured key named/implied by headline only, or other_specific, or none",
+        "technical_location": "configured key for technical/preparatory venue, or other_specific, or none",
+        "future_expected_formal_location": "configured key for expected future high-level/formal venue, or other_specific, or none",
+        "final_decision_announced": True,
     }
     return (
         "Classify this news article for a categorical Polymarket location-prediction market.\n"
         f"Market question: {config.event.question}\n"
         f"Deadline: {config.event.deadline_date}\n"
         f"Held position: YES on \"{held.label}\" ({held.name}).\n"
-        f"Actively-rotated tracked locations (use these exact keys in confirmed_location when they match): {tracked_labels}.\n"
-        "Use \"other_specific\" if a real, different, named country is confirmed that is NOT one of the tracked locations above.\n"
+        f"Configured location keys (use these exact keys in confirmed_location when they match, including the held location): {all_location_labels}.\n"
+        f"Automatic rotation buy targets only: {rotation_target_labels}. A configured non-held location that is not listed here is sell-only.\n"
+        f"If the article confirms the held venue {held.label}, set confirmed_location to \"{held.name}\"; do not use other_specific for the held venue.\n"
+        "Use \"other_specific\" if a real, different, named country is confirmed that is NOT one of the configured location keys above.\n"
         "Use \"no_meeting\" only if credible reporting indicates no qualifying round will occur by the deadline (this resolves every location NO).\n"
         "Use \"none\" if no location is confirmed or implied at all.\n"
         f"Market resolution rules:\n{market_rule_text}\n"
@@ -394,8 +531,12 @@ def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig) 
             if config.event.analyst_context.strip()
             else ""
         )
-        + "Only a genuine, formal, senior-level, in-person (or indirect in-person via authorized mediators) round counts. "
+        + "Never classify from the headline alone: the body controls the action. Extract headline venue separately in headline_location. "
+        "Only a genuine, formal, senior-level, in-person (or indirect in-person via authorized mediators) round counts. "
         "Technical, staff-level, working-group, implementation, monitoring, preparatory, or deconfliction meetings do NOT qualify on their own. "
+        "If a venue is tied only to technical/preparatory talks, put it in technical_location and keep confirmed_location as none. "
+        "If the body says the final venue/decision has not been announced, set final_decision_announced=false and do not treat a frontrunner/expected venue as confirmed. "
+        "If the body separately says high-level/direct/formal talks are expected later in another venue, put that venue in future_expected_formal_location; do not rotate away from the held venue on the technical venue. "
         "Brief greetings, chance encounters, or photo ops do NOT count.\n"
         "A merely 'scheduled' round can still shift location before it begins -- treat 'scheduled' as weaker evidence than 'underway'/'concluded' "
         "unless the source is a wire service or an official government statement giving a specific confirmed venue and date.\n"

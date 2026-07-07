@@ -101,13 +101,33 @@ class LocationExecutor:
             return "STOPPED"
 
         pre_trade_bid = self.adapter.yes_best_bid(held.yes_token_id)
-        self.store.write("SELLING_YES", outcome=held.name, shares_to_sell=target_shares, cancel_result=cancel_result)
+        pre_trade_ask = self.adapter.yes_best_ask(held.yes_token_id)
+        self.store.write(
+            "SELLING_YES",
+            outcome=held.name,
+            shares_to_sell=target_shares,
+            live_yes_shares=position.yes_shares,
+            live_no_shares=position.no_shares,
+            pre_trade_yes_best_bid=pre_trade_bid,
+            pre_trade_yes_best_ask=pre_trade_ask,
+            sell_min_price=self.config.execution.sell.min_price,
+            cancel_result=cancel_result,
+        )
         sell_result = self.adapter.sell_yes_fak(held.yes_token_id, target_shares, self.config.execution.sell.min_price)
         sell_fill = self.adapter.verify_fill(sell_result, held.yes_token_id)
         total_sold = sell_fill.filled_shares
 
         if total_sold < target_shares and self.config.execution.sell.retry_partial_once:
-            self.store.write("YES_PARTIAL", filled_shares=total_sold, remaining=target_shares - total_sold)
+            self.store.write(
+                "YES_PARTIAL",
+                outcome=held.name,
+                filled_shares=total_sold,
+                remaining=target_shares - total_sold,
+                target_shares=target_shares,
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
+            )
             time.sleep(self.config.execution.sell.retry_delay_seconds)
             retry_result = self.adapter.sell_yes_fak(held.yes_token_id, target_shares - total_sold, self.config.execution.sell.min_price)
             total_sold += self.adapter.verify_fill(retry_result, held.yes_token_id).filled_shares
@@ -119,28 +139,68 @@ class LocationExecutor:
                 outcome=held.name,
                 total_sold=total_sold,
                 target_shares=target_shares,
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
                 article=article.__dict__,
             )
             self.notifier.notify("YES partially sold on held outcome. Manual intervention required.", total_sold=total_sold)
             return "FLIP_INCOMPLETE"
 
         if decision.action == "TRIM_YES":
-            self.store.write("TRIMMED", outcome=held.name, total_sold=total_sold, article=article.__dict__)
+            sale_price = self._estimate_sale_price(sell_fill, pre_trade_bid)
+            self.store.write(
+                "TRIMMED",
+                outcome=held.name,
+                total_sold=total_sold,
+                target_shares=target_shares,
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
+                sale_price_used=sale_price,
+                confirmed_proceeds=total_sold * sale_price,
+                article=article.__dict__,
+            )
             self.notifier.notify("Trimmed held-outcome YES exposure", outcome=held.label, total_sold=total_sold)
             return "TRIMMED"
 
         if decision.action == "EXIT_YES_ONLY" or not self.config.execution.buy_rotation.enabled:
-            self.store.write("EXITED", outcome=held.name, total_sold=total_sold, article=article.__dict__)
+            sale_price = self._estimate_sale_price(sell_fill, pre_trade_bid)
+            self.store.write(
+                "EXITED",
+                outcome=held.name,
+                total_sold=total_sold,
+                target_shares=target_shares,
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
+                sale_price_used=sale_price,
+                confirmed_proceeds=total_sold * sale_price,
+                article=article.__dict__,
+            )
             self.notifier.notify("Exited held-outcome YES exposure (sell-only)", outcome=held.label, total_sold=total_sold)
             return "EXITED"
 
         target = self.config.outcome(decision.target_outcome or "")
         if target is None:
-            self.store.write("EXITED", outcome=held.name, total_sold=total_sold, reason="rotation_target_missing", article=article.__dict__)
+            sale_price = self._estimate_sale_price(sell_fill, pre_trade_bid)
+            self.store.write(
+                "EXITED",
+                outcome=held.name,
+                total_sold=total_sold,
+                target_shares=target_shares,
+                reason="rotation_target_missing",
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
+                sale_price_used=sale_price,
+                confirmed_proceeds=total_sold * sale_price,
+                article=article.__dict__,
+            )
             self.notifier.notify("Rotation target missing from config; exited without buying", total_sold=total_sold)
             return "EXITED"
 
-        return self._buy_rotation_leg(decision, article, held, target, total_sold, sell_fill, pre_trade_bid)
+        return self._buy_rotation_leg(decision, article, held, target, total_sold, target_shares, sell_fill, pre_trade_bid, pre_trade_ask)
 
     def _time_decay_floor_block(self, decision: LocationDecision, held: OutcomeMarket) -> str | None:
         """Mirror of the iran executor's TIME_DECAY_PRICE_FLOOR guard.
@@ -212,10 +272,14 @@ class LocationExecutor:
         held: OutcomeMarket,
         target: OutcomeMarket,
         total_sold: float,
+        target_shares: float,
         sell_fill: Fill,
         pre_trade_bid: float | None,
+        pre_trade_ask: float | None,
     ) -> str:
         cap = self.config.execution.buy_rotation.max_price
+        sale_price = self._estimate_sale_price(sell_fill, pre_trade_bid)
+        confirmed_proceeds = total_sold * sale_price
         target_ask = self.adapter.yes_best_ask(target.yes_token_id)
         if target_ask is None or target_ask > cap:
             self.store.write(
@@ -225,7 +289,15 @@ class LocationExecutor:
                 reason="rotation_target_above_cap_or_unavailable",
                 target_outcome=target.name,
                 target_best_ask=target_ask,
-                cap=cap,
+                target_max_price=cap,
+                target_shares=target_shares,
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
+                sale_price_used=sale_price,
+                confirmed_proceeds=confirmed_proceeds,
+                configured_rotation_usd_budget=self.config.execution.buy_rotation.usd_budget,
+                max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
                 article=article.__dict__,
             )
             self.notifier.notify(
@@ -240,8 +312,6 @@ class LocationExecutor:
         # by the configured budget -- a partial fill, thin book, or bad price
         # on the sell leg must not let the buy leg overspend relative to what
         # was actually raised (found during 2026-07-06 hardening review).
-        sale_price = self._estimate_sale_price(sell_fill, pre_trade_bid)
-        confirmed_proceeds = total_sold * sale_price
         usd_budget = min(
             self.config.execution.buy_rotation.usd_budget,
             self.config.position.max_rotation_usd_to_buy,
@@ -255,8 +325,16 @@ class LocationExecutor:
                 total_sold=total_sold,
                 reason="insufficient_sale_proceeds_for_rotation_buy",
                 target_outcome=target.name,
+                target_best_ask=target_ask,
+                target_max_price=cap,
+                target_shares=target_shares,
+                pre_trade_yes_best_bid=pre_trade_bid,
+                pre_trade_yes_best_ask=pre_trade_ask,
+                sell_min_price=self.config.execution.sell.min_price,
                 confirmed_proceeds=confirmed_proceeds,
                 sale_price_used=sale_price,
+                configured_rotation_usd_budget=self.config.execution.buy_rotation.usd_budget,
+                max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
                 article=article.__dict__,
             )
             self.notifier.notify(
@@ -273,8 +351,11 @@ class LocationExecutor:
             target_outcome=target.name,
             usd_budget=usd_budget,
             cap=cap,
+            target_best_ask=target_ask,
             confirmed_proceeds=confirmed_proceeds,
             sale_price_used=sale_price,
+            configured_rotation_usd_budget=self.config.execution.buy_rotation.usd_budget,
+            max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
         )
         buy_result = self.adapter.buy_yes_fak(target.yes_token_id, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
@@ -285,6 +366,11 @@ class LocationExecutor:
                 outcome=held.name,
                 total_sold=total_sold,
                 target_outcome=target.name,
+                target_best_ask=target_ask,
+                target_max_price=cap,
+                usd_budget=usd_budget,
+                confirmed_proceeds=confirmed_proceeds,
+                sale_price_used=sale_price,
                 article=article.__dict__,
             )
             self.notifier.notify("Sold held YES but rotation buy did not fill. Manual intervention required.", total_sold=total_sold, target=target.label)
@@ -295,6 +381,17 @@ class LocationExecutor:
             from_outcome=held.name,
             to_outcome=target.name,
             total_sold=total_sold,
+            target_shares=target_shares,
+            pre_trade_yes_best_bid=pre_trade_bid,
+            pre_trade_yes_best_ask=pre_trade_ask,
+            sell_min_price=self.config.execution.sell.min_price,
+            sale_price_used=sale_price,
+            confirmed_proceeds=confirmed_proceeds,
+            target_best_ask=target_ask,
+            target_max_price=cap,
+            rotation_usd_budget=usd_budget,
+            configured_rotation_usd_budget=self.config.execution.buy_rotation.usd_budget,
+            max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
             rotation_filled_shares=buy_fill.filled_shares,
             article=article.__dict__,
         )

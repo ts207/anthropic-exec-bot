@@ -24,6 +24,7 @@ from .config import LocationBotConfig, load_location_config
 from .decision import LocationDecision, classify_agreement, final_decision, time_decay_decision
 from .executor import TERMINAL_STATES, LocationExecutor
 from .market_verifier import verify_all_outcomes, verify_location_event
+from .keyword_gate import should_escalate_location_article
 
 
 def domain_allowed(domain: str, allowed: list[str]) -> bool:
@@ -77,6 +78,7 @@ def preflight_location_command(config_path: Path, live_flag: bool = False) -> in
         "operator": status.as_dict(),
         "config": str(config_path),
         "held_outcome": held.name,
+        "execution_backend": "py_clob" if live_flag else "dry_run",
     }
     try:
         position = adapter.query_live_position(held.yes_token_id, held.no_token_id)
@@ -91,6 +93,7 @@ def preflight_location_command(config_path: Path, live_flag: bool = False) -> in
     except Exception as exc:
         result["market_verification_error"] = str(exc)
         status.blockers.append("market_verification_failed")
+    result["operator"] = status.as_dict()
     result["status"] = "blocked" if status.blockers else "ok"
     print(json.dumps(result, indent=2, sort_keys=True))
     return 1 if result["status"] == "blocked" else 0
@@ -272,6 +275,10 @@ class LocationProtectionBot:
             self._log_decision(article, decision)
             self.notifier.notify("Location protection feed summary skipped classifier", reason=decision.reason, url=article.url)
             return decision
+        if not should_escalate_location_article(article, self.config):
+            decision = LocationDecision("ALERT_ONLY", "1", "keyword_gate_no_location_trigger")
+            self._log_decision(article, decision)
+            return decision
         block_reason = self.classifier_budget.block_reason(self.config.classifier)
         if block_reason is not None:
             decision = LocationDecision("ALERT_ONLY", "3", block_reason)
@@ -299,7 +306,11 @@ class LocationProtectionBot:
         return self._execute_if_allowed(decision, article)
 
     def _verify_quote_or_alert(self, decision: LocationDecision, article: Article) -> LocationDecision:
-        if decision.factors is None or decision.level not in {"4A", "4B"}:
+        if decision.factors is None:
+            return decision
+        is_trade_action = decision.action in {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}
+        requires_quote = self.config.safety.quote_must_match_article_text and is_trade_action
+        if not requires_quote and decision.level not in {"4A", "4B"}:
             return decision
         if quote_in_article(decision.factors.quote_supporting_trigger, article.raw_text):
             return decision
@@ -326,6 +337,8 @@ class LocationProtectionBot:
         # auto-trade enabled a stale feed item must never fire a sale.
         age_hours = _article_age_hours(article)
         max_age = self.config.sources.max_trade_article_age_hours
+        if max_age > 0 and article.published_at is None and not self.config.sources.allow_unknown_age_poll_auto_trade:
+            return LocationDecision("ALERT_ONLY", "3", "article_age_unknown_for_auto_trade", decision.target_outcome, decision.factors)
         if max_age > 0 and age_hours is not None and age_hours > max_age:
             return LocationDecision("ALERT_ONLY", "3", f"article_stale_for_auto_trade:{age_hours:.0f}h", decision.target_outcome, decision.factors)
         if domain_allowed(article.domain, self.config.sources.alert_only_domains):
@@ -343,7 +356,21 @@ class LocationProtectionBot:
             return LocationDecision("ALERT_ONLY", "3", "below_auto_execute_level", decision.target_outcome, decision.factors)
         if self.config.safety.max_executions <= 0:
             return LocationDecision("ALERT_ONLY", "3", "max_executions_zero", decision.target_outcome, decision.factors)
+        market_block = self._market_verification_block_reason()
+        if market_block is not None:
+            return LocationDecision("ALERT_ONLY", "3", market_block, decision.target_outcome, decision.factors)
         return decision
+
+    def _market_verification_block_reason(self) -> str | None:
+        if not self.config.monitoring.market_verification.enabled:
+            return None
+        raw = self._monitoring_state().get("market_verification")
+        if not isinstance(raw, dict):
+            return "market_verification_not_run"
+        if raw.get("status") != "blocked":
+            return None
+        error = str(raw.get("error") or "unknown")[:160]
+        return f"market_verification_blocked:{error}"
 
     def _execute_if_allowed(self, decision: LocationDecision, article: Article) -> LocationDecision:
         if self.operator_gate is not None:
@@ -360,7 +387,9 @@ class LocationProtectionBot:
                         reason=gate_result.reason,
                         url=article.url,
                     )
-                return LocationDecision("ALERT_ONLY", "3", f"operator_block:{gate_result.reason}", decision.target_outcome, decision.factors)
+                blocked = LocationDecision("ALERT_ONLY", "3", f"operator_block:{gate_result.reason}", decision.target_outcome, decision.factors)
+                self._log_decision(article, blocked)
+                return blocked
         self.executor.execute(decision, article)
         return decision
 
@@ -376,7 +405,8 @@ class LocationProtectionBot:
                 articles: list[Article] = []
                 for article_url in article_urls:
                     try:
-                        articles.append(fetch_article(article_url, SETTINGS.user_agent))
+                        fetched = fetch_article(article_url, SETTINGS.user_agent)
+                        articles.append(Article(**{**fetched.__dict__, "source_kind": "listing_article"}))
                     except Exception as exc:
                         log_event("location_listing_article_fetch_error", listing_url=url, url=article_url, error=str(exc))
                 return articles
@@ -388,6 +418,7 @@ class LocationProtectionBot:
 
     def _process_monitoring(self) -> None:
         self._process_price_alerts()
+        self._process_market_verification()
         self._process_heartbeat()
 
     def _process_price_alerts(self) -> None:
@@ -434,6 +465,46 @@ class LocationProtectionBot:
             )
             log_event("location_price_band_crossed", outcome=outcome.name, threshold=threshold, direction=direction, price=price)
 
+    def _process_market_verification(self) -> None:
+        verification_config = self.config.monitoring.market_verification
+        if not verification_config.enabled:
+            return
+        state = self._monitoring_state()
+        raw = state.get("market_verification")
+        previous = raw if isinstance(raw, dict) else {}
+        last_checked = _parse_iso(previous.get("last_checked_at"))
+        now = datetime.now(timezone.utc)
+        interval_seconds = max(60.0, verification_config.interval_minutes * 60.0)
+        if last_checked is not None and (now - last_checked).total_seconds() < interval_seconds:
+            return
+        payload: dict[str, Any] = {"last_checked_at": now.isoformat()}
+        try:
+            verification = verify_location_event(self.config)
+            verify_all_outcomes(self.config, verification, require_tradeable=self.live_requested)
+            payload.update(
+                {
+                    "status": "ok",
+                    "event_slug": verification.event_slug,
+                    "event_title": verification.event_title,
+                    "rule_text_sha256": verification.rule_text_sha256,
+                }
+            )
+            if previous.get("status") == "blocked":
+                self.notifier.notify(
+                    "Location market verification recovered",
+                    event_slug=verification.event_slug,
+                    rule_text_sha256=verification.rule_text_sha256,
+                )
+            log_event("location_market_verification_ok", event_slug=verification.event_slug, rule_text_sha256=verification.rule_text_sha256)
+        except Exception as exc:
+            error = str(exc)
+            payload.update({"status": "blocked", "error": error})
+            if previous.get("status") != "blocked" or previous.get("error") != error:
+                self.notifier.notify("Location market verification failed", error=error)
+            log_event("location_market_verification_failed", error=error)
+        state["market_verification"] = payload
+        self._write_monitoring_state(state)
+
     def _process_heartbeat(self) -> None:
         heartbeat = self.config.monitoring.heartbeat
         if not heartbeat.enabled:
@@ -449,13 +520,29 @@ class LocationProtectionBot:
         bid = self.executor.adapter.yes_best_bid(held.yes_token_id)
         ask = self.executor.adapter.yes_best_ask(held.yes_token_id)
         budget = self.classifier_budget.status(self.config.classifier)
+        current_state = self.store.current()
+        operator_status = self.operator_gate.status(live_requested=self.live_requested).as_dict() if self.operator_gate else None
+        position_payload: dict[str, Any] = {}
+        try:
+            position = self.executor.adapter.query_live_position(held.yes_token_id, held.no_token_id)
+            position_payload = {"held_yes_shares": position.yes_shares, "held_no_shares": position.no_shares}
+        except Exception as exc:
+            position_payload = {"position_query_error": str(exc)}
+        market_verification = self._monitoring_state().get("market_verification")
         self.notifier.notify(
             "Location protection heartbeat",
             held_outcome=held.label,
             dry_run=self.config.execution.dry_run,
+            execution_backend="py_clob" if self.live_requested else "dry_run",
+            current_state=current_state.state if current_state else None,
+            current_reason=current_state.payload.get("reason") if current_state else None,
+            operator_mode=operator_status.get("effective_mode") if isinstance(operator_status, dict) else None,
+            config_acknowledged=operator_status.get("config_acknowledged") if isinstance(operator_status, dict) else None,
+            market_verification_status=(market_verification.get("status") if isinstance(market_verification, dict) else None),
             yes_best_bid=bid,
             yes_best_ask=ask,
             classifier_budget=budget,
+            **position_payload,
         )
         state["heartbeat"] = {"last_sent_at": now.isoformat()}
         self._write_monitoring_state(state)

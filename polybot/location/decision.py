@@ -26,6 +26,9 @@ AGREEMENT_FIELDS = [
     "confirmed_location",
     "evidence_strength",
     "source_tier",
+    "technical_location",
+    "future_expected_formal_location",
+    "final_decision_announced",
 ]
 
 # Ambiguous language that must NOT appear in the supporting quote for the
@@ -62,6 +65,15 @@ def final_decision(config: LocationBotConfig, factors: LocationSignal) -> Locati
         return LocationDecision("ALERT_ONLY", factors.level, "no_meeting_reported_unconfirmed", factors=factors)
 
     if factors.round_status == "technical_only" or not factors.qualifies_as_senior_round:
+        if factors.technical_location not in {"none", "", held} and factors.future_expected_formal_location == held:
+            return LocationDecision(
+                "NO_ACTION",
+                factors.level,
+                "technical_location_not_qualifying_held_future_expected",
+                factors=factors,
+            )
+        if factors.technical_location not in {"none", ""}:
+            return LocationDecision("NO_ACTION", factors.level, "technical_location_not_qualifying", factors=factors)
         return LocationDecision("NO_ACTION", factors.level, "technical_or_non_qualifying", factors=factors)
 
     if location in {"none", "unclear", ""}:
