@@ -395,7 +395,10 @@ async function fixingWatchCycleWithOptions(loaded: LoadedStrategyConfig, replayE
   const rows = await buildMarketAuditRows(loaded, state);
   const previousSnapshot = parseFixingWatchSnapshot(await readJson(fixingWatchSnapshotPath(loaded.config)));
   const priorWatchState = parseFixingWatchState(await readJson(fixingWatchStatePath(loaded.config)));
-  const update = updateFixingWatch(rows, previousSnapshot, priorWatchState, new Date(), { replayExisting });
+  const update = updateFixingWatch(rows, previousSnapshot, priorWatchState, new Date(), {
+    replayExisting,
+    minLiquidity: loaded.config.minLiquidity,
+  });
   await writeJson(fixingWatchStatePath(loaded.config), update.state);
   await writeJson(fixingWatchSnapshotPath(loaded.config), update.snapshot);
   const report = {

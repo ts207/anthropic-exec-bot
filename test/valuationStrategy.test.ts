@@ -449,6 +449,27 @@ test("fixing watch records first-seen and later replay observations", () => {
   assert.equal(later.missedEdgeReport[0]?.repricedByLatest, 0.1499999999999999);
 });
 
+test("fixing watch requires min liquidity for FAK fillability", () => {
+  const row = marketAuditRowFixture({
+    state: "NEWLY_CROSSED",
+    maxEligibleValuation: 1_101_000_000_000,
+    previousMaxEligibleValuation: 1_090_000_000_000,
+    yesAsk: 0.81,
+    depthUnderCap: 99,
+  });
+  const update = updateFixingWatch(
+    [row],
+    { generatedAt: "2026-07-01T00:00:00Z", rows: [{ ...row, maxEligibleValuation: 1_090_000_000_000 }] },
+    { version: 1, updatedAt: "2026-07-01T00:00:00Z", crosses: {} },
+    new Date("2026-07-02T00:00:00Z"),
+    { minLiquidity: 100 },
+  );
+  const firstSeen = update.newCrosses[0]?.observations[0];
+  assert.equal(firstSeen?.staleLiquidity, true);
+  assert.equal(firstSeen?.fakUnderCapWouldFill, false);
+  assert.equal(update.missedEdgeReport[0]?.firstSeenFakUnderCapWouldFill, false);
+});
+
 test("fixing watch baselines first run unless replay is explicit", () => {
   const row = marketAuditRowFixture({ state: "NEWLY_CROSSED" });
   const baseline = updateFixingWatch(

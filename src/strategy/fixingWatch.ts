@@ -101,7 +101,7 @@ export function updateFixingWatch(
   previousSnapshot: FixingWatchSnapshot | null,
   priorState: FixingWatchState,
   now = new Date(),
-  options: { replayExisting?: boolean } = {},
+  options: { replayExisting?: boolean; minLiquidity?: number } = {},
 ): FixingWatchUpdate {
   const nowIso = now.toISOString();
   const state: FixingWatchState = {
@@ -151,7 +151,7 @@ export function updateFixingWatch(
     const row = currentRows.get(cross.key);
     if (!row) continue;
     for (const horizon of dueHorizons(cross, now)) {
-      const observation = buildObservation(row, horizon.label, horizon.horizonMs, nowIso);
+      const observation = buildObservation(row, horizon.label, horizon.horizonMs, nowIso, options.minLiquidity ?? 1);
       cross.observations.push(observation);
       observationsRecorded.push(observation);
     }
@@ -210,7 +210,7 @@ function dueHorizons(cross: FixingCross, now: Date): typeof OBSERVATION_HORIZONS
   ));
 }
 
-function buildObservation(row: MarketAuditRow, label: string, horizonMs: number, observedAt: string): FixingObservation {
+function buildObservation(row: MarketAuditRow, label: string, horizonMs: number, observedAt: string, minLiquidity: number): FixingObservation {
   const staleLiquidity = row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore";
   return {
     label,
@@ -224,7 +224,7 @@ function buildObservation(row: MarketAuditRow, label: string, horizonMs: number,
     crossedQuality: row.crossedQuality,
     tradeBand: row.tradeBand,
     staleLiquidity,
-    fakUnderCapWouldFill: staleLiquidity && row.depthUnderCap > 0,
+    fakUnderCapWouldFill: staleLiquidity && row.depthUnderCap >= minLiquidity,
     liveBlockers: row.liveBlockers,
   };
 }
