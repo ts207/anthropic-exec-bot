@@ -806,7 +806,7 @@ function entryAuditSummary(plans: EntryPlan[]): Record<string, unknown> {
   }, {});
   const strictSourceConfirmed = plans.filter((plan) => (
     plan.entryMode === "TAKER_SOURCE_CONFIRMED"
-    && !plan.blockers.includes("not_strict_stale_source_confirmed")
+    && plan.liveEligible
   ));
   return {
     planCount: plans.length,

@@ -1903,8 +1903,22 @@ test("automation entry alerts include row details, ask-cap drops, and ambiguous 
         yesAsk: 0.81,
         maxTakerPrice: 0.94,
         modelFair: 1,
+        liveEligible: true,
         blockers: [],
         reason: "source_confirmed_stale_yes_taker",
+      }, {
+        company: "Anthropic",
+        eventSlug: "anthropic-event",
+        marketSlug: "anthropic-blocked-crossed",
+        threshold: 1_200_000_000_000,
+        direction: "UP",
+        entryMode: "TAKER_SOURCE_CONFIRMED",
+        yesAsk: 0.81,
+        maxTakerPrice: 0.94,
+        modelFair: 1,
+        liveEligible: false,
+        blockers: ["depth_under_taker_cap_below_minimum"],
+        reason: "source_confirmed_but_live_blocked",
       }, {
         company: "Stripe",
         eventSlug: "stripe-event",
@@ -1929,6 +1943,9 @@ test("automation entry alerts include row details, ask-cap drops, and ambiguous 
   const askAlert = alerts.find((alert) => alert.type === "ASK_BELOW_ENTRY_CAP") as Record<string, unknown>;
   assert.equal(Array.isArray(askAlert.rows), true);
   assert.equal((askAlert.rows as Record<string, unknown>[])[0]?.marketSlug, "stripe-175");
+  const sourceAlert = alerts.find((alert) => alert.type === "SOURCE_CONFIRMED_STALE_YES_PLAN") as Record<string, unknown>;
+  assert.equal(sourceAlert.count, 1);
+  assert.equal((sourceAlert.rows as Record<string, unknown>[]).some((row) => row.marketSlug === "anthropic-blocked-crossed"), false);
   const downsideAlert = alerts.find((alert) => alert.type === "DOWNSIDE_SEMANTICS_AMBIGUOUS") as Record<string, unknown>;
   assert.equal((downsideAlert.rows as Record<string, unknown>[])[0]?.marketSlug, "stripe-down");
 });

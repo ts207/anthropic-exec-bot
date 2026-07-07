@@ -89,16 +89,15 @@ export function meaningfulAlerts(results: AutomationTaskResult[]): Array<Record<
     }
     if (item.task === "entry-audit") {
       const summary = asRecord(result.summary);
-      const sourceTakers = Number(summary.strictSourceConfirmedTakerCount ?? 0);
       const nearBoundary = Number(summary.nearBoundaryPassiveBidCount ?? 0);
       const rangeSpreads = Number(summary.rangeSpreadPaperCount ?? 0);
       const plans = entryPlans(result);
-      const sourceRows = plans.filter((plan) => plan.entryMode === "TAKER_SOURCE_CONFIRMED" && !arrayOfStrings(plan.blockers).includes("not_strict_stale_source_confirmed"));
+      const sourceRows = plans.filter((plan) => plan.entryMode === "TAKER_SOURCE_CONFIRMED" && plan.liveEligible === true);
       const nearRows = plans.filter((plan) => plan.entryMode === "MAKER_NEAR_BOUNDARY_BID");
       const rangeRows = plans.filter((plan) => plan.entryMode === "RANGE_SPREAD_PAPER");
       const askCapRows = plans.filter(isAskBelowEntryCap);
       const ambiguousDownsideRows = plans.filter(isAmbiguousCandidateLeg);
-      if (sourceTakers > 0) alerts.push({ type: "SOURCE_CONFIRMED_STALE_YES_PLAN", count: sourceTakers, rows: sourceRows.map(alertPlanRow) });
+      if (sourceRows.length > 0) alerts.push({ type: "SOURCE_CONFIRMED_STALE_YES_PLAN", count: sourceRows.length, rows: sourceRows.map(alertPlanRow) });
       if (nearBoundary > 0) alerts.push({ type: "NEAR_BOUNDARY_PASSIVE_BID_PLAN", count: nearBoundary, rows: nearRows.map(alertPlanRow) });
       if (rangeSpreads > 0) alerts.push({ type: "RANGE_SPREAD_PAPER_PLAN", count: rangeSpreads, rows: rangeRows.map(alertPlanRow) });
       if (askCapRows.length > 0) alerts.push({ type: "ASK_BELOW_ENTRY_CAP", count: askCapRows.length, rows: askCapRows.map(alertPlanRow) });
