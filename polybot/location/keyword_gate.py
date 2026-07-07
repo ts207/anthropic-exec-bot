@@ -32,6 +32,20 @@ _CITY_ALIASES = {
     "burgenstock",
     "muscat",
 }
+# Named senior-level principals from the position's own thesis (see
+# analyst_context in qatar-sept30-yes-protection.yaml): their attendance is
+# the actual technical-vs-senior-round signal the market settles on, and an
+# article can carry that signal ("Witkoff met Araqchi today") without naming
+# a venue at all -- so these escalate the same way a location term does,
+# not just as a location-context fallback.
+_SENIOR_OFFICIAL_TERMS = {
+    "witkoff",
+    "kushner",
+    "vance",
+    "araqchi",
+    "ghalibaf",
+    "gharibabadi",
+}
 _COLLAPSE_TERMS = (
     "no meeting",
     "no qualifying round",
@@ -65,6 +79,8 @@ def should_escalate_location_article(article: Article, config: LocationBotConfig
         return False
     location_terms = _configured_location_terms(config) | set(_CITY_ALIASES)
     if _contains_any(text, location_terms):
+        return True
+    if _contains_any(text, _SENIOR_OFFICIAL_TERMS):
         return True
     return _contains_any(text, _LOCATION_CONTEXT_TERMS)
 

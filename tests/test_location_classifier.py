@@ -401,6 +401,14 @@ def test_location_keyword_gate_skips_unrelated_article() -> None:
     assert should_escalate_location_article(article("Oil exports rose after a regional statement."), _config()) is False
 
 
+def test_location_keyword_gate_escalates_senior_official_without_named_venue() -> None:
+    from polybot.location.keyword_gate import should_escalate_location_article
+
+    # No country/city is named at all -- named senior-principal attendance is
+    # the signal per the position's own thesis, so this must still escalate.
+    assert should_escalate_location_article(article("Witkoff met with Araqchi today to discuss the roadmap."), _config()) is True
+
+
 # ---- keyword gate runs before Telegram notify and before codex classification ----
 
 
