@@ -218,7 +218,7 @@ function openOrder(plan: EntryPlan, now: Date, sizeUsd: number): LadderPaperOrde
     pairedNoTokenId: plan.range?.higherNoTokenId,
     threshold: plan.threshold,
     pairedThreshold: plan.range?.higherThreshold,
-    deadline: plan.range?.deadline,
+    deadline: plan.range?.deadline ?? plan.deadline,
     entryMode: plan.entryMode,
     openedAt: now.toISOString(),
     sourceDate: plan.sourceDate,

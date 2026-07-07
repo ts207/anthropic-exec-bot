@@ -1216,6 +1216,81 @@ test("ladder paper enforces company event deadline and global paper caps before 
   assert.deepEqual(blocked.metrics.byCompanyExposureUsd, {});
 });
 
+test("ladder paper stores non-range deadlines for deadline cap accounting", () => {
+  const config = testConfig();
+  const firstLeg = legFixture({ threshold: 1_000, marketSlug: "deadline-first" });
+  const secondLeg = legFixture({ threshold: 1_005, marketSlug: "deadline-second" });
+  const evidence = withEligibleMax(parseNpmEvidence({
+    latest_tape_d: { date: "2026-07-06", implied_valuation: 993 },
+  }, { name: "Anthropic", npmCompanyId: "company-a" }), "2026-06-29T00:00:00Z", "2026-08-01T03:59:59Z");
+  const firstPlans = buildLadderEntryPlans({
+    legs: [firstLeg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["deadline-first", quoteFixture(0.97, 0.4)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "deadline-first", state: "NEAR_BOUNDARY" })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "deadline-first",
+      threshold: 1_000,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.007,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  const opened = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans: firstPlans,
+    now: new Date("2026-07-06T12:00:00Z"),
+    sizeUsd: 6,
+    caps: {
+      globalUsdCap: 100,
+      perEventUsdCap: 100,
+      perCompanyUsdCap: 100,
+      perDeadlineUsdCap: 10,
+    },
+  });
+  assert.equal(opened.opened.length, 1);
+  assert.equal(opened.opened[0]?.deadline, firstLeg.deadlineIso);
+
+  const secondPlans = buildLadderEntryPlans({
+    legs: [secondLeg],
+    evidenceByCompany: new Map([["Anthropic", evidence]]),
+    quotes: new Map([["deadline-second", quoteFixture(0.97, 0.4)]]),
+    marketRows: [marketAuditRowFixture({ marketSlug: "deadline-second", state: "NEAR_BOUNDARY" })],
+    forecasts: [forecastRowFixture({
+      company: "Anthropic",
+      marketSlug: "deadline-second",
+      threshold: 1_005,
+      state: "NEAR_BOUNDARY",
+      latestValuation: 993,
+      maxEligibleValuation: 993,
+      distancePct: 0.0119,
+      modelFairPrice: 0.68,
+    })],
+    monotonicity: [],
+    config,
+  });
+  const blocked = updateLadderPaperOrders({
+    previous: opened.state,
+    plans: [...firstPlans, ...secondPlans],
+    now: new Date("2026-07-06T12:05:00Z"),
+    sizeUsd: 6,
+    caps: {
+      globalUsdCap: 100,
+      perEventUsdCap: 100,
+      perCompanyUsdCap: 100,
+      perDeadlineUsdCap: 10,
+    },
+  });
+  assert.equal(blocked.opened.length, 0);
+  assert.equal(blocked.blocked[0]?.reason, "paper_deadline_notional_cap_exceeded");
+  assert.deepEqual(blocked.metrics.byDeadlineExposureUsd, { [firstLeg.deadlineIso]: 6 });
+});
+
 test("ladder paper cancels stale passive bids before NPM fixing", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_000, marketSlug: "paper-maker" });
