@@ -28,7 +28,7 @@ export function parseGammaEvent(raw: unknown): GammaEvent {
 export function parseValuationLegs(event: GammaEvent, config: EventConfig): ValuationLeg[] {
   return event.markets.map((market) => {
     const question = stringOr(market.question ?? market.title, "");
-    const marketCompany = optionalString(market.groupItemTitle ?? market.group_item_title);
+    const groupItemTitle = optionalString(market.groupItemTitle ?? market.group_item_title);
     const ruleText = [
       event.description,
       event.resolutionSource,
@@ -46,7 +46,7 @@ export function parseValuationLegs(event: GammaEvent, config: EventConfig): Valu
       marketSlug: stringOr(market.slug, sha256(question).slice(0, 12)),
       question,
       eventKind: config.kind,
-      company: config.companyName ?? marketCompany ?? inferCompanyFromQuestion(question),
+      company: config.companyName ?? groupItemTitle ?? inferCompanyFromQuestion(question),
       deadlineIso: config.deadlineIso,
       marketWindowStartIso: config.marketWindowStartIso,
       yesTokenId: yesIndex >= 0 ? tokens[yesIndex] : tokens[0],
@@ -70,7 +70,7 @@ export function parseValuationLegs(event: GammaEvent, config: EventConfig): Valu
       };
     }
 
-    const threshold = parseThreshold(question || ruleText);
+    const threshold = parseThreshold([question, groupItemTitle, ruleText].filter(Boolean).join("\n"));
     const label = /\bLOW\b/i.test(question) ? "LOW" : /\bHIGH\b/i.test(question) ? "HIGH" : undefined;
     if (!threshold) {
       return {

@@ -66,6 +66,10 @@ test("Gamma fixture parser keeps LOW label but relies on rule threshold language
     markets: [
       marketFixture("Will Anthropic's valuation hit LOW $900B by July 31?", "low-900b"),
       marketFixture("Will Anthropic's valuation hit LOW $800 by July 31?", "low-800"),
+      {
+        ...marketFixture("Will Anthropic's valuation hit (LOW) $800 by July 31?", "low-800-group-title"),
+        groupItemTitle: "↓$800B",
+      },
     ],
   });
   const legs = parseValuationLegs(event, eventConfig);
@@ -73,6 +77,8 @@ test("Gamma fixture parser keeps LOW label but relies on rule threshold language
   assert.equal(legs[0]?.parseStatus, "ok");
   assert.equal(legs[0]?.threshold, 900_000_000_000);
   assert.equal(legs[1]?.parseStatus, "malformed_threshold");
+  assert.equal(legs[2]?.parseStatus, "ok");
+  assert.equal(legs[2]?.threshold, 800_000_000_000);
 });
 
 test("ranking parser uses group item title for company mapping", () => {
