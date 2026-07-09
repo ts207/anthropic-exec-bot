@@ -4,9 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 # Re-exported so callers only need `polybot.location.types` for both article and
-# signal shapes; Article is source/domain-agnostic and identical to the iran
-# package's version.
-from polybot.iran.types import Article  # noqa: F401
+# signal shapes.
+from polybot.core.types import Article  # noqa: F401
 
 Level = Literal["0", "1", "2", "3", "4A", "4B"]
 

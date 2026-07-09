@@ -36,7 +36,7 @@ while true; do
     break
   fi
   echo "$(date -u +%FT%TZ) launching run-location-protection" >> "$SUP_LOG"
-  .venv/bin/python -m polybot.main run-location-protection --config qatar-sept30-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
+  .venv/bin/python -m polybot.geopolitics run-location-protection --config qatar-sept30-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
   CHILD=$!
   echo "$CHILD" > "$CHILD_PIDFILE"
   wait "$CHILD"

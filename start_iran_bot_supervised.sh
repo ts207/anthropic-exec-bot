@@ -36,7 +36,7 @@ while true; do
     break
   fi
   echo "$(date -u +%FT%TZ) launching run-iran" >> "$SUP_LOG"
-  .venv/bin/python -m polybot.main run-iran --config iran-july17-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
+  .venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
   CHILD=$!
   echo "$CHILD" > "$CHILD_PIDFILE"
   wait "$CHILD"

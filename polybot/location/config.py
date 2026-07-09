@@ -7,10 +7,10 @@ from typing import Any
 import yaml
 
 # Reused as-is: classifier/sources/safety config shapes are provider-agnostic
-# and OperatorGate (polybot.iran.operator) duck-types on ClassifierConfig's and
-# SafetyConfig's attributes, so sharing the dataclasses keeps that gate reusable
-# without modification.
-from polybot.iran.config import ClassifierConfig, SafetyConfig, SourcesConfig  # noqa: F401
+# and OperatorGate duck-types on ClassifierConfig's and SafetyConfig's
+# attributes, so sharing the dataclasses keeps that gate reusable without
+# modification.
+from polybot.core.config import ClassifierConfig, SafetyConfig, SourcesConfig  # noqa: F401
 
 
 @dataclass(frozen=True)

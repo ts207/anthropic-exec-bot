@@ -6,12 +6,10 @@ from typing import Any
 
 from polybot.log import log_event
 
-# Reused as-is: these are already parametrized purely by token_id, with no
-# single-market assumptions, so they work unmodified for cross-market rotation.
-from polybot.iran.executor import DryRunTradingAdapter, Fill, LivePosition, LiveClobTradingAdapter, TradingAdapter  # noqa: F401
-from polybot.iran.notifier import Notifier
-from polybot.iran.storage import StateStore
-from polybot.iran.types import Article
+from polybot.core.execution import DryRunTradingAdapter, Fill, LivePosition, LiveClobTradingAdapter, TradingAdapter  # noqa: F401
+from polybot.core.notifier import Notifier
+from polybot.core.storage import StateStore
+from polybot.core.types import Article
 
 from .config import LocationBotConfig, OutcomeMarket
 from .decision import LocationDecision

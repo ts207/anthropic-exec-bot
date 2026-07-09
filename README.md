@@ -40,7 +40,7 @@ POLYBOT_DRY_RUN=1
 Live Iran execution requires all of:
 
 1. `execution.dry_run: false` in the Iran YAML config
-2. `python -m polybot.main run-iran --config <config.yaml> --live`
+2. `python -m polybot.geopolitics run-iran --config <config.yaml> --live`
 3. valid Polymarket credentials
 
 The Iran classifier now calls the Anthropic API (`classifier.provider: anthropic`,
@@ -101,21 +101,21 @@ Inspect a Polymarket event:
 Inspect and verify an Iran config:
 
 ```bash
-.venv/bin/python -m polybot.main inspect-iran --config iran-july17-yes-protection.yaml
+.venv/bin/python -m polybot.geopolitics inspect-iran --config iran-july17-yes-protection.yaml
 ```
 
 Preflight live readiness, including operator mode, config hash ack, credentials,
 token mapping, and live balances:
 
 ```bash
-.venv/bin/python -m polybot.main preflight-iran --config iran-july17-yes-protection.yaml --live
+.venv/bin/python -m polybot.geopolitics preflight-iran --config iran-july17-yes-protection.yaml --live
 ```
 
 Set the current position mode and acknowledge the exact config hash before live:
 
 ```bash
-.venv/bin/python -m polybot.main set-iran-mode --config iran-july17-yes-protection.yaml --mode live
-.venv/bin/python -m polybot.main ack-iran-live --config iran-july17-yes-protection.yaml --note "reviewed live config"
+.venv/bin/python -m polybot.geopolitics set-iran-mode --config iran-july17-yes-protection.yaml --mode live
+.venv/bin/python -m polybot.geopolitics ack-iran-live --config iran-july17-yes-protection.yaml --note "reviewed live config"
 ```
 
 Read a portfolio-style position snapshot:
@@ -128,13 +128,13 @@ Read a portfolio-style position snapshot:
 Probe the TypeScript `clob-client-v2` deposit-wallet path without posting:
 
 ```bash
-.venv/bin/python -m polybot.main probe-iran-clob-v2 --config iran-july17-yes-protection.yaml --amount 5
+.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config iran-july17-yes-protection.yaml --amount 5
 ```
 
 Smoke the configured classifier without executing:
 
 ```bash
-.venv/bin/python -m polybot.main smoke-iran-classifier --config iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
+.venv/bin/python -m polybot.geopolitics smoke-iran-classifier --config iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
 ```
 
 Live runs default to the Python CLOB adapter. The legacy TypeScript
@@ -160,13 +160,13 @@ wallet, so it cannot silently trade the wrong account.
 Run the Iran bot:
 
 ```bash
-.venv/bin/python -m polybot.main run-iran --config iran-july17-yes-protection.yaml
+.venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml
 ```
 
 Run live only after config and credential review:
 
 ```bash
-.venv/bin/python -m polybot.main run-iran --config iran-july17-yes-protection.yaml --live
+.venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml --live
 ```
 
 ## Iran Configs

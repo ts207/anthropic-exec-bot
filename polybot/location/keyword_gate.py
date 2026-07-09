@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from polybot.iran.types import Article
+from polybot.core.types import Article
 
 from .config import LocationBotConfig
 
