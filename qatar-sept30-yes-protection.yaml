@@ -35,39 +35,44 @@ event:
 
     Resolution sources: official information from the governments of the United States and Iran, and a consensus of credible reporting.
 
-  # User's own thesis/background reasoning as of 2026-07-06, given to be kept
+  # User's own thesis/background reasoning as of 2026-07-09, given to be kept
   # in mind by the classifier LLM (not re-tested each time it's restated).
   # Weighed as prior context only -- the classifier still must classify
   # strictly from article text and the resolution rules above.
   analyst_context: |
-    Source hierarchy for this thesis (updated 2026-07-06): Dawn (dawn.com) carries the most
-    settlement-relevant sequencing -- it reports July 11 Islamabad as TECHNICAL negotiations, with the
-    next HIGH-LEVEL direct talks expected in Doha, Qatar during the third week of July, after technical
-    teams finish agreement details. Reuters reporting confirms recent Doha talks were technical only
-    (Hormuz shipping, frozen funds; nuclear file not discussed). Treat "technical talks in/through Doha"
-    as a Qatar-positive PROCESS signal that does NOT resolve the market.
+    Core thesis (updated 2026-07-09): despite the active US-Iran military escalation, a return to a
+    formal senior-level negotiating round by the September 30, 2026 deadline remains the base case. It is
+    in both governments' interest to negotiate -- escalation, strikes, and sanctions function here as
+    bargaining leverage and a backdrop to talks, not as a foreclosure of them, and past cycles show
+    hostilities preceding rather than cancelling a return to the table. Treat war, strike, sanctions,
+    retaliation, and "standoff" headlines as backdrop/noise for THIS market, NOT as evidence that a
+    qualifying round will not happen.
 
-    A technical, staff-level US-Iran meeting is expected July 11 in Islamabad, Pakistan. Per the
-    resolution rules above, this does NOT qualify as a resolving round on its own -- treat reports of
-    this specific meeting as non-resolving noise UNLESS a source explicitly describes the July 11 meeting
-    being upgraded to, or convened as, a NEW formal senior-level round. Watch for senior principals
-    attached with mandate (e.g. Witkoff, Kushner, Vance; Araqchi, Ghalibaf, Gharibabadi) -- named senior
-    attendance at Islamabad is the main kill signal for the Qatar thesis.
+    Do NOT read escalation as a no_meeting/collapse signal. A no_meeting reading requires a credible
+    source EXPLICITLY reporting that a qualifying senior-level round is cancelled, called off, or
+    foreclosed through September 30, 2026 -- general hostilities, troop movements, ceasefire failures, or
+    angry rhetoric do not meet that bar. Escalation may lower near-term venue confidence but does not by
+    itself flip the market to No Meeting.
+
+    Venue lean: Qatar/Doha remains the most plausible host for a mediated senior-level round (Qatari
+    mediation channel), but do not treat that lean as a confirmed venue -- only an explicit report of a
+    formally convened senior-level round beginning somewhere resolves anything. A confirmed senior-level
+    round in a NON-Qatar venue -- or named senior principals (Witkoff, Kushner, Vance; Araqchi, Ghalibaf,
+    Gharibabadi) convening a formal round elsewhere -- is the main kill signal for the Qatar thesis.
 
     Resolution nuance to apply strictly from the rules: INDIRECT in-person diplomacy through designated
     mediators DOES qualify, provided senior representatives of both governments participate in the same
     formally convened diplomatic process (they need not meet directly or be in the same room). Therefore
     "Iran denies direct talks with US envoys" does NOT negate a qualifying Doha round if a senior-level
-    round is formally convened there via Qatari mediation.
-
-    Iran's negotiating delegation composition will not be decided until after Ali Khamenei's multi-day
-    state funeral concludes; that is the bottleneck delaying official confirmation of the Doha round's
-    date/venue. Weight reporting tied to the delegation/funeral timeline over generic venue speculation.
+    round is formally convened there via Qatari mediation. Follow-on technical, staff-level,
+    working-group, implementation, monitoring, preparatory, or deconfliction meetings do NOT resolve the
+    market on their own.
 
     Qualifying-language examples for qatar: "high-level direct talks in Doha", "formal senior-level
     round begins/convened in Doha", "Qatar to host the next senior US-Iran round". Non-resolving
     language: "technical teams", "working group", "implementation talks", "mediators met",
-    "preparatory", "deconfliction".
+    "preparatory", "deconfliction", and military/escalation coverage with no formally convened senior
+    round.
 
 # All 19 location outcomes of the grouped ("neg risk") market, pulled directly
 # from Polymarket's Gamma API (event id 624242) on 2026-07-06. Prices at that
