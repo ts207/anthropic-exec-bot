@@ -1,12 +1,7 @@
 from __future__ import annotations
 
+import sys
 
-def normalize(value: str) -> str:
-    return " ".join(value.lower().split())
+from polybot.core import verifier as _verifier
 
-
-def quote_in_article(quote: str, article_text: str) -> bool:
-    if not quote.strip():
-        return False
-    return normalize(quote) in normalize(article_text)
-
+sys.modules[__name__] = _verifier

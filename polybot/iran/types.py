@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from polybot.core.types import Article
+
 Level = Literal["0", "1", "2", "3", "4A", "4B"]
 RecommendedAction = Literal[
     "no_action",
@@ -14,18 +16,6 @@ RecommendedAction = Literal[
     "sell_no_only",
     "sell_no_and_buy_yes",
 ]
-
-
-@dataclass(frozen=True)
-class Article:
-    url: str
-    domain: str
-    title: str
-    published_at: str | None
-    fetched_at: str
-    raw_text: str
-    hash: str
-    source_kind: str = "article"
 
 
 @dataclass(frozen=True)
