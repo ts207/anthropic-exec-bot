@@ -237,8 +237,8 @@ classifier:
   # these caps allow ~20 fully-classified articles/hour, 120/day; the keyword
   # gate + the listing-delta guard (only re-classify a liveblog when the NEW
   # lines themselves name a venue/principal) keep real throughput well under this.
-  max_escalations_per_hour: 40
-  max_escalations_per_day: 240
+  max_escalations_per_hour: 60
+  max_escalations_per_day: 360
   max_classifier_errors_per_hour: 3
   # Enabled 2026-07-09 to close the wire blind spot: Reuters/Dawn resolve to
   # promoted_feed_summary (publisher blocks full-text fetch), and with this off
@@ -312,15 +312,33 @@ sources:
     - "https://www.aljazeera.com/tag/israel-iran-conflict/"
   feed_urls:
     - "https://www.aljazeera.com/xml/rss/all.xml"
-    # Dawn: most settlement-relevant sequencing source for this thesis (see
-    # analyst_context).
+    # Dawn: settlement-relevant sequencing source for this thesis (see
+    # analyst_context). Now fetches to full text via the /news/<id> slug-strip
+    # fix in source_fetcher.
     - "https://www.dawn.com/feeds/home"
-    # Reuters discovery via Google News RSS (no stable public Reuters RSS --
-    # same approach as the July17 bot). Items resolve to reuters.com publisher
-    # URLs; reuters.com blocks direct article fetches, so these usually stay
-    # promoted feed summaries. With classify_feed_summaries=false, those alert
-    # without spending classifier calls until explicitly enabled.
+    # Reuters discovery via Google News RSS (no stable public Reuters RSS).
+    # Items resolve to reuters.com URLs; reuters.com blocks direct fetch so
+    # these stay promoted_feed_summary -- now classified (classify_feed_summaries
+    # is true), gated by 2-pass + wire tier + verbatim quote.
     - "https://news.google.com/rss/search?q=site:reuters.com%20iran%20talks&hl=en-US&gl=US&ceid=US:en"
+    # Added 2026-07-09 to widen source coverage so a senior-round confirmation
+    # isn't missed just because AJ/Dawn/Reuters weren't the outlet to break it.
+    #
+    # Venue/round-targeted, outlet-agnostic: catches a venue announcement from
+    # ANY publisher; highest-signal, lowest budget cost of the new feeds.
+    - "https://news.google.com/rss/search?q=US%20Iran%20(talks%20OR%20round%20OR%20negotiations)%20(Doha%20OR%20Qatar%20OR%20Muscat%20OR%20Oman%20OR%20Islamabad%20OR%20Geneva%20OR%20Rome%20OR%20Vienna%20OR%20Istanbul)&hl=en-US&gl=US&ceid=US:en"
+    # IRNA (official Iran, irna.ir is an auto_trade domain): official Iranian
+    # announcement/denial of a round -- confirm-hold if Doha, kill-signal if
+    # convened elsewhere.
+    - "https://en.irna.ir/rss"
+    # AP + AFP wire breadth via Google News (apnews.com/afp.com are auto_trade
+    # domains; AFP often resolves to republishers so mostly alert-grade).
+    - "https://news.google.com/rss/search?q=site:apnews.com%20US%20Iran%20(talks%20OR%20negotiations%20OR%20round)&hl=en-US&gl=US&ceid=US:en"
+    - "https://news.google.com/rss/search?q=AFP%20US%20Iran%20(talks%20OR%20negotiations%20OR%20round)&hl=en-US&gl=US&ceid=US:en"
+    # Regional discovery (timesofisrael.com and aa.com.tr are deliberately NOT
+    # in auto_trade_domains -> alert-only; extra eyes, no new trade triggers).
+    - "https://www.timesofisrael.com/feed/"
+    - "https://news.google.com/rss/search?q=site:aa.com.tr%20Iran%20US%20(talks%20OR%20negotiations)&hl=en-US&gl=US&ceid=US:en"
   # Flattened source levels (operator decision 2026-07-06): all sources are
   # execution-grade, except feed items/promoted feed summaries while
   # classify_feed_summaries=false. The
