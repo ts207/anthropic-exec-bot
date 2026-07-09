@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
 
@@ -12,7 +12,14 @@ export type CandidateLock = {
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`);
+    await rename(tmpPath, path);
+  } catch (error) {
+    await rm(tmpPath, { force: true });
+    throw error;
+  }
 }
 
 export async function readJson(path: string): Promise<unknown | null> {
@@ -37,18 +44,34 @@ export async function isCandidateLocked(config: StrategyConfig, candidate: Valua
   return (await readJson(candidateLockPath(config, candidate))) !== null;
 }
 
+export async function claimCandidateLock(config: StrategyConfig, candidate: ValuationCandidate): Promise<boolean> {
+  const path = candidateLockPath(config, candidate);
+  await mkdir(dirname(path), { recursive: true });
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "wx");
+    await handle.writeFile(`${JSON.stringify(lockRecord(candidate, {
+      status: "pending",
+      pid: process.pid,
+    }), null, 2)}\n`);
+    return true;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "EEXIST") return false;
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
 export async function lockCandidate(config: StrategyConfig, candidate: ValuationCandidate, order: unknown): Promise<void> {
-  await writeJson(candidateLockPath(config, candidate), {
-    lockedAt: new Date().toISOString(),
-    eventSlug: candidate.eventSlug,
-    marketSlug: candidate.marketSlug,
-    company: candidate.company,
-    deadline: candidate.deadline,
-    signalType: candidate.signalType,
-    orderUsd: candidate.orderUsd,
-    maxPrice: candidate.maxPrice,
+  await writeJson(candidateLockPath(config, candidate), lockRecord(candidate, {
+    status: "posted",
     order,
-  });
+  }));
+}
+
+export async function releaseCandidateLock(config: StrategyConfig, candidate: ValuationCandidate): Promise<void> {
+  await rm(candidateLockPath(config, candidate), { force: true });
 }
 
 export function liveAckPath(config: StrategyConfig, configHash: string): string {
@@ -99,6 +122,20 @@ export async function listLocks(config: StrategyConfig): Promise<CandidateLock[]
 
 function safe(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+
+function lockRecord(candidate: ValuationCandidate, extra: Record<string, unknown>): Record<string, unknown> {
+  return {
+    lockedAt: new Date().toISOString(),
+    eventSlug: candidate.eventSlug,
+    marketSlug: candidate.marketSlug,
+    company: candidate.company,
+    deadline: candidate.deadline,
+    signalType: candidate.signalType,
+    orderUsd: candidate.orderUsd,
+    maxPrice: candidate.maxPrice,
+    ...extra,
+  };
 }
 
 function dirname(path: string): string {

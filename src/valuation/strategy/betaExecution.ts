@@ -7,7 +7,7 @@ import { type ApiKeyCreds } from "@polymarket/bindings/clob";
 import { http, type Hex } from "viem";
 import { polygon } from "viem/chains";
 import type { BookQuote, StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
-import { hasLiveAck, isCandidateLocked, lockCandidate, probePath, writeJson } from "./stateStore.ts";
+import { claimCandidateLock, hasLiveAck, isCandidateLocked, lockCandidate, probePath, releaseCandidateLock, writeJson } from "./stateStore.ts";
 import { betaProbeMetadata, validatePostedProbeForCandidate } from "./probeValidation.ts";
 
 export type ExecutionResult = {
@@ -36,9 +36,15 @@ export async function executeCandidate(
   const probe = await validatePostedProbeForCandidate(config, candidate);
   if (!probe.ok) return { posted: false, skipped: true, reason: probe.blockers.join(",") };
   requireMutationAllowed();
-  const response = await placeFakBuy(requiredToken(candidate), candidate.orderUsd, candidate.maxPrice);
-  await lockCandidate(config, candidate, response);
-  return { posted: true, response };
+  if (!await claimCandidateLock(config, candidate)) return { posted: false, skipped: true, reason: "duplicate_lock" };
+  try {
+    const response = await placeFakBuy(requiredToken(candidate), candidate.orderUsd, candidate.maxPrice);
+    await lockCandidate(config, candidate, response);
+    return { posted: true, response };
+  } catch (error) {
+    await releaseCandidateLock(config, candidate);
+    throw error;
+  }
 }
 
 export function sourceConfirmedLivePolicyBlockers(candidate: ValuationCandidate, config: StrategyConfig): string[] {

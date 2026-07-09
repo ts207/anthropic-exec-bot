@@ -13,7 +13,7 @@ import { rankingAlertCandidates } from "../src/valuation/strategy/rankingSimulat
 import type { BookQuote, CurvePoint, EventConfig, StrategyConfig, ValuationCandidate, ValuationLeg } from "../src/valuation/strategy/signalTypes.ts";
 import { applyCaps, liveBlockers } from "../src/valuation/cli.ts";
 import { betaProbeMetadata, validatePostedProbeForCandidate } from "../src/valuation/strategy/probeValidation.ts";
-import { probePath, writeJson } from "../src/valuation/strategy/stateStore.ts";
+import { candidateLockPath, claimCandidateLock, probePath, writeJson } from "../src/valuation/strategy/stateStore.ts";
 import { buildMarketAuditRow, monotonicityAudits } from "../src/valuation/strategy/marketAudit.ts";
 import { updateFixingWatch } from "../src/valuation/strategy/fixingWatch.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, monteCarloTouchProbability, pCrossTomorrow, sourceFreshnessMap, tapeStats } from "../src/valuation/strategy/npmBarrierForecast.ts";
@@ -26,6 +26,7 @@ import { STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS, updateLadderPaperOrders, type L
 import { discoverValuationUniverse } from "../src/valuation/strategy/valuationUniverseDiscovery.ts";
 import { buildDailyReport } from "../src/valuation/strategy/dailyReport.ts";
 import { executeCandidate } from "../src/valuation/strategy/betaExecution.ts";
+import { paperPromotionGateBlockers } from "../src/valuation/strategy/promotionGates.ts";
 
 test("config loader applies safe low-risk defaults", () => {
   const config = testConfig();
@@ -250,6 +251,21 @@ test("live gate allows only source-confirmed stale YES policy", async () => {
   });
 });
 
+test("paper promotion gates block forecast and relative-value live modes", () => {
+  assert.deepEqual(paperPromotionGateBlockers("SOURCE_CONFIRMED_YES"), []);
+  assert.equal(
+    paperPromotionGateBlockers("NPM_MULTI_DAY_BARRIER_FORECAST_YES").includes("paper_promotion_gate_forecast_model_not_satisfied"),
+    true,
+  );
+  assert.equal(
+    paperPromotionGateBlockers("NPM_MULTI_DAY_BARRIER_FORECAST_YES").includes("paper_promotion_gate_passive_ladder_maker_not_satisfied"),
+    true,
+  );
+  assert.deepEqual(paperPromotionGateBlockers("CURVE_MONOTONICITY_YES"), [
+    "paper_promotion_gate_relative_value_not_live_enabled",
+  ]);
+});
+
 test("source-confirmed live gate requires depth and fresh orderbook", async () => {
   const config = normalizeConfig({
     ...testConfig(),
@@ -359,6 +375,22 @@ test("candidate caps count existing locks by company and deadline", () => {
     orderUsd: 10,
   }]);
   assert.equal(blockedByDeadline[0]?.reason, "deadline_notional_cap_exceeded");
+});
+
+test("candidate lock claim is exclusive before live posting", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "valuation-lock-test-"));
+  const config = normalizeConfig({
+    mode: "live",
+    stateDir,
+    events: [thresholdEvent("Anthropic")],
+    companies: [{ name: "Anthropic", npmCompanyId: "company-a" }],
+  });
+  const candidate = candidateFixture();
+  assert.equal(await claimCandidateLock(config, candidate), true);
+  assert.equal(await claimCandidateLock(config, candidate), false);
+  const lock = JSON.parse(await readFile(candidateLockPath(config, candidate), "utf8")) as Record<string, unknown>;
+  assert.equal(lock.status, "pending");
+  assert.equal(lock.marketSlug, candidate.marketSlug);
 });
 
 test("posted probe validation rejects malformed probe files", async () => {

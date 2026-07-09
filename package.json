@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "npm run valuation:legacy-watch",
+    "start": "npm run valuation:preflight",
     "clob-keys": "tsx src/deriveClobKeys.ts",
     "clob-v2-bridge": "tsx tools/polymarket-ts/clobV2Bridge.ts",
     "clob-v2-probe": "tsx tools/polymarket-ts/clobV2ExecutionProbe.ts",

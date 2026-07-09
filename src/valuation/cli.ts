@@ -3,17 +3,17 @@ import "dotenv/config";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { appendJsonl } from "./logging.ts";
+import { scanOnce, scanSummary } from "./commands/scan.ts";
+import { candidateShell, collectValuationState, type ValuationState } from "./services/collectValuationState.ts";
 import { loadStrategyConfig, type LoadedStrategyConfig } from "./strategy/valuationConfig.ts";
-import { fetchNpmEvidence, withEligibleMax } from "./strategy/npmValuationSource.ts";
+import { withEligibleMax } from "./strategy/npmValuationSource.ts";
 import { fetchGammaEvent, parseValuationLegs } from "./strategy/marketParser.ts";
 import { fetchBookQuote } from "./strategy/orderbookSource.ts";
-import { decideThresholdLeg } from "./strategy/valuationDecision.ts";
-import { curveMonotonicityCandidates } from "./strategy/curveArbitrage.ts";
 import { calendarDominanceCandidates } from "./strategy/calendarArbitrage.ts";
 import { rankingAlertCandidates } from "./strategy/rankingSimulator.ts";
 import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
-import { executeCandidate, postedProbe, sourceConfirmedLivePolicyBlockers } from "./strategy/betaExecution.ts";
-import { hasLiveAck, isCandidateLocked, listLocks, liveAckPath, probePath, readJson, writeJson, writeLiveAck, type CandidateLock } from "./strategy/stateStore.ts";
+import { postedProbe, sourceConfirmedLivePolicyBlockers } from "./strategy/betaExecution.ts";
+import { hasLiveAck, isCandidateLocked, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
 import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
 import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
@@ -23,28 +23,16 @@ import { expectedNpmUpdateAt, parseAutomationPhase, type AutomationTask } from "
 import { runAutomationCycle } from "./strategy/valuationAutomation.ts";
 import { buildDailyReport } from "./strategy/dailyReport.ts";
 import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
+import { paperPromotionGateBlockers, promotionGateSummary } from "./strategy/promotionGates.ts";
 import { buildLadderEntryPlans, type EntryPlan } from "./strategy/valuationLadderEntries.ts";
 import { discoverValuationUniverse } from "./strategy/valuationUniverseDiscovery.ts";
 import { STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS, ladderPaperPath, parseLadderPaperState, updateLadderPaperOrders } from "./strategy/ladderPaper.ts";
 import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
-import type { BookQuote, CurvePoint, EventConfig, NpmEvidence, StrategyConfig, ValuationCandidate, ValuationLeg } from "./strategy/signalTypes.ts";
+import type { StrategyConfig, ValuationCandidate } from "./strategy/signalTypes.ts";
 
 type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto" | "discover" | "entry-audit" | "ladder-paper";
 
-type ScanResult = {
-  evidence: NpmEvidence[];
-  legs: ValuationLeg[];
-  candidates: ValuationCandidate[];
-};
-
-type ValuationState = {
-  evidenceByCompany: Map<string, NpmEvidence>;
-  allLegs: ValuationLeg[];
-  quotes: Map<string, BookQuote>;
-  noQuotes: Map<string, BookQuote>;
-  curvePoints: CurvePoint[];
-  thresholdCandidates: ValuationCandidate[];
-};
+export { applyCaps, scanOnce } from "./commands/scan.ts";
 
 async function main(): Promise<void> {
   const { command, args } = parseCli(process.argv.slice(2));
@@ -100,111 +88,6 @@ async function main(): Promise<void> {
     }
   }
   return print(scanSummary(await scanOnce(loaded)));
-}
-
-export async function scanOnce(loaded: LoadedStrategyConfig): Promise<ScanResult> {
-  const { config } = loaded;
-  const state = await collectValuationState(config);
-
-  const rankingLegs = state.allLegs.filter((leg) => leg.eventKind === "ranking");
-  const rawCandidates = rankCandidates([
-    ...state.thresholdCandidates,
-    ...curveMonotonicityCandidates(state.curvePoints, state.quotes, config),
-    ...calendarDominanceCandidates(state.curvePoints, state.quotes, config),
-    ...rankingAlertCandidates(rankingLegs, state.evidenceByCompany, state.quotes, config, buildImpliedCurves(state.curvePoints)),
-  ]);
-  const candidates = rankCandidates(applyCaps(config, rawCandidates, await listLocks(config)));
-
-  const ranked = rankCandidates(candidates);
-  for (const candidate of ranked) {
-    await appendJsonl(join(config.logsDir, "decisions.jsonl"), candidate);
-    if (candidate.status === "candidate" || candidate.status === "alert") {
-      const execution = await executeCandidate(candidate, config, loaded.hash);
-      await appendJsonl(join(config.logsDir, "orders.jsonl"), {
-        candidate,
-        execution,
-      });
-    }
-  }
-  await writeJson(join(config.stateDir, "last_candidates.json"), ranked);
-  return { evidence: [...state.evidenceByCompany.values()], legs: state.allLegs, candidates: ranked };
-}
-
-async function collectValuationState(config: StrategyConfig): Promise<ValuationState> {
-  const evidenceByCompany = await loadEvidence(config);
-  const allLegs: ValuationLeg[] = [];
-  const quotes = new Map<string, BookQuote>();
-  const noQuotes = new Map<string, BookQuote>();
-  const curvePoints: CurvePoint[] = [];
-  const thresholdCandidates: ValuationCandidate[] = [];
-
-  for (const eventConfig of config.events) {
-    const event = await fetchGammaEvent(eventConfig.slug);
-    await appendJsonl(join(config.logsDir, "events.jsonl"), {
-      eventSlug: event.slug,
-      title: event.title,
-      rawHash: event.rawHash,
-      kind: eventConfig.kind,
-    });
-    const legs = parseValuationLegs(event, eventConfig);
-    allLegs.push(...legs);
-    for (const leg of legs) {
-      await appendJsonl(join(config.logsDir, "legs.jsonl"), leg);
-      const quote = leg.yesTokenId ? await safeQuote(leg.yesTokenId) : undefined;
-      if (quote) quotes.set(leg.marketSlug, quote);
-      const noQuote = leg.noTokenId ? await safeQuote(leg.noTokenId) : undefined;
-      if (noQuote) noQuotes.set(leg.marketSlug, noQuote);
-      if (leg.threshold !== undefined && quote?.bestAsk !== null && quote?.bestAsk !== undefined) {
-        curvePoints.push({ leg, yesAsk: quote.bestAsk });
-      }
-      if (leg.eventKind === "threshold") {
-        const rawEvidence = evidenceByCompany.get(leg.company);
-        const evidence = rawEvidence ? withEligibleMax(rawEvidence, leg.marketWindowStartIso, leg.deadlineIso) : undefined;
-        const locked = await isCandidateLocked(config, candidateShell(leg));
-        const decision = decideThresholdLeg(leg, evidence, quote, config, locked);
-        thresholdCandidates.push(decision);
-      }
-    }
-  }
-
-  return { evidenceByCompany, allLegs, quotes, noQuotes, curvePoints, thresholdCandidates };
-}
-
-function scanSummary(result: ScanResult): Record<string, unknown> {
-  const candidates = result.candidates.filter((candidate) => candidate.status === "candidate");
-  const alerts = result.candidates.filter((candidate) => candidate.status === "alert");
-  return {
-    evidenceCount: result.evidence.length,
-    legCount: result.legs.length,
-    candidateCount: candidates.length,
-    alertCount: alerts.length,
-    topCandidates: candidates.slice(0, 10).map(compactCandidate),
-    topAlerts: alerts.slice(0, 10).map(compactCandidate),
-  };
-}
-
-function compactCandidate(candidate: ValuationCandidate): Record<string, unknown> {
-  return {
-    signalType: candidate.signalType,
-    status: candidate.status,
-    company: candidate.company,
-    marketSlug: candidate.marketSlug,
-    deadline: candidate.deadline,
-    threshold: candidate.threshold,
-    direction: candidate.direction,
-    yesAsk: candidate.yesAsk,
-    depthUnderCap: candidate.depthUnderCap,
-    bookAgeMs: candidate.bookAgeMs,
-    distancePct: candidate.distancePct,
-    fairPrice: candidate.fairPrice,
-    edge: candidate.edge,
-    edgeScore: candidate.edgeScore,
-    confidenceScore: candidate.confidenceScore,
-    orderUsd: candidate.orderUsd,
-    orderTemplate: candidate.orderTemplate,
-    liveAllowed: candidate.liveAllowed,
-    reason: candidate.reason,
-  };
 }
 
 export async function curveAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
@@ -933,27 +816,31 @@ export async function auditCandidates(
   };
 }
 
-async function loadEvidence(config: StrategyConfig): Promise<Map<string, NpmEvidence>> {
-  const evidenceByCompany = new Map<string, NpmEvidence>();
-  for (const company of config.companies) {
-    if (!company.npmCompanyId) continue;
-    const evidence = await fetchNpmEvidence(company);
-    if (!evidence) continue;
-    evidenceByCompany.set(company.name, evidence);
-    await appendJsonl(join(config.logsDir, "evidence.jsonl"), evidence);
-  }
-  return evidenceByCompany;
-}
-
 async function preflight(loaded: LoadedStrategyConfig): Promise<Record<string, unknown>> {
   const config = loaded.config;
   const liveAck = liveAckPath(config, loaded.hash);
+  const liveAckPresent = await filePresent(liveAck);
+  const missingNpmSources = config.companies
+    .filter((company) => !company.npmCompanyId)
+    .map((company) => company.name);
+  const lastCandidates = parseCandidateArray(await readJson(join(config.stateDir, "last_candidates.json"))) ?? [];
+  const sourceFreshness = parseSourceFreshnessSnapshot(await readJson(sourceFreshnessPath(config)));
+  const runtime = preflightRuntime();
+  const warnings = preflightWarnings({
+    config,
+    liveAckPresent,
+    missingNpmSources,
+    candidateCount: lastCandidates.length,
+    runtime,
+  });
   return {
     ok: true,
     configHash: loaded.hash,
     mode: config.mode,
     liveAckPath: liveAck,
-    liveAckPresent: await filePresent(liveAck),
+    liveAckPresent,
+    warnings,
+    runtime,
     riskCaps: {
       globalUsdCap: config.globalUsdCap,
       perEventUsdCap: config.perEventUsdCap,
@@ -966,6 +853,36 @@ async function preflight(loaded: LoadedStrategyConfig): Promise<Record<string, u
       clobSecret: Boolean(process.env.CLOB_SECRET),
       clobPassPhrase: Boolean(process.env.CLOB_PASS_PHRASE),
       postingArmed: process.env.POLYBOT_TS_BRIDGE_ALLOW_POST === "1",
+    },
+    activeUniverse: {
+      companyCount: config.companies.length,
+      npmSourceCompanyCount: config.companies.length - missingNpmSources.length,
+      missingNpmSourceCompanyCount: missingNpmSources.length,
+      missingNpmSourceCompanies: missingNpmSources,
+      eventCount: config.events.length,
+      thresholdEventCount: config.events.filter((event) => event.kind === "threshold").length,
+      rankingEventCount: config.events.filter((event) => event.kind === "ranking").length,
+      eventModes: countBy(config.events.map((event) => event.mode ?? config.mode)),
+    },
+    sourceFreshness: sourceFreshness
+      ? {
+        generatedAt: sourceFreshness.generatedAt,
+        companyCount: Object.keys(sourceFreshness.companies).length,
+        states: countBy(Object.values(sourceFreshness.companies).map((item) => item.freshnessState)),
+        staleCompanies: Object.values(sourceFreshness.companies)
+          .filter((item) => item.freshnessState === "STALE_ENDPOINT" || item.freshnessState === "SOURCE_BLOCKED" || item.freshnessState === "MISSED_EXPECTED_UPDATE")
+          .map((item) => ({
+            company: item.company,
+            freshnessState: item.freshnessState,
+            staleBlockReason: item.staleBlockReason ?? null,
+          })),
+      }
+      : null,
+    paperToLivePromotionGates: promotionGateSummary(),
+    lastCandidates: {
+      present: lastCandidates.length > 0,
+      count: lastCandidates.length,
+      topLiveBlockers: await preflightTopLiveBlockers(lastCandidates, config, loaded.hash),
     },
     companies: config.companies.map((company) => ({
       name: company.name,
@@ -981,6 +898,69 @@ async function preflight(loaded: LoadedStrategyConfig): Promise<Record<string, u
   };
 }
 
+function preflightRuntime(): Record<string, unknown> {
+  return {
+    node: process.version,
+    platform: process.platform,
+    cwd: process.cwd(),
+    tmpdir: process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null,
+    npmExecPath: process.env.npm_execpath ?? null,
+    npmLifecycleEvent: process.env.npm_lifecycle_event ?? null,
+    localRunHint: "TMPDIR=/tmp ./node_modules/.bin/tsx src/valuation/cli.ts preflight --config configs/valuation/private-valuations-july31.json",
+  };
+}
+
+function preflightWarnings(input: {
+  config: StrategyConfig;
+  liveAckPresent: boolean;
+  missingNpmSources: string[];
+  candidateCount: number;
+  runtime: Record<string, unknown>;
+}): string[] {
+  const warnings: string[] = [];
+  const npmExecPath = String(input.runtime.npmExecPath ?? "");
+  const tmpdir = String(input.runtime.tmpdir ?? "");
+  if (npmExecPath.includes("/mnt/c/") || npmExecPath.includes("\\") || npmExecPath.includes("Program Files")) {
+    warnings.push("windows_npm_detected_from_wsl_use_local_node_or_direct_tsx_with_TMPDIR");
+  }
+  if (!tmpdir || tmpdir.includes("/mnt/c/") || tmpdir.includes("AppData")) {
+    warnings.push("tsx_tmpdir_may_not_support_ipc_use_TMPDIR_/tmp");
+  }
+  if (input.config.mode === "live" && !input.liveAckPresent) warnings.push("live_mode_missing_config_ack");
+  if (input.config.mode !== "live" && process.env.POLYBOT_TS_BRIDGE_ALLOW_POST === "1") {
+    warnings.push("posting_env_armed_while_operator_mode_not_live");
+  }
+  if (input.missingNpmSources.length > 0) warnings.push("companies_missing_npm_sources_limit_ranking_and_relative_value_reliability");
+  if (input.candidateCount === 0) warnings.push("no_last_candidates_state_run_scan_or_audit_for_live_blocker_context");
+  return warnings;
+}
+
+async function preflightTopLiveBlockers(
+  candidates: ValuationCandidate[],
+  config: StrategyConfig,
+  configHash: string,
+): Promise<Array<Record<string, unknown>>> {
+  const rows: Array<Record<string, unknown>> = [];
+  for (const candidate of candidates
+    .filter((item) => item.status === "candidate" || item.status === "alert")
+    .slice(0, 5)) {
+    rows.push({
+      candidate: candidateLabel(candidate),
+      signalType: candidate.signalType,
+      status: candidate.status,
+      marketSlug: candidate.marketSlug,
+      liveBlockers: await liveBlockers(candidate, config, configHash),
+    });
+  }
+  return rows;
+}
+
+function countBy(values: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const value of values) counts[value] = (counts[value] ?? 0) + 1;
+  return counts;
+}
+
 export async function liveBlockers(
   candidate: ValuationCandidate,
   config: StrategyConfig,
@@ -991,6 +971,7 @@ export async function liveBlockers(
   if (config.mode !== "live") blockers.push(`operator_mode_${config.mode}`);
   if (candidate.signalType === "NPM_DRIFT_MODEL_YES") blockers.push("drift_model_alert_only");
   if (candidate.signalType === "RANKING_INCONSISTENCY_ALERT") blockers.push("ranking_market_alert_only");
+  blockers.push(...paperPromotionGateBlockers(candidate.signalType));
   blockers.push(...sourceConfirmedLivePolicyBlockers(candidate, config));
   if (!candidate.yesTokenId) blockers.push("missing_yes_token");
   if (!candidate.orderTemplate) blockers.push("missing_order_template");
@@ -1031,91 +1012,6 @@ async function runProbe(loaded: LoadedStrategyConfig, args: Map<string, string>)
     tokenId: selectedToken,
     probePath: probePath(loaded.config, marketSlug),
     result,
-  };
-}
-
-export function applyCaps(
-  config: StrategyConfig,
-  candidates: ValuationCandidate[],
-  locks: CandidateLock[],
-): ValuationCandidate[] {
-  let globalSpent = locks.reduce((sum, lock) => sum + lock.orderUsd, 0);
-  const eventSpent = new Map<string, number>();
-  const companySpent = new Map<string, number>();
-  const deadlineSpent = new Map<string, number>();
-  for (const lock of locks) {
-    eventSpent.set(lock.eventSlug, (eventSpent.get(lock.eventSlug) ?? 0) + lock.orderUsd);
-    if (lock.company) companySpent.set(lock.company, (companySpent.get(lock.company) ?? 0) + lock.orderUsd);
-    if (lock.deadline) deadlineSpent.set(lock.deadline, (deadlineSpent.get(lock.deadline) ?? 0) + lock.orderUsd);
-  }
-  return candidates.map((candidate) => {
-    if (candidate.status !== "candidate" || candidate.orderUsd <= 0) return candidate;
-    const spentForEvent = eventSpent.get(candidate.eventSlug) ?? 0;
-    const spentForCompany = companySpent.get(candidate.company) ?? 0;
-    const spentForDeadline = deadlineSpent.get(candidate.deadline) ?? 0;
-    if (globalSpent + candidate.orderUsd > config.globalUsdCap) return capBlocked(candidate, "global_notional_cap_exceeded");
-    if (spentForEvent + candidate.orderUsd > config.perEventUsdCap) return capBlocked(candidate, "event_notional_cap_exceeded");
-    if (spentForCompany + candidate.orderUsd > config.perCompanyUsdCap) return capBlocked(candidate, "company_notional_cap_exceeded");
-    if (spentForDeadline + candidate.orderUsd > config.perDeadlineUsdCap) return capBlocked(candidate, "deadline_notional_cap_exceeded");
-    globalSpent += candidate.orderUsd;
-    eventSpent.set(candidate.eventSlug, spentForEvent + candidate.orderUsd);
-    companySpent.set(candidate.company, spentForCompany + candidate.orderUsd);
-    deadlineSpent.set(candidate.deadline, spentForDeadline + candidate.orderUsd);
-    return candidate;
-  });
-}
-
-function capBlocked(candidate: ValuationCandidate, reason: string): ValuationCandidate {
-  return { ...candidate, status: "skip", liveAllowed: false, orderUsd: 0, reason };
-}
-
-function rankCandidates(candidates: ValuationCandidate[]): ValuationCandidate[] {
-  return [...candidates].sort((left, right) => {
-    const statusScore = scoreStatus(right.status) - scoreStatus(left.status);
-    if (statusScore !== 0) return statusScore;
-    return right.edge - left.edge;
-  });
-}
-
-function scoreStatus(status: ValuationCandidate["status"]): number {
-  if (status === "candidate") return 3;
-  if (status === "alert") return 2;
-  if (status === "no_action") return 1;
-  return 0;
-}
-
-async function safeQuote(tokenId: string): Promise<BookQuote | undefined> {
-  try {
-    return await fetchBookQuote(tokenId);
-  } catch {
-    return undefined;
-  }
-}
-
-function candidateShell(leg: ValuationLeg): ValuationCandidate {
-  return {
-    signalType: "NO_ACTION",
-    status: "skip",
-    company: leg.company,
-    eventSlug: leg.eventSlug,
-    marketSlug: leg.marketSlug,
-    deadline: leg.deadlineIso,
-    threshold: leg.threshold,
-    yesTokenId: leg.yesTokenId,
-    yesAsk: null,
-    bestBid: null,
-    spread: null,
-    liquidity: 0,
-    fairPrice: 0,
-    edge: 0,
-    confidence: 0,
-    confidenceScore: 0,
-    edgeScore: 0,
-    maxPrice: 0,
-    orderUsd: 0,
-    liveAllowed: false,
-    reason: "lock_probe",
-    ruleHash: leg.ruleHash,
   };
 }
 
