@@ -54,8 +54,12 @@ the relevant promotion-gate blocking reason.
 
 - `src/valuation/cli.ts`: command dispatcher for scan, audits, reports, paper
   workflows, automation, probes, and live acks.
+- `src/valuation/commands/audit.ts`: curve, market, and candidate audit command
+  implementations plus shared market-audit row construction.
 - `src/valuation/commands/scan.ts`: scan command implementation, candidate
   ranking, cap application, and execution/alert logging.
+- `src/valuation/execution/liveExecution.ts`: live-blocker audit policy shared by
+  preflight, market audits, and candidate audits.
 - `src/valuation/services/collectValuationState.ts`: evidence, event, leg, quote,
   and threshold-candidate collection service shared by valuation commands.
 - `src/valuation/strategy/`: reusable valuation strategy modules.

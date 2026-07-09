@@ -3,36 +3,33 @@ import "dotenv/config";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { appendJsonl } from "./logging.ts";
+import { auditCandidates, buildMarketAuditRows, curveAudit, marketAudit } from "./commands/audit.ts";
 import { scanOnce, scanSummary } from "./commands/scan.ts";
-import { candidateShell, collectValuationState, type ValuationState } from "./services/collectValuationState.ts";
+import { liveBlockers } from "./execution/liveExecution.ts";
+import { collectValuationState } from "./services/collectValuationState.ts";
 import { loadStrategyConfig, type LoadedStrategyConfig } from "./strategy/valuationConfig.ts";
-import { withEligibleMax } from "./strategy/npmValuationSource.ts";
 import { fetchGammaEvent, parseValuationLegs } from "./strategy/marketParser.ts";
 import { fetchBookQuote } from "./strategy/orderbookSource.ts";
-import { calendarDominanceCandidates } from "./strategy/calendarArbitrage.ts";
-import { rankingAlertCandidates } from "./strategy/rankingSimulator.ts";
-import { buildImpliedCurves } from "./strategy/impliedCurve.ts";
-import { postedProbe, sourceConfirmedLivePolicyBlockers } from "./strategy/betaExecution.ts";
-import { hasLiveAck, isCandidateLocked, liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
-import { validatePostedProbeForCandidate } from "./strategy/probeValidation.ts";
-import { buildMarketAuditRow, monotonicityAudits, type MarketAuditRow, type MonotonicityAudit } from "./strategy/marketAudit.ts";
+import { postedProbe } from "./strategy/betaExecution.ts";
+import { liveAckPath, probePath, readJson, writeJson, writeLiveAck } from "./strategy/stateStore.ts";
 import { fixingWatchSnapshotPath, fixingWatchStatePath, parseFixingWatchSnapshot, parseFixingWatchState, updateFixingWatch } from "./strategy/fixingWatch.ts";
+import { monotonicityAudits } from "./strategy/marketAudit.ts";
 import { buildNpmBarrierForecasts, buildSourceFreshnessSnapshot, parseSourceFreshnessSnapshot, sourceFreshnessMap, type ForecastAuditRow, type SourceFreshnessSnapshot } from "./strategy/npmBarrierForecast.ts";
 import { forecastPaperPath, parseForecastPaperState, updateForecastPaperTrades } from "./strategy/forecastPaper.ts";
 import { expectedNpmUpdateAt, parseAutomationPhase, type AutomationTask } from "./strategy/automationSchedule.ts";
 import { runAutomationCycle } from "./strategy/valuationAutomation.ts";
 import { buildDailyReport } from "./strategy/dailyReport.ts";
 import { acquireAutomationLock, writeAutomationHeartbeat } from "./strategy/automationRuntime.ts";
-import { paperPromotionGateBlockers, promotionGateSummary } from "./strategy/promotionGates.ts";
+import { promotionGateSummary } from "./strategy/promotionGates.ts";
 import { buildLadderEntryPlans, type EntryPlan } from "./strategy/valuationLadderEntries.ts";
 import { discoverValuationUniverse } from "./strategy/valuationUniverseDiscovery.ts";
 import { STRATEGY_LADDER_PAPER_SIZE_MULTIPLIERS, ladderPaperPath, parseLadderPaperState, updateLadderPaperOrders } from "./strategy/ladderPaper.ts";
-import type { ImpliedCurve } from "./strategy/impliedCurve.ts";
 import type { StrategyConfig, ValuationCandidate } from "./strategy/signalTypes.ts";
 
 type Command = "scan" | "run" | "preflight" | "probe" | "ack" | "audit" | "curve-audit" | "market-audit" | "fixing-watch" | "forecast-audit" | "forecast-paper" | "daily-report" | "auto" | "discover" | "entry-audit" | "ladder-paper";
 
 export { applyCaps, scanOnce } from "./commands/scan.ts";
+export { liveBlockers } from "./execution/liveExecution.ts";
 
 async function main(): Promise<void> {
   const { command, args } = parseCli(process.argv.slice(2));
@@ -88,174 +85,6 @@ async function main(): Promise<void> {
     }
   }
   return print(scanSummary(await scanOnce(loaded)));
-}
-
-export async function curveAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
-  const config = loaded.config;
-  const strict = args.get("strict") === "true" || args.get("strict") === "1";
-  const state = await collectValuationState(config);
-  const curves = buildImpliedCurves(state.curvePoints);
-  const rankingLegs = state.allLegs.filter((leg) => leg.eventKind === "ranking");
-  const monotonicity = monotonicityAudits(state.curvePoints, state.quotes, config);
-  const strictMonotonicity = monotonicity.filter((violation) => violation.violationTier === "HARD_CROSS_MARKET_BID_VIOLATION");
-  const calendar = calendarDominanceCandidates(state.curvePoints, state.quotes, config);
-  const ranking = rankingAlertCandidates(rankingLegs, state.evidenceByCompany, state.quotes, config, curves);
-  const crossed = state.thresholdCandidates.filter((candidate) => (
-    candidate.signalType === "SOURCE_CONFIRMED_YES" && candidate.status === "candidate"
-  ));
-  const marketRows = await buildMarketAuditRows(loaded, state);
-  const strictCrossed = marketRows.filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore");
-  const strictCrossedSlugs = new Set(strictCrossed.map((row) => row.marketSlug));
-  const nestedMonotonicity = strict ? strictMonotonicity : monotonicity;
-  const nestedCrossed = strict ? crossed.filter((candidate) => strictCrossedSlugs.has(candidate.marketSlug)) : crossed;
-  const report = {
-    ok: true,
-    generatedAt: new Date().toISOString(),
-    mode: config.mode,
-    strict,
-    liveEligible: false,
-    livePolicy: "relative_value_audit_is_alert_only",
-    summary: {
-      curveCount: curves.length,
-      curvePointCount: state.curvePoints.length,
-      monotonicityViolationCount: monotonicity.length,
-      hardMonotonicityCount: strictMonotonicity.length,
-      softMonotonicityCount: monotonicity.filter((violation) => violation.violationTier === "SOFT_MID_VIOLATION" || violation.violationTier === "SOFT_ASK_ONLY_VIOLATION").length,
-      staleViolationCount: monotonicity.filter((violation) => violation.violationTier === "STALE_BOOK_VIOLATION").length,
-      calendarViolationCount: calendar.length,
-      crossedLegOpportunityCount: crossed.length,
-      strictCrossedLegCount: strictCrossed.length,
-      rankingContradictionCount: ranking.length,
-      tradeableCandidateCount: strictMonotonicity.length + strictCrossed.length,
-    },
-    curves: curves.map((curve) => curveAuditRow(curve, nestedMonotonicity, [...calendar, ...nestedCrossed])),
-    monotonicityViolations: (strict ? strictMonotonicity : monotonicity).map(monotonicityRow),
-    calendarViolations: calendar.map(relativeCandidate),
-    crossedLegOpportunities: strict
-      ? strictCrossed.map(marketRowSummary)
-      : crossed.map(relativeCandidate),
-    rankingContradictions: ranking.map(relativeCandidate),
-  };
-  await appendJsonl(join(config.logsDir, "curve_audit.jsonl"), report);
-  await writeJson(join(config.stateDir, "last_curve_audit.json"), report);
-  return report;
-}
-
-function curveAuditRow(curve: ImpliedCurve, monotonicity: MonotonicityAudit[], candidates: ValuationCandidate[]): Record<string, unknown> {
-  const curveCandidates = candidates
-    .filter((candidate) => candidate.company === curve.company && candidate.deadline === curve.deadlineIso)
-    .sort((left, right) => right.edge - left.edge);
-  const curveViolations = monotonicity.filter((violation) => violation.company === curve.company && violation.deadline === curve.deadlineIso);
-  return {
-    company: curve.company,
-    deadline: curve.deadlineIso,
-    medianValuation: curve.medianValuation,
-    expectedValuation: curve.expectedValuation,
-    curvePoints: curve.points.map((point) => ({
-      threshold: point.leg.threshold,
-      yesAsk: point.yesAsk,
-      marketSlug: point.leg.marketSlug,
-      label: point.leg.label,
-    })),
-    monotonicityViolations: curveViolations.map(monotonicityRow),
-    calendarViolations: curveCandidates.filter((candidate) => candidate.signalType === "CALENDAR_DOMINANCE_YES").map(relativeCandidate),
-    crossedLegs: curveCandidates.filter((candidate) => candidate.signalType === "SOURCE_CONFIRMED_YES").map(relativeCandidate),
-    bestUnderpricedYesLeg: curveCandidates[0] ? relativeCandidate(curveCandidates[0]) : null,
-    liveEligible: false,
-  };
-}
-
-function monotonicityRow(violation: MonotonicityAudit): Record<string, unknown> {
-  return {
-    company: violation.company,
-    deadline: violation.deadline,
-    lowerMarketSlug: violation.lowerMarketSlug,
-    higherMarketSlug: violation.higherMarketSlug,
-    lowerThreshold: violation.lowerThreshold,
-    higherThreshold: violation.higherThreshold,
-    lowerYesAsk: violation.lowerYesAsk,
-    lowerYesBid: violation.lowerYesBid,
-    higherYesAsk: violation.higherYesAsk,
-    higherYesBid: violation.higherYesBid,
-    bidBackedEdge: violation.bidBackedEdge,
-    midEdge: violation.midEdge,
-    askOnlyEdge: violation.askOnlyEdge,
-    bookAgeMs: violation.bookAgeMs,
-    sameRuleHashFamily: violation.sameRuleHashFamily,
-    sameDirectionSemantics: violation.sameDirectionSemantics,
-    violationTier: violation.violationTier,
-    tradeableBuyOnly: violation.tradeableBuyOnly,
-    reason: violation.reason,
-    liveEligible: false,
-  };
-}
-
-function relativeCandidate(candidate: ValuationCandidate): Record<string, unknown> {
-  return {
-    signalType: candidate.signalType,
-    company: candidate.company,
-    eventSlug: candidate.eventSlug,
-    marketSlug: candidate.marketSlug,
-    deadline: candidate.deadline,
-    threshold: candidate.threshold,
-    yesAsk: candidate.yesAsk,
-    fairPrice: candidate.fairPrice,
-    edgeEstimate: candidate.edge,
-    confidence: candidate.confidenceScore,
-    reason: candidate.reason,
-    pairedMarketSlug: candidate.pairedMarketSlug,
-    pairedYesAsk: candidate.pairedYesAsk,
-    orderTemplate: candidate.orderTemplate ?? null,
-    liveEligible: false,
-  };
-}
-
-export async function marketAudit(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
-  const state = await collectValuationState(loaded.config);
-  const rows = await buildMarketAuditRows(loaded, state);
-  const strict = args.get("strict") === "true" || args.get("strict") === "1";
-  const filteredRows = strict
-    ? rows.filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore")
-    : rows;
-  const companies = [...new Set(filteredRows.map((row) => row.company))].map((company) => {
-    const companyRows = filteredRows
-      .filter((row) => row.company === company)
-      .sort((left, right) => (left.threshold ?? 0) - (right.threshold ?? 0));
-    const evidence = state.evidenceByCompany.get(company);
-    return {
-      company,
-      latestNpmValuation: evidence?.latestValuation,
-      latestNpmDate: evidence?.latestTapeDate,
-      maxEligibleValuation: evidence?.maxEligibleValuation ?? evidence?.latestValuation,
-      maxEligibleDate: evidence?.maxEligibleDate ?? evidence?.latestTapeDate,
-      thresholdCurve: companyRows.map(marketRowSummary),
-      bestStaleCrossedLeg: companyRows
-        .filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE")
-        .sort((left, right) => right.tradeScore - left.tradeScore)[0] ?? null,
-      nearBoundaryWatchlist: companyRows.filter((row) => row.state === "NEAR_BOUNDARY").map(marketRowSummary),
-    };
-  });
-  const report = {
-    ok: true,
-    generatedAt: new Date().toISOString(),
-    mode: loaded.config.mode,
-    strict,
-    summary: {
-      legCount: rows.length,
-      outputLegCount: filteredRows.length,
-      newlyCrossedCount: rows.filter((row) => row.state === "NEWLY_CROSSED").length,
-      previouslyCrossedCount: rows.filter((row) => row.state === "PREVIOUSLY_CROSSED").length,
-      strictCrossedLegCount: rows.filter((row) => row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE" && row.tradeBand !== "ignore").length,
-      nearBoundaryCount: rows.filter((row) => row.state === "NEAR_BOUNDARY").length,
-      ambiguousCount: rows.filter((row) => row.state === "AMBIGUOUS").length,
-      tradeableCandidateCount: rows.filter((row) => row.tradeBand === "tradeable" && row.crossedQuality === "SOURCE_CONFIRMED_AND_STALE").length,
-    },
-    companies,
-    rows: filteredRows.map(marketRowSummary),
-  };
-  await appendJsonl(join(loaded.config.logsDir, "market_audit.jsonl"), report);
-  await writeJson(join(loaded.config.stateDir, "last_market_audit.json"), report);
-  return report;
 }
 
 export async function fixingWatch(loaded: LoadedStrategyConfig, args: Map<string, string> = new Map()): Promise<Record<string, unknown>> {
@@ -631,57 +460,6 @@ function sourceFreshnessPath(config: StrategyConfig): string {
   return join(config.stateDir, "source_freshness.json");
 }
 
-async function buildMarketAuditRows(loaded: LoadedStrategyConfig, state: ValuationState): Promise<MarketAuditRow[]> {
-  const candidates = new Map(state.thresholdCandidates.map((candidate) => [candidate.marketSlug, candidate]));
-  const rows: MarketAuditRow[] = [];
-  for (const leg of state.allLegs.filter((item) => item.eventKind === "threshold")) {
-    const rawEvidence = state.evidenceByCompany.get(leg.company);
-    const evidence = rawEvidence ? withEligibleMax(rawEvidence, leg.marketWindowStartIso, leg.deadlineIso) : undefined;
-    const candidate = candidates.get(leg.marketSlug) ?? candidateShell(leg);
-    rows.push(buildMarketAuditRow({
-      leg,
-      evidence,
-      quote: state.quotes.get(leg.marketSlug),
-      config: loaded.config,
-      liveBlockers: await liveBlockers(candidate, loaded.config, loaded.hash),
-    }));
-  }
-  return rows.sort((left, right) => {
-    if (left.company !== right.company) return left.company.localeCompare(right.company);
-    return (left.threshold ?? 0) - (right.threshold ?? 0);
-  });
-}
-
-function marketRowSummary(row: MarketAuditRow): Record<string, unknown> {
-  return {
-    company: row.company,
-    eventSlug: row.eventSlug,
-    marketSlug: row.marketSlug,
-    threshold: row.threshold,
-    deadline: row.deadline,
-    label: row.label,
-    state: row.state,
-    crossedQuality: row.crossedQuality,
-    latestValuation: row.latestValuation,
-    latestDate: row.latestDate,
-    maxEligibleValuation: row.maxEligibleValuation,
-    maxEligibleDate: row.maxEligibleDate,
-    previousMaxEligibleValuation: row.previousMaxEligibleValuation,
-    sourceDateAgeHours: row.sourceDateAgeHours,
-    yesAsk: row.yesAsk,
-    yesBid: row.yesBid,
-    settlementEdge: row.settlementEdge,
-    distancePct: row.distancePct,
-    depthUnderCap: row.depthUnderCap,
-    bookAgeMs: row.bookAgeMs,
-    ruleConfidence: row.ruleConfidence,
-    tradeScore: row.tradeScore,
-    tradeBand: row.tradeBand,
-    liveBlockers: row.liveBlockers,
-    reason: row.reason,
-  };
-}
-
 function entryAuditSummary(plans: EntryPlan[]): Record<string, unknown> {
   const counts = plans.reduce<Record<string, number>>((result, plan) => {
     result[plan.entryMode] = (result[plan.entryMode] ?? 0) + 1;
@@ -740,79 +518,6 @@ function entryPlanSummary(plan: EntryPlan): Record<string, unknown> {
     pairedMarketSlug: plan.pairedMarketSlug,
     ladderContext: plan.ladderContext,
     range: plan.range,
-  };
-}
-
-export async function auditCandidates(
-  loaded: LoadedStrategyConfig,
-  args: Map<string, string> = new Map(),
-): Promise<Record<string, unknown>> {
-  const refresh = args.get("refresh") === "true" || args.get("refresh") === "1";
-  const top = Math.max(1, Number(args.get("top") ?? 20));
-  const lastCandidatesPath = join(loaded.config.stateDir, "last_candidates.json");
-  let source = "last_candidates";
-  let candidates: ValuationCandidate[] | null = null;
-  if (!refresh) {
-    const raw = await readJson(lastCandidatesPath);
-    candidates = parseCandidateArray(raw);
-  }
-  if (!candidates) {
-    source = "fresh_scan";
-    candidates = (await scanOnce(loaded)).candidates;
-  }
-  const audited = [];
-  for (const candidate of candidates.slice(0, top)) {
-    const blockers = await liveBlockers(candidate, loaded.config, loaded.hash);
-    audited.push({
-      candidate: candidateLabel(candidate),
-      signalType: candidate.signalType,
-      status: candidate.status,
-      company: candidate.company,
-      eventSlug: candidate.eventSlug,
-      marketSlug: candidate.marketSlug,
-      sourceEvidence: {
-        valuation: candidate.sourceValuation,
-        sourceDate: candidate.sourceDate,
-        maxEligibleValuation: candidate.maxEligibleValuation,
-        maxEligibleDate: candidate.maxEligibleDate,
-      },
-      ruleEvidence: {
-        ruleHash: candidate.ruleHash,
-        threshold: candidate.threshold,
-        direction: candidate.direction,
-        deadline: candidate.deadline,
-      },
-      market: {
-        yesAsk: candidate.yesAsk,
-        bestBid: candidate.bestBid,
-        spread: candidate.spread,
-        liquidity: candidate.liquidity,
-        depthUnderCap: candidate.depthUnderCap,
-        bookAgeMs: candidate.bookAgeMs,
-        cap: candidate.maxPrice,
-      },
-      scores: {
-        distancePct: candidate.distancePct,
-        confidenceScore: candidate.confidenceScore,
-        edgeScore: candidate.edgeScore,
-        fairPrice: candidate.fairPrice,
-        edge: candidate.edge,
-      },
-      orderTemplate: candidate.orderTemplate ?? null,
-      live: blockers.length === 0 ? "ALLOWED" : "BLOCKED",
-      liveBlockers: blockers,
-      reason: candidate.reason,
-    });
-  }
-  return {
-    ok: true,
-    generatedAt: new Date().toISOString(),
-    source,
-    configHash: loaded.hash,
-    mode: loaded.config.mode,
-    top,
-    candidateCount: candidates.length,
-    candidates: audited,
   };
 }
 
@@ -959,29 +664,6 @@ function countBy(values: string[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const value of values) counts[value] = (counts[value] ?? 0) + 1;
   return counts;
-}
-
-export async function liveBlockers(
-  candidate: ValuationCandidate,
-  config: StrategyConfig,
-  configHash: string,
-): Promise<string[]> {
-  const blockers: string[] = [];
-  if (candidate.status !== "candidate") blockers.push(`candidate_status_${candidate.status}`);
-  if (config.mode !== "live") blockers.push(`operator_mode_${config.mode}`);
-  if (candidate.signalType === "NPM_DRIFT_MODEL_YES") blockers.push("drift_model_alert_only");
-  if (candidate.signalType === "RANKING_INCONSISTENCY_ALERT") blockers.push("ranking_market_alert_only");
-  blockers.push(...paperPromotionGateBlockers(candidate.signalType));
-  blockers.push(...sourceConfirmedLivePolicyBlockers(candidate, config));
-  if (!candidate.yesTokenId) blockers.push("missing_yes_token");
-  if (!candidate.orderTemplate) blockers.push("missing_order_template");
-  if (candidate.orderUsd <= 0) blockers.push("zero_order_usd");
-  if (!await hasLiveAck(config, configHash)) blockers.push("missing_live_config_ack");
-  if (await isCandidateLocked(config, candidate)) blockers.push("duplicate_lock");
-  const probe = await validatePostedProbeForCandidate(config, candidate);
-  if (!probe.ok) blockers.push(...probe.blockers);
-  if (process.env.POLYBOT_TS_BRIDGE_ALLOW_POST !== "1") blockers.push("posting_env_not_armed");
-  return [...new Set(blockers)];
 }
 
 async function runProbe(loaded: LoadedStrategyConfig, args: Map<string, string>): Promise<Record<string, unknown>> {

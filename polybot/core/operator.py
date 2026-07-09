@@ -124,7 +124,7 @@ class OperatorGate:
             "note": note,
         }
         path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        log_event("iran_operator_live_config_ack", **record)
+        log_event("operator_live_config_ack", **record)
         return {**record, "ack_path": str(path)}
 
     def set_position_mode(self, mode: str) -> dict[str, Any]:
@@ -138,7 +138,7 @@ class OperatorGate:
             "path": str(path),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        log_event("iran_operator_position_mode_set", **record)
+        log_event("operator_position_mode_set", **record)
         return record
 
     def current_mode(self) -> str:
@@ -163,7 +163,7 @@ class OperatorGate:
         if self._last_block_reason == key:
             return False
         self._last_block_reason = key
-        log_event("iran_operator_execution_blocked", mode=result.mode, reason=result.reason, action=decision.action)
+        log_event("operator_execution_blocked", mode=result.mode, reason=result.reason, action=decision.action)
         return True
 
 

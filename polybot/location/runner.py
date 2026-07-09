@@ -30,9 +30,34 @@ from .market_verifier import verify_all_outcomes, verify_location_event
 from .keyword_gate import should_escalate_location_article
 
 
+PROMOTED_FEED_SUMMARY_AUTO_TRADE_DOMAINS = {"reuters.com", "apnews.com", "afp.com"}
+LOCATION_EXECUTION_STATES = {"TRIMMED", "EXITED", "ROTATED", "FLIP_INCOMPLETE"}
+_ALERT_ONLY_STARTUP_BLOCKERS = {"operator_mode_alert_only"}
+
+
+def exact_domain(domain: str) -> str:
+    return domain.lower().removeprefix("www.")
+
+
 def domain_allowed(domain: str, allowed: list[str]) -> bool:
-    normalized = domain.lower().removeprefix("www.")
+    normalized = exact_domain(domain)
     return any(normalized == item or normalized.endswith("." + item) for item in allowed)
+
+
+def promoted_feed_summary_auto_trade_allowed(domain: str) -> bool:
+    return exact_domain(domain) in PROMOTED_FEED_SUMMARY_AUTO_TRADE_DOMAINS
+
+
+def location_execution_count(store: StateStore) -> int:
+    current = store.current()
+    current_state = current.state if current is not None else None
+    count = 0
+    for state in LOCATION_EXECUTION_STATES:
+        if store.marker(state) is not None:
+            count += 1
+        elif current_state == state:
+            count += 1
+    return count
 
 
 def inspect_location_command(config_path: Path) -> int:
@@ -128,6 +153,14 @@ def set_location_mode_command(config_path: Path, mode: str) -> int:
     return 0
 
 
+def _hard_live_startup_blockers(preflight: dict[str, Any]) -> list[str]:
+    operator = preflight.get("operator")
+    blockers = operator.get("blockers") if isinstance(operator, dict) else None
+    if not isinstance(blockers, list):
+        return []
+    return [str(blocker) for blocker in blockers if str(blocker) not in _ALERT_ONLY_STARTUP_BLOCKERS]
+
+
 def smoke_location_classifier_command(
     config_path: Path,
     *,
@@ -205,7 +238,7 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
         )
         log_event("location_live_preflight", **preflight)
         print(json.dumps(preflight, indent=2, sort_keys=True))
-        if preflight["status"] == "blocked":
+        if _hard_live_startup_blockers(preflight):
             raise SystemExit("live preflight blocked execution; fix blockers or use ack/set-mode commands")
     bot = LocationProtectionBot(config=config, adapter=adapter, operator_gate=gate, live_requested=live_flag)
     while True:
@@ -380,10 +413,15 @@ class LocationProtectionBot:
     def _enforce_source_policy(self, article: Article, decision: LocationDecision) -> LocationDecision:
         if decision.action not in {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}:
             return decision
-        # promoted_feed_summary is feed-derived text (publisher fetch failed),
-        # so it is gated by the same flag as raw feed items.
         if article.source_kind in {"feed", "promoted_feed_summary"} and not self.config.sources.allow_feed_auto_trade:
             return LocationDecision("ALERT_ONLY", "3", "feed_item_auto_trade_disabled", decision.target_outcome, decision.factors)
+        # A promoted_feed_summary is feed-derived text used when the publisher
+        # page could not be fetched. Keep live execution to exact wire domains;
+        # republishers, social posts, and official-but-partial feeds alert only.
+        if article.source_kind == "promoted_feed_summary" and not promoted_feed_summary_auto_trade_allowed(article.domain):
+            return LocationDecision(
+                "ALERT_ONLY", "3", "promoted_feed_summary_domain_not_auto_trade", decision.target_outcome, decision.factors
+            )
         # Freshness gate (ported from the iran runner): stale items can alert
         # but not trade -- old news is already priced in, and with feed
         # auto-trade enabled a stale feed item must never fire a sale.
@@ -408,6 +446,11 @@ class LocationProtectionBot:
             return LocationDecision("ALERT_ONLY", "3", "below_auto_execute_level", decision.target_outcome, decision.factors)
         if self.config.safety.max_executions <= 0:
             return LocationDecision("ALERT_ONLY", "3", "max_executions_zero", decision.target_outcome, decision.factors)
+        execution_count = location_execution_count(self.store)
+        if execution_count >= self.config.safety.max_executions:
+            return LocationDecision(
+                "ALERT_ONLY", "3", f"max_executions_reached:{execution_count}", decision.target_outcome, decision.factors
+            )
         market_block = self._market_verification_block_reason()
         if market_block is not None:
             return LocationDecision("ALERT_ONLY", "3", market_block, decision.target_outcome, decision.factors)
@@ -660,7 +703,7 @@ class LocationProtectionBot:
             "Location protection heartbeat",
             held_outcome=held.label,
             dry_run=self.config.execution.dry_run,
-            execution_backend="py_clob" if self.live_requested else "dry_run",
+            execution_backend=live_backend_name() if self.live_requested else "dry_run",
             current_state=current_state.state if current_state else None,
             current_reason=current_state.payload.get("reason") if current_state else None,
             operator_mode=operator_status.get("effective_mode") if isinstance(operator_status, dict) else None,

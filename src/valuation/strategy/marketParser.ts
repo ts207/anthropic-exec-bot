@@ -28,6 +28,7 @@ export function parseGammaEvent(raw: unknown): GammaEvent {
 export function parseValuationLegs(event: GammaEvent, config: EventConfig): ValuationLeg[] {
   return event.markets.map((market) => {
     const question = stringOr(market.question ?? market.title, "");
+    const marketCompany = optionalString(market.groupItemTitle ?? market.group_item_title);
     const ruleText = [
       event.description,
       event.resolutionSource,
@@ -45,7 +46,7 @@ export function parseValuationLegs(event: GammaEvent, config: EventConfig): Valu
       marketSlug: stringOr(market.slug, sha256(question).slice(0, 12)),
       question,
       eventKind: config.kind,
-      company: config.companyName ?? inferCompanyFromQuestion(question),
+      company: config.companyName ?? marketCompany ?? inferCompanyFromQuestion(question),
       deadlineIso: config.deadlineIso,
       marketWindowStartIso: config.marketWindowStartIso,
       yesTokenId: yesIndex >= 0 ? tokens[yesIndex] : tokens[0],
@@ -113,7 +114,7 @@ function ruleSupportsThreshold(ruleText: string): boolean {
 }
 
 function inferCompanyFromQuestion(question: string): string {
-  const match = question.match(/(?:Will\s+)?(.+?)(?:'s|’s|\s+valuation|\s+be\s+the)/i);
+  const match = question.match(/(?:Will\s+)?(.+?)(?:'s|’s|\s+valuation|\s+be\s+the|\s+have\s+the)/i);
   return match?.[1]?.replace(/^will\s+/i, "").trim() || "unknown";
 }
 

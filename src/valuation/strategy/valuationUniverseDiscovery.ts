@@ -22,6 +22,7 @@ export type DiscoveredValuationEvent = {
   markets: Array<{
     marketSlug: string;
     question: string;
+    company: string;
     threshold?: number;
     direction: "UP" | "DOWN" | "UNKNOWN";
     yesTokenId?: string;
@@ -34,6 +35,8 @@ export type DiscoveredValuationEvent = {
     closed: boolean;
     acceptingOrders: boolean;
     liquidity: number;
+    label?: string;
+    ranking?: 1 | 2 | 3;
     ruleText: string;
     ruleHash: string;
     parseStatus: string;
@@ -76,7 +79,7 @@ export async function discoverValuationUniverse(input: {
   for (const eventConfig of input.config.events) {
     try {
       const event = await fetchGammaEvent(eventConfig.slug);
-      if (isValuationEvent(event) || eventConfig.kind === "threshold") {
+      if (isValuationEvent(event) || eventConfig.kind === "threshold" || eventConfig.kind === "ranking") {
         events.set(event.slug, { event, source: "configured_seed", config: eventConfig });
       }
     } catch (error) {
@@ -199,6 +202,7 @@ async function discoveredEventRow(input: {
     markets: legs.map((leg) => ({
       marketSlug: leg.marketSlug,
       question: leg.question,
+      company: leg.company,
       threshold: leg.threshold,
       direction: directionFromLeg(leg),
       yesTokenId: leg.yesTokenId,
@@ -211,6 +215,8 @@ async function discoveredEventRow(input: {
       closed: leg.closed,
       acceptingOrders: leg.acceptingOrders,
       liquidity: leg.liquidity,
+      label: leg.label,
+      ranking: leg.ranking,
       ruleText: leg.ruleText,
       ruleHash: leg.ruleHash,
       parseStatus: leg.parseStatus,

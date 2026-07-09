@@ -21,6 +21,7 @@ from polybot.location.config import (
     PriceAlertConfig,
     HeartbeatConfig,
     MarketVerificationMonitorConfig,
+    SafetyConfig,
     SellConfig,
     SourcesConfig,
     BuyRotationConfig,
@@ -904,10 +905,10 @@ def _trade_decision() -> LocationDecision:
     )
 
 
-def _aged_article(published_at: str | None, source_kind: str = "article") -> Article:
+def _aged_article(published_at: str | None, source_kind: str = "article", domain: str = "reuters.com") -> Article:
     return Article(
-        url="https://reuters.com/story",
-        domain="reuters.com",
+        url=f"https://{domain}/story",
+        domain=domain,
         title="story",
         published_at=published_at,
         fetched_at="2026-07-06T00:00:00Z",
@@ -952,6 +953,42 @@ def test_promoted_feed_summary_allowed_when_feed_auto_trade_enabled_and_timestam
     fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     out = bot._enforce_source_policy(_aged_article(fresh, source_kind="promoted_feed_summary"), _trade_decision())
     assert out.action == "ROTATE_YES"
+
+
+@pytest.mark.parametrize("domain", ["irna.ir", "t.me", "x.com", "news.google.com"])
+def test_promoted_feed_summary_non_wire_domains_stay_alert_only(tmp_path, domain: str) -> None:
+    bot = _policy_bot(
+        tmp_path,
+        _sources(
+            allow_feed_auto_trade=True,
+            auto_trade_domains=["reuters.com", "apnews.com", "afp.com", "irna.ir", "t.me", "x.com", "news.google.com"],
+        ),
+    )
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    out = bot._enforce_source_policy(_aged_article(fresh, source_kind="promoted_feed_summary", domain=domain), _trade_decision())
+    assert out.action == "ALERT_ONLY"
+    assert out.reason == "promoted_feed_summary_domain_not_auto_trade"
+
+
+def test_promoted_feed_summary_ap_wire_can_auto_trade_when_configured(tmp_path) -> None:
+    bot = _policy_bot(
+        tmp_path,
+        _sources(allow_feed_auto_trade=True, auto_trade_domains=["reuters.com", "apnews.com", "afp.com"]),
+    )
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    out = bot._enforce_source_policy(_aged_article(fresh, source_kind="promoted_feed_summary", domain="apnews.com"), _trade_decision())
+    assert out.action == "ROTATE_YES"
+
+
+def test_max_executions_counts_prior_trim_marker(tmp_path) -> None:
+    config = _config(data_dir=tmp_path / "state", logs_dir=tmp_path / "logs", safety=SafetyConfig(max_executions=1))
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=1000.0))
+    bot.store.write("TRIMMED", reason="prior_trim")
+
+    out = bot._enforce_execution_policy(_trade_decision())
+
+    assert out.action == "ALERT_ONLY"
+    assert out.reason == "max_executions_reached:1"
 
 
 def test_article_store_dedupes_same_extracted_text_with_different_hash(tmp_path) -> None:
@@ -1178,6 +1215,45 @@ def test_run_location_live_preflight_blocks_before_poll_loop(tmp_path, monkeypat
     assert "live_config_hash_not_acknowledged" in output
 
 
+def test_run_location_live_preflight_allows_acknowledged_alert_only_monitoring(tmp_path, monkeypatch, capsys) -> None:
+    from polybot.core.operator import OperatorGate
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
+    config_path = tmp_path / "qatar.yaml"
+    config_path.write_text("event:\n  slug: test-slug\nexecution:\n  dry_run: false\n", encoding="utf-8")
+    config = _config(
+        execution=ExecutionConfig(dry_run=False, sell=SellConfig(), buy_rotation=BuyRotationConfig()),
+        sources=SourcesConfig(poll_urls=["https://example.com/story"]),
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+    )
+    OperatorGate(config_path, config).write_ack(note="test")
+    monkeypatch.setattr(runner_mod, "load_location_config", lambda path: config)
+    monkeypatch.setattr(runner_mod, "_live_adapter", lambda **kwargs: DryRunTradingAdapter(yes_shares=1000.0))
+    monkeypatch.setattr(market_verifier_mod, "fetch_event_by_slug", lambda slug, **kw: _event_for_config(config))
+    started = {}
+
+    class _Bot:
+        def __init__(self, *, config, adapter, operator_gate, live_requested):
+            started["live_requested"] = live_requested
+            started["operator_mode"] = operator_gate.current_mode()
+
+        def run_once(self):
+            raise SystemExit(0)
+
+    monkeypatch.setattr(runner_mod, "LocationProtectionBot", _Bot)
+
+    with pytest.raises(SystemExit) as excinfo:
+        runner_mod.run_location_command(config_path, live_flag=True)
+
+    assert excinfo.value.code == 0
+    assert started == {"live_requested": True, "operator_mode": "alert_only"}
+    output = capsys.readouterr().out
+    assert '"config_acknowledged": true' in output
+    assert "operator_mode_alert_only" in output
+
+
 def test_quote_verification_applies_to_trade_actions_below_level_4(tmp_path) -> None:
     bot = _policy_bot(tmp_path, _sources(allow_unknown_age_poll_auto_trade=True))
     decision = LocationDecision(
@@ -1255,6 +1331,22 @@ def test_heartbeat_reports_position_state_and_market_verification(tmp_path) -> N
     assert heartbeat["current_state"] == "EXITED"
     assert heartbeat["current_reason"] == "test_exit"
     assert heartbeat["market_verification_status"] == "ok"
+
+
+def test_live_heartbeat_reports_selected_execution_backend(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("POLYBOT_EXECUTION_BACKEND", "clob_v2")
+    adapter = DryRunTradingAdapter(yes_shares=321.0, no_shares=2.0, yes_bid=0.25, yes_ask=0.27)
+    bot, notified = _monitoring_bot(
+        tmp_path,
+        adapter,
+        MonitoringConfig(heartbeat=HeartbeatConfig(enabled=True, interval_hours=24)),
+    )
+    bot.live_requested = True
+
+    bot.run_once()
+
+    heartbeat = [item for item in notified if item[0] == "Location protection heartbeat"][-1][1]
+    assert heartbeat["execution_backend"] == "clob_v2"
 
 
 def test_market_verification_monitor_records_failure_and_blocks_trade_policy(tmp_path, monkeypatch) -> None:
@@ -1342,6 +1434,124 @@ def test_dawn_headline_islamabad_but_body_technical_and_doha_high_level_does_not
     assert decision.action == "NO_ACTION"
     assert decision.reason == "technical_location_not_qualifying_held_future_expected"
     assert decision.target_outcome is None
+
+
+def test_headline_says_doha_but_body_says_final_venue_unannounced_does_not_confirm_held() -> None:
+    config = _config()
+    classifier = RuleBasedFixtureLocationClassifier(config)
+    text = (
+        "Diplomats said Qatar remains under discussion as a possible host. "
+        "The final venue has not been announced, and officials said several mediator capitals remain under review."
+    )
+
+    signal = classifier.classify(article(text, domain="reuters.com", title="Doha eyed for next US-Iran talks"), "rules")
+
+    assert signal.headline_location == "qatar"
+    assert signal.final_decision_announced is False
+    assert signal.confirmed_location == "none"
+    assert signal.qualifies_as_senior_round is False
+
+    decision = final_decision(config, signal)
+    assert decision.action == "NO_ACTION"
+    assert decision.reason == "technical_or_non_qualifying"
+
+
+def test_delegation_lands_in_doha_without_meeting_wording_does_not_confirm_held() -> None:
+    config = _config()
+    classifier = RuleBasedFixtureLocationClassifier(config)
+    text = (
+        "An Iranian delegation landed in Doha on Wednesday. "
+        "Officials did not announce any formal senior-level US-Iran round, venue, or schedule."
+    )
+
+    signal = classifier.classify(article(text, domain="aljazeera.com", title="Iranian delegation lands in Doha"), "rules")
+
+    assert signal.headline_location == "qatar"
+    assert signal.confirmed_location == "none"
+    assert signal.qualifies_as_senior_round is False
+
+    decision = final_decision(config, signal)
+    assert decision.action == "NO_ACTION"
+    assert decision.reason == "technical_or_non_qualifying"
+
+
+def test_wire_confirmed_non_qatar_rotation_target_rotates() -> None:
+    config = _config()
+    classifier = RuleBasedFixtureLocationClassifier(config)
+    text = "Officials confirm the next formal senior-level round will begin in Pakistan on July 21."
+
+    signal = classifier.classify(article(text, domain="apnews.com", title="US-Iran talks to resume in Islamabad"), "rules")
+
+    assert signal.source_tier == "wire"
+    assert signal.confirmed_location == "pakistan"
+    assert signal.qualifies_as_senior_round is True
+
+    decision = final_decision(config, signal)
+    assert decision.action == "ROTATE_YES"
+    assert decision.target_outcome == "pakistan"
+
+
+def test_wire_confirmed_non_rotation_location_exits_without_buying_target() -> None:
+    config = _config()
+    signal = _signal(
+        source_is_trusted=True,
+        qualifies_as_senior_round=True,
+        round_status="scheduled",
+        location_country_name="Russia",
+        confirmed_location="russia",
+        evidence_strength="confirmed_scheduled",
+        would_resolve_held_location_yes=False,
+        would_resolve_held_location_no=True,
+        source_tier="wire",
+        quote_supporting_trigger="The next formal round will be held in Russia.",
+    )
+
+    decision = final_decision(config, signal)
+
+    assert decision.action == "EXIT_YES_ONLY"
+    assert decision.reason == "confirmed_non_held_location_not_rotated:russia"
+    assert decision.target_outcome is None
+
+
+def test_irna_official_denial_stays_alert_only_not_auto_exit() -> None:
+    config = _config()
+    signal = _signal(
+        source_is_trusted=True,
+        qualifies_as_senior_round=False,
+        round_status="none",
+        confirmed_location="no_meeting",
+        evidence_strength="denied",
+        would_resolve_held_location_yes=False,
+        would_resolve_held_location_no=True,
+        source_tier="state_media",
+        quote_supporting_trigger="Iranian officials denied that a new round had been scheduled.",
+    )
+
+    decision = final_decision(config, signal)
+
+    assert decision.action == "ALERT_ONLY"
+    assert decision.reason == "no_meeting_reported_unconfirmed"
+
+
+def test_social_rumor_non_qatar_location_stays_alert_only() -> None:
+    config = _config()
+    signal = _signal(
+        source_is_trusted=False,
+        qualifies_as_senior_round=True,
+        round_status="rumor",
+        location_country_name="Pakistan",
+        confirmed_location="pakistan",
+        evidence_strength="speculative",
+        would_resolve_held_location_yes=False,
+        would_resolve_held_location_no=True,
+        source_tier="other",
+        quote_supporting_trigger="A Telegram channel claimed the next round would be in Islamabad.",
+    )
+
+    decision = final_decision(config, signal)
+
+    assert decision.action == "ALERT_ONLY"
+    assert decision.reason == "source_not_trusted"
 
 
 def test_prompt_instructs_body_over_headline_and_technical_location_extraction() -> None:

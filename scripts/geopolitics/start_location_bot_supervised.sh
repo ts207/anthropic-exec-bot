@@ -35,8 +35,8 @@ while true; do
     rm -f "$STOPFILE"
     break
   fi
-  echo "$(date -u +%FT%TZ) launching run-location-protection" >> "$SUP_LOG"
-  .venv/bin/python -m polybot.geopolitics run-location-protection --config configs/geopolitics/qatar-sept30-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
+  echo "$(date -u +%FT%TZ) launching run-location-protection --live" >> "$SUP_LOG"
+  .venv/bin/python -m polybot.geopolitics run-location-protection --config configs/geopolitics/qatar-sept30-yes-protection.yaml --live >> "$RUN_LOG" 2>&1 &
   CHILD=$!
   echo "$CHILD" > "$CHILD_PIDFILE"
   wait "$CHILD"

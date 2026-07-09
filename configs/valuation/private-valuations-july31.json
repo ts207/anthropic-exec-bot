@@ -62,23 +62,29 @@
       "npmCompanyId": "company-6edded11-6786-4392-9695-3cce6fda0de0"
     },
     {
-      "name": "Kraken"
+      "name": "Kraken",
+      "npmCompanyId": "company-ab5413cb-1c83-497e-b03e-2ed7ca70117d"
     },
     {
       "name": "Epic Games",
+      "npmCompanyId": "company-625e5f47-7ff7-45c4-be95-0305665164bd",
       "aliases": ["Epic"]
     },
     {
-      "name": "Lambda"
+      "name": "Lambda",
+      "npmCompanyId": "company-86eda4f2-01af-4275-9c70-0ff3c347c62b"
     },
     {
-      "name": "Canva"
+      "name": "Canva",
+      "npmCompanyId": "company-5e0e75a3-96d6-4893-8f23-9d9bac0ec1db"
     },
     {
-      "name": "Neuralink"
+      "name": "Neuralink",
+      "npmCompanyId": "company-782c0a32-4727-4097-a40b-9a2602f243e7"
     },
     {
-      "name": "Anduril"
+      "name": "Anduril",
+      "npmCompanyId": "company-c62b8140-fdeb-428d-a9a6-d04eb3b24b49"
     },
     {
       "name": "Databricks",

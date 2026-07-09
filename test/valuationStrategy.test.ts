@@ -75,6 +75,26 @@ test("Gamma fixture parser keeps LOW label but relies on rule threshold language
   assert.equal(legs[1]?.parseStatus, "malformed_threshold");
 });
 
+test("ranking parser uses group item title for company mapping", () => {
+  const event = parseGammaEvent({
+    slug: "ranking-event",
+    title: "Largest private company end of July?",
+    description: "This market resolves to the listed company with the largest private market valuation.",
+    markets: [{
+      ...marketFixture("Will Epic Games have the highest private market valuation on July 31?", "epic-ranking"),
+      groupItemTitle: "Epic Games",
+    }],
+  });
+  const legs = parseValuationLegs(event, {
+    slug: "ranking-event",
+    kind: "ranking",
+    ranking: 1,
+    deadlineIso: "2026-08-01T03:59:59Z",
+  });
+  assert.equal(legs[0]?.company, "Epic Games");
+  assert.equal(legs[0]?.label, "RANKING");
+});
+
 test("NPM parser stores latest tape and eligible-window max valuation", () => {
   const evidence = parseNpmEvidence({
     company: { name: "Anthropic" },
@@ -89,6 +109,19 @@ test("NPM parser stores latest tape and eligible-window max valuation", () => {
   assert.equal(windowed.latestValuation, 1_080_000_000_000);
   assert.equal(windowed.maxEligibleValuation, 1_105_000_000_000);
   assert.equal(windowed.maxEligibleDate, "2026-07-01");
+});
+
+test("NPM parser validates endpoint dba_name against configured company", () => {
+  const evidence = parseNpmEvidence({
+    company: { dba_name: "Epic Games" },
+    latest_tape_d: { date: "2026-07-03", implied_valuation: 32_000_000_000 },
+  }, { name: "Epic Games", npmCompanyId: "company-epic", aliases: ["Epic"] });
+  const mismatch = parseNpmEvidence({
+    company: { dba_name: "Kraken" },
+    latest_tape_d: { date: "2026-07-03", implied_valuation: 10_000_000_000 },
+  }, { name: "Epic Games", npmCompanyId: "company-epic", aliases: ["Epic"] });
+  assert.equal(evidence.identityOk, true);
+  assert.equal(mismatch.identityOk, false);
 });
 
 test("source-confirmed crossed threshold creates BUY YES candidate", () => {
@@ -1681,6 +1714,14 @@ test("valuation discovery stores rule text, executable quotes, and crawl coverag
         markets: [marketFixture("Will Stripe's valuation hit $175B by July 31?", "stripe-175")],
       });
     }
+    if (url.includes("/events/slug/ranking-event")) {
+      return jsonResponse({
+        slug: "ranking-event",
+        title: "Largest private company end of July?",
+        description: "This market resolves to the listed company with the largest private market valuation.",
+        markets: [marketFixture("Will Epic Games have the highest private market valuation on July 31?", "epic-ranking")],
+      });
+    }
     if (url.includes("gamma-api.polymarket.com/events?")) {
       return jsonResponse(Array.from({ length: 20 }, (_, index) => ({
         slug: `non-valuation-${index}`,
@@ -1705,28 +1746,48 @@ test("valuation discovery stores rule text, executable quotes, and crawl coverag
   }) as typeof fetch;
   try {
     const report = await discoverValuationUniverse({
-      config: testConfig(),
+      config: normalizeConfig({
+        events: [
+          thresholdEvent("Stripe"),
+          {
+            slug: "ranking-event",
+            kind: "ranking",
+            ranking: 1,
+            deadlineIso: "2026-08-01T03:59:59Z",
+            marketWindowStartIso: "2026-06-30T00:00:00Z",
+          },
+        ],
+        companies: [
+          { name: "Stripe", npmCompanyId: "company-6edded11-6786-4392-9695-3cce6fda0de0" },
+          { name: "Epic Games", npmCompanyId: "company-625e5f47-7ff7-45c4-be95-0305665164bd" },
+        ],
+      }),
       crawlGamma: true,
       maxPages: 1,
       pageSize: 20,
     });
-    assert.equal(report.discoveredEventCount, 1);
+    assert.equal(report.discoveredEventCount, 2);
     assert.equal(report.gammaPagesScanned, 1);
     assert.equal(report.gammaEventsScanned, 20);
     assert.equal(report.gammaCrawlExhausted, false);
     assert.equal(report.maxPagesReached, true);
-    assert.equal(report.coverage.configuredEventCount, 1);
+    assert.equal(report.coverage.configuredEventCount, 2);
     assert.equal(report.coverage.configuredThresholdEventCount, 1);
     assert.equal(report.coverage.configuredSeedFetchFailures, 0);
     assert.equal(report.coverage.eventsWithNpmCompanyId, 1);
     assert.equal(report.coverage.eventsWithQuoteIssues, 0);
-    assert.equal(report.events[0]?.npmCompanyId, "company-6edded11-6786-4392-9695-3cce6fda0de0");
-    assert.equal(report.events[0]?.npmSourceUrl?.includes("forgeglobal.com"), true);
-    assert.equal(report.events[0]?.markets[0]?.ruleText.includes("reaches or exceeds"), true);
-    assert.equal(report.events[0]?.markets[0]?.yesBid, 0.56);
-    assert.equal(report.events[0]?.markets[0]?.yesAsk, 0.79);
-    assert.equal(report.events[0]?.markets[0]?.noBid, 0.21);
-    assert.equal(report.events[0]?.markets[0]?.noAsk, 0.44);
+    const threshold = report.events.find((event) => event.eventSlug === "test-event");
+    const ranking = report.events.find((event) => event.eventSlug === "ranking-event");
+    assert.equal(threshold?.npmCompanyId, "company-6edded11-6786-4392-9695-3cce6fda0de0");
+    assert.equal(threshold?.npmSourceUrl?.includes("forgeglobal.com"), true);
+    assert.equal(threshold?.markets[0]?.ruleText.includes("reaches or exceeds"), true);
+    assert.equal(threshold?.markets[0]?.yesBid, 0.56);
+    assert.equal(threshold?.markets[0]?.yesAsk, 0.79);
+    assert.equal(threshold?.markets[0]?.noBid, 0.21);
+    assert.equal(threshold?.markets[0]?.noAsk, 0.44);
+    assert.equal(ranking?.markets[0]?.label, "RANKING");
+    assert.equal(ranking?.markets[0]?.ranking, 1);
+    assert.equal(ranking?.markets[0]?.company, "Epic Games");
   } finally {
     globalThis.fetch = previousFetch;
   }

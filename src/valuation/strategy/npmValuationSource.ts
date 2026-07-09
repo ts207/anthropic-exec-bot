@@ -67,7 +67,7 @@ function parseTape(value: unknown, latestDate: string, latestValuation: number, 
 
 function companyIdentityMatches(rawCompany: unknown, company: CompanyConfig): boolean {
   const record = asRecord(rawCompany);
-  const rawName = String(record.name ?? record.company_name ?? "").toLowerCase();
+  const rawName = String(record.name ?? record.company_name ?? record.dba_name ?? "").toLowerCase();
   if (!rawName) return true;
   const accepted = [company.name, ...(company.aliases ?? [])].map((name) => name.toLowerCase());
   return accepted.some((name) => rawName.includes(name) || name.includes(rawName));

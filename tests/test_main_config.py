@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -96,6 +98,46 @@ def test_main_dispatches_probe_iran_clob_v2(monkeypatch, tmp_path) -> None:
 
     assert main_module.main(["probe-iran-clob-v2", "--config", str(tmp_path / "iran.yaml"), "--amount", "2.5", "--post", "--price", "0.99"]) == 0
     assert called == {"path": tmp_path / "iran.yaml", "amount": 2.5, "post": True, "price": 0.99}
+
+
+def test_probe_iran_clob_v2_builds_bridge_environment(monkeypatch, tmp_path) -> None:
+    from polybot.iran.config import ExecutionConfig, IranBotConfig, MarketConfig, SellYesConfig
+    from polybot.iran.runner import probe_iran_clob_v2_command
+
+    cfg = IranBotConfig(
+        market=MarketConfig(slug="iran-event", held_side="YES"),
+        execution=ExecutionConfig(sell_yes=SellYesConfig(min_price=0.07)),
+    )
+    market = SimpleNamespace(
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition",
+        tick_size="0.001",
+        neg_risk=True,
+    )
+    calls = []
+
+    def fake_run(command, env, check):
+        calls.append((command, env, check))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("polybot.iran.runner.load_iran_config", lambda path: cfg)
+    monkeypatch.setattr("polybot.iran.runner.load_and_verify_market", lambda config: (market, None))
+    monkeypatch.setattr("polybot.iran.runner.subprocess.run", fake_run)
+
+    assert probe_iran_clob_v2_command(tmp_path / "iran.yaml", amount=3.5, post=False) == 0
+
+    command, env, check = calls[0]
+    assert check is False
+    assert env["TMPDIR"] == "/tmp"
+    assert command[:2] == ["./node_modules/.bin/tsx", "tools/polymarket-ts/clobV2ExecutionProbe.ts"]
+    assert command[command.index("--token-id") + 1] == "yes-token"
+    assert command[command.index("--side") + 1] == "SELL"
+    assert command[command.index("--amount") + 1] == "3.5"
+    assert command[command.index("--price") + 1] == "0.07"
+    assert command[command.index("--tick-size") + 1] == "0.001"
+    assert command[command.index("--neg-risk") + 1] == "true"
+    assert command[command.index("--post") + 1] == "false"
 
 
 def test_main_dispatches_smoke_iran_classifier(monkeypatch, tmp_path) -> None:
