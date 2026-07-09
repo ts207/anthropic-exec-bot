@@ -232,7 +232,7 @@ class LiveClobTradingAdapter:
 
 
 class TsClobV2TradingAdapter:
-    bridge_script = "src/clobV2Bridge.ts"
+    bridge_script = "tools/polymarket-ts/clobV2Bridge.ts"
     bridge_name = "clob-v2 bridge"
 
     def __init__(self, *, tick_size: str = "0.01", neg_risk: bool = False) -> None:
@@ -334,7 +334,7 @@ class TsClobV2TradingAdapter:
 
 
 class TsPolymarketBetaTradingAdapter(TsClobV2TradingAdapter):
-    bridge_script = "src/polymarketBetaBridge.ts"
+    bridge_script = "tools/polymarket-ts/polymarketBetaBridge.ts"
     bridge_name = "polymarket beta bridge"
 
 

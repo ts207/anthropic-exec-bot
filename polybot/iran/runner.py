@@ -136,7 +136,7 @@ def probe_iran_clob_v2_command(config_path: Path, amount: float = 5.0, post: boo
     env.setdefault("TMPDIR", "/tmp")
     command = [
         "./node_modules/.bin/tsx",
-        "src/clobV2ExecutionProbe.ts",
+        "tools/polymarket-ts/clobV2ExecutionProbe.ts",
         "--token-id",
         token_id,
         "--condition-id",

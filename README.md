@@ -1,10 +1,16 @@
 # polybot
 
-`polybot` is now focused on Polymarket position protection for the US-Iran
-peace-talks July 17 YES thesis. The active Python bot lives under
-`polybot/iran/` and is configured by `iran-july17-yes-protection.yaml`.
+`polybot` now has two distinct product areas:
 
-The older weather-market automation path has been removed.
+- geopolitics position-protection bots under `polybot/iran/`,
+  `polybot/location/`, and shared `polybot/core/` infrastructure;
+- TypeScript valuation strategy tooling under `src/strategy/` and
+  `src/valuationStrategy.ts`.
+
+Domain configs live under `configs/geopolitics/` and `configs/valuation/`.
+Operational geopolitics wrappers live under `scripts/geopolitics/`, systemd
+units under `services/`, and shared Polymarket TypeScript bridges under
+`tools/polymarket-ts/`.
 
 ## Install
 
@@ -101,40 +107,40 @@ Inspect a Polymarket event:
 Inspect and verify an Iran config:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics inspect-iran --config iran-july17-yes-protection.yaml
+.venv/bin/python -m polybot.geopolitics inspect-iran --config configs/geopolitics/iran-july17-yes-protection.yaml
 ```
 
 Preflight live readiness, including operator mode, config hash ack, credentials,
 token mapping, and live balances:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics preflight-iran --config iran-july17-yes-protection.yaml --live
+.venv/bin/python -m polybot.geopolitics preflight-iran --config configs/geopolitics/iran-july17-yes-protection.yaml --live
 ```
 
 Set the current position mode and acknowledge the exact config hash before live:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics set-iran-mode --config iran-july17-yes-protection.yaml --mode live
-.venv/bin/python -m polybot.geopolitics ack-iran-live --config iran-july17-yes-protection.yaml --note "reviewed live config"
+.venv/bin/python -m polybot.geopolitics set-iran-mode --config configs/geopolitics/iran-july17-yes-protection.yaml --mode live
+.venv/bin/python -m polybot.geopolitics ack-iran-live --config configs/geopolitics/iran-july17-yes-protection.yaml --note "reviewed live config"
 ```
 
 Read a portfolio-style position snapshot:
 
 ```bash
-.venv/bin/python -m polybot.main positions --config positions.example.yaml
-.venv/bin/python -m polybot.main inspect-position iran-july17-yes --config positions.example.yaml
+.venv/bin/python -m polybot.main positions --config configs/geopolitics/positions.example.yaml
+.venv/bin/python -m polybot.main inspect-position iran-july17-yes --config configs/geopolitics/positions.example.yaml
 ```
 
 Probe the TypeScript `clob-client-v2` deposit-wallet path without posting:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config iran-july17-yes-protection.yaml --amount 5
+.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config configs/geopolitics/iran-july17-yes-protection.yaml --amount 5
 ```
 
 Smoke the configured classifier without executing:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics smoke-iran-classifier --config iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
+.venv/bin/python -m polybot.geopolitics smoke-iran-classifier --config configs/geopolitics/iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
 ```
 
 Live runs default to the Python CLOB adapter. The legacy TypeScript
@@ -160,20 +166,20 @@ wallet, so it cannot silently trade the wrong account.
 Run the Iran bot:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml
+.venv/bin/python -m polybot.geopolitics run-iran --config configs/geopolitics/iran-july17-yes-protection.yaml
 ```
 
 Run live only after config and credential review:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml --live
+.venv/bin/python -m polybot.geopolitics run-iran --config configs/geopolitics/iran-july17-yes-protection.yaml --live
 ```
 
 ## Iran Configs
 
-- `iran-july17-yes-protection.yaml`: protects a YES position on the July 17
+- `configs/geopolitics/iran-july17-yes-protection.yaml`: protects a YES position on the July 17
   peace-talks leg.
-- `positions.example.yaml`: read-only portfolio snapshot config. It does not
+- `configs/geopolitics/positions.example.yaml`: read-only portfolio snapshot config. It does not
   authorize live trading; operator mode files and config-hash acks still gate
   execution.
 

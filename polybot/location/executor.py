@@ -14,9 +14,8 @@ from polybot.core.types import Article
 from .config import LocationBotConfig, OutcomeMarket
 from .decision import LocationDecision
 
-# Local terminal-state set (deliberately not reusing polybot.iran.storage's
-# TERMINAL_STATES, which lacks "ROTATED" and is shared/mutable global state we
-# don't want to alter from another package as a side effect).
+# Local terminal-state set. Location has "ROTATED", which is not part of the
+# shared StateStore contract and should stay strategy-specific.
 TERMINAL_STATES = {"EXITED", "ROTATED", "FLIP_INCOMPLETE", "STOPPED"}
 
 

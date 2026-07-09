@@ -48,7 +48,7 @@ type ValuationState = {
 
 async function main(): Promise<void> {
   const { command, args } = parseCli(process.argv.slice(2));
-  const configPath = args.get("config") ?? "configs/private-valuations-july31.json";
+  const configPath = args.get("config") ?? "configs/valuation/private-valuations-july31.json";
   const loaded = await loadStrategyConfig(configPath);
   if (command === "ack") {
     const path = await writeLiveAck(loaded.config, loaded.hash);

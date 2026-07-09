@@ -8,19 +8,19 @@ peace-talks July 17 YES thesis under `polybot/iran/`.
 Inspect and manually verify the July 17 market:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics inspect-iran --config iran-july17-yes-protection.yaml
+.venv/bin/python -m polybot.geopolitics inspect-iran --config configs/geopolitics/iran-july17-yes-protection.yaml
 ```
 
 Run the polling loop:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml
+.venv/bin/python -m polybot.geopolitics run-iran --config configs/geopolitics/iran-july17-yes-protection.yaml
 ```
 
 Run live only after config, credential, source, and position-size review:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml --live
+.venv/bin/python -m polybot.geopolitics run-iran --config configs/geopolitics/iran-july17-yes-protection.yaml --live
 ```
 
 ## Operator Gate
@@ -32,26 +32,26 @@ process can be moved out of live mode without redeploying.
 Preflight the current config:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics preflight-iran --config iran-july17-yes-protection.yaml --live
+.venv/bin/python -m polybot.geopolitics preflight-iran --config configs/geopolitics/iran-july17-yes-protection.yaml --live
 ```
 
 Set the position mode:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics set-iran-mode --config iran-july17-yes-protection.yaml --mode live
+.venv/bin/python -m polybot.geopolitics set-iran-mode --config configs/geopolitics/iran-july17-yes-protection.yaml --mode live
 ```
 
 Acknowledge the exact config hash:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics ack-iran-live --config iran-july17-yes-protection.yaml --note "reviewed July 17 live config"
+.venv/bin/python -m polybot.geopolitics ack-iran-live --config configs/geopolitics/iran-july17-yes-protection.yaml --note "reviewed July 17 live config"
 ```
 
 Probe the current deposit-wallet `clob-client-v2` execution path without
 posting an order:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config iran-july17-yes-protection.yaml --amount 5
+.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config configs/geopolitics/iran-july17-yes-protection.yaml --amount 5
 ```
 
 This initializes the TypeScript v2 client with `POLY_1271`, reads the held
@@ -63,7 +63,7 @@ There is also an explicit posted-probe mode for a deliberately non-crossing
 minimum-size FAK SELL:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config iran-july17-yes-protection.yaml --amount 5 --post
+.venv/bin/python -m polybot.geopolitics probe-iran-clob-v2 --config configs/geopolitics/iran-july17-yes-protection.yaml --amount 5 --post
 ```
 
 Posted probe mode forces the probe price to `0.99` and blocks if that price
@@ -72,7 +72,7 @@ could cross the current ask. It is still a real order submission.
 Smoke the configured classifier without executing anything:
 
 ```bash
-.venv/bin/python -m polybot.geopolitics smoke-iran-classifier --config iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
+.venv/bin/python -m polybot.geopolitics smoke-iran-classifier --config configs/geopolitics/iran-july17-yes-protection.yaml --text "Reuters reports senior US and Iranian representatives scheduled a formal round of talks for July 14."
 ```
 
 Live execution still defaults to the Python `py-clob-client` adapter. The
@@ -113,12 +113,12 @@ also blocks live execution when `classifier.provider: anthropic`.
 
 ## Read-Only Portfolio View
 
-`positions.example.yaml` is the first step toward the broader position manager.
+`configs/geopolitics/positions.example.yaml` is the first step toward the broader position manager.
 It is read-only and can inspect configured markets without authorizing trades:
 
 ```bash
-.venv/bin/python -m polybot.main positions --config positions.example.yaml
-.venv/bin/python -m polybot.main inspect-position iran-july17-yes --config positions.example.yaml
+.venv/bin/python -m polybot.main positions --config configs/geopolitics/positions.example.yaml
+.venv/bin/python -m polybot.main inspect-position iran-july17-yes --config configs/geopolitics/positions.example.yaml
 ```
 
 The snapshot includes market metadata, token mapping, live YES/NO balances,

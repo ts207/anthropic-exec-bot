@@ -4,18 +4,18 @@ cd /home/tstuv/poly/anthropic-exec-bot
 set -a
 source .env
 set +a
-# So the classifier's "claude_cli" provider can find the Claude Code CLI
-# (installed to ~/.local/bin), which isn't on PATH for non-login shells.
+# So the classifier's CLI provider can find Codex/Claude binaries in
+# non-login shells.
 export PATH="$HOME/.local/bin:$PATH"
 
 mkdir -p logs
-STOPFILE=logs/iran_july17.stop
+STOPFILE=logs/location_qatar.stop
 rm -f "$STOPFILE"
 
-RUN_LOG=logs/iran_july17_live.out
-SUP_LOG=logs/iran_july17_supervisor.log
-CHILD_PIDFILE=logs/iran_july17_live.pid
-SUP_PIDFILE=logs/iran_july17_supervisor.pid
+RUN_LOG=logs/location_qatar_live.out
+SUP_LOG=logs/location_qatar_supervisor.log
+CHILD_PIDFILE=logs/location_qatar_live.pid
+SUP_PIDFILE=logs/location_qatar_supervisor.pid
 
 echo $$ > "$SUP_PIDFILE"
 
@@ -35,12 +35,12 @@ while true; do
     rm -f "$STOPFILE"
     break
   fi
-  echo "$(date -u +%FT%TZ) launching run-iran" >> "$SUP_LOG"
-  .venv/bin/python -m polybot.geopolitics run-iran --config iran-july17-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
+  echo "$(date -u +%FT%TZ) launching run-location-protection" >> "$SUP_LOG"
+  .venv/bin/python -m polybot.geopolitics run-location-protection --config configs/geopolitics/qatar-sept30-yes-protection.yaml >> "$RUN_LOG" 2>&1 &
   CHILD=$!
   echo "$CHILD" > "$CHILD_PIDFILE"
   wait "$CHILD"
   CODE=$?
-  echo "$(date -u +%FT%TZ) run-iran exited (code $CODE); restarting in 10s" >> "$SUP_LOG"
+  echo "$(date -u +%FT%TZ) run-location-protection exited (code $CODE); restarting in 10s" >> "$SUP_LOG"
   sleep 10
 done

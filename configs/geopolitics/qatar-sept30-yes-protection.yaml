@@ -278,7 +278,7 @@ execution:
   # STAGED LIVE 2026-07-09: dry_run is off and the bot runs the real CLOB
   # backend (--live), but the operator position_mode is held at alert_only so
   # nothing actually trades. Flip to live with a single command when ready:
-  #   python -m polybot.geopolitics set-location-mode --config qatar-sept30-yes-protection.yaml --mode live
+  #   python -m polybot.geopolitics set-location-mode --config configs/geopolitics/qatar-sept30-yes-protection.yaml --mode live
   # (config hash is already acked; revert with --mode alert_only or dry_run: true).
   dry_run: false
   sell:
