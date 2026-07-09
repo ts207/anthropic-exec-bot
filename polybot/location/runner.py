@@ -14,7 +14,7 @@ from polybot.log import log_event
 
 from polybot.core.article import article_age_hours as _article_age_hours, is_feed_summary as _is_feed_summary
 from polybot.core.budget import ClassifierBudgetStore
-from polybot.core.execution import DryRunTradingAdapter, LiveClobTradingAdapter, TradingAdapter
+from polybot.core.execution import DryRunTradingAdapter, TradingAdapter, live_adapter_from_env, live_backend_name
 from polybot.core.notifier import TelegramNotifier
 from polybot.core.operator import OperatorGate
 from polybot.core.source_fetcher import ArticleStore, fetch_article, fetch_feed_articles, fetch_listing_article_urls, promote_feed_article
@@ -72,8 +72,21 @@ def inspect_location_command(config_path: Path) -> int:
 
 def preflight_location_command(config_path: Path, live_flag: bool = False) -> int:
     config = load_location_config(config_path)
-    held = config.held_outcome()
     adapter = _live_adapter() if live_flag else DryRunTradingAdapter()
+    result = _location_preflight_result(config_path, config, live_flag=live_flag, adapter=adapter)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 1 if result["status"] == "blocked" else 0
+
+
+def _location_preflight_result(
+    config_path: Path,
+    config: LocationBotConfig,
+    *,
+    live_flag: bool,
+    adapter: TradingAdapter,
+    verification: Any | None = None,
+) -> dict[str, Any]:
+    held = config.held_outcome()
     gate = OperatorGate(config_path, config)
     status = gate.status(live_requested=live_flag)
     result: dict[str, Any] = {
@@ -81,7 +94,7 @@ def preflight_location_command(config_path: Path, live_flag: bool = False) -> in
         "operator": status.as_dict(),
         "config": str(config_path),
         "held_outcome": held.name,
-        "execution_backend": "py_clob" if live_flag else "dry_run",
+        "execution_backend": live_backend_name() if live_flag else "dry_run",
     }
     try:
         position = adapter.query_live_position(held.yes_token_id, held.no_token_id)
@@ -90,7 +103,7 @@ def preflight_location_command(config_path: Path, live_flag: bool = False) -> in
         result["live_position_error"] = str(exc)
         status.blockers.append("live_position_query_failed")
     try:
-        verification = verify_location_event(config)
+        verification = verification or verify_location_event(config)
         verify_all_outcomes(config, verification, require_tradeable=live_flag)
         result["market_verification"] = verification.as_dict()
     except Exception as exc:
@@ -98,8 +111,7 @@ def preflight_location_command(config_path: Path, live_flag: bool = False) -> in
         status.blockers.append("market_verification_failed")
     result["operator"] = status.as_dict()
     result["status"] = "blocked" if status.blockers else "ok"
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 1 if result["status"] == "blocked" else 0
+    return result
 
 
 def ack_location_live_command(config_path: Path, note: str = "") -> int:
@@ -173,13 +185,28 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
         raise SystemExit("--live requires execution.dry_run=false")
     verification = verify_location_event(config)
     verify_all_outcomes(config, verification, require_tradeable=live_flag)
+    adapter: TradingAdapter
     if live_flag:
         held = config.held_outcome()
         held_verification = verification.outcomes.get(held.name)
         if held_verification is None or not held_verification.tradeable:
             raise SystemExit("held outcome market is not active/open/accepting orders; refusing live execution")
-    adapter = _live_adapter() if live_flag else DryRunTradingAdapter()
+        adapter = _live_adapter(tick_size=held_verification.tick_size, neg_risk=held_verification.neg_risk)
+    else:
+        adapter = DryRunTradingAdapter()
     gate = OperatorGate(config_path, config)
+    if live_flag:
+        preflight = _location_preflight_result(
+            config_path,
+            config,
+            live_flag=True,
+            adapter=adapter,
+            verification=verification,
+        )
+        log_event("location_live_preflight", **preflight)
+        print(json.dumps(preflight, indent=2, sort_keys=True))
+        if preflight["status"] == "blocked":
+            raise SystemExit("live preflight blocked execution; fix blockers or use ack/set-mode commands")
     bot = LocationProtectionBot(config=config, adapter=adapter, operator_gate=gate, live_requested=live_flag)
     while True:
         try:
@@ -193,8 +220,8 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
         time.sleep(config.safety.poll_seconds)
 
 
-def _live_adapter() -> TradingAdapter:
-    return LiveClobTradingAdapter()
+def _live_adapter(*, tick_size: str = "0.01", neg_risk: bool = False) -> TradingAdapter:
+    return live_adapter_from_env(tick_size=tick_size, neg_risk=neg_risk)
 
 
 class LocationProtectionBot:

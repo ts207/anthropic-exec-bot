@@ -20,6 +20,8 @@ class OutcomeVerification:
     yes_token_matches: bool = False
     no_token_matches: bool = False
     tradeable: bool = False
+    tick_size: str = "0.01"
+    neg_risk: bool = False
     mismatch_reason: str = ""
 
 
@@ -105,6 +107,8 @@ def verify_location_event(config: LocationBotConfig) -> LocationMarketVerificati
             yes_token_matches=yes_matches,
             no_token_matches=no_matches,
             tradeable=live.tradeable(),
+            tick_size=live.tick_size,
+            neg_risk=live.neg_risk,
             mismatch_reason=reason,
         )
 

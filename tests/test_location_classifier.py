@@ -22,6 +22,7 @@ from polybot.location.config import (
     HeartbeatConfig,
     MarketVerificationMonitorConfig,
     SellConfig,
+    SourcesConfig,
     BuyRotationConfig,
     TimeDecayConfig,
     TriggerConfig,
@@ -1142,6 +1143,39 @@ def test_operator_blocked_location_trade_is_logged_as_blocked(tmp_path) -> None:
     assert out.reason == "operator_block:operator_mode_alert_only"
     log_path = tmp_path / "logs" / "location_decisions.jsonl"
     assert "operator_block:operator_mode_alert_only" in log_path.read_text(encoding="utf-8")
+
+
+def test_location_live_backend_selector_supports_ts_clob(monkeypatch) -> None:
+    from polybot.core.execution import TsClobV2TradingAdapter
+
+    monkeypatch.setenv("POLYBOT_EXECUTION_BACKEND", "clob_v2")
+
+    adapter = runner_mod._live_adapter(tick_size="0.001", neg_risk=True)
+
+    assert isinstance(adapter, TsClobV2TradingAdapter)
+    assert adapter.tick_size == "0.001"
+    assert adapter.neg_risk is True
+
+
+def test_run_location_live_preflight_blocks_before_poll_loop(tmp_path, monkeypatch, capsys) -> None:
+    config_path = tmp_path / "qatar.yaml"
+    config_path.write_text("event:\n  slug: test-slug\nexecution:\n  dry_run: false\n", encoding="utf-8")
+    config = _config(
+        execution=ExecutionConfig(dry_run=False, sell=SellConfig(), buy_rotation=BuyRotationConfig()),
+        sources=SourcesConfig(poll_urls=["https://example.com/story"]),
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+    )
+    monkeypatch.setattr(runner_mod, "load_location_config", lambda path: config)
+    monkeypatch.setattr(runner_mod, "_live_adapter", lambda **kwargs: DryRunTradingAdapter(yes_shares=1000.0))
+    monkeypatch.setattr(market_verifier_mod, "fetch_event_by_slug", lambda slug, **kw: _event_for_config(config))
+
+    with pytest.raises(SystemExit, match="live preflight blocked execution"):
+        runner_mod.run_location_command(config_path, live_flag=True)
+
+    output = capsys.readouterr().out
+    assert "operator_mode_alert_only" in output
+    assert "live_config_hash_not_acknowledged" in output
 
 
 def test_quote_verification_applies_to_trade_actions_below_level_4(tmp_path) -> None:

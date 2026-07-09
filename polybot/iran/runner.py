@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
 from dataclasses import asdict
@@ -11,13 +10,14 @@ from typing import Any
 
 from polybot.config import SETTINGS
 from polybot.core.budget import ClassifierBudgetStore
+from polybot.core.execution import live_adapter_from_env
 from polybot.gamma import MarketMeta
 from polybot.log import log_event
 
 from .classifier import build_classifier, run_classifier_passes
 from .config import ClassifierConfig, IranBotConfig, load_iran_config
 from .decision import Decision, classify_agreement, final_decision, time_decay_decision, verify_quote_or_alert
-from .executor import DryRunTradingAdapter, FlipExecutor, LiveClobTradingAdapter, TradingAdapter, TsClobV2TradingAdapter, TsPolymarketBetaTradingAdapter
+from .executor import DryRunTradingAdapter, FlipExecutor, LiveClobTradingAdapter, TradingAdapter
 from .keyword_gate import keyword_gate
 from .market_verifier import load_and_verify_market
 from .notifier import TelegramNotifier
@@ -282,14 +282,7 @@ def run_iran_command(config_path: Path, live_flag: bool) -> int:
 
 
 def _live_adapter_for_market(market: MarketMeta) -> TradingAdapter:
-    backend = os.getenv("POLYBOT_EXECUTION_BACKEND", "py_clob").strip().lower()
-    if backend in {"polymarket_beta", "beta", "ts_beta"}:
-        return TsPolymarketBetaTradingAdapter(tick_size=market.tick_size, neg_risk=market.neg_risk)
-    if backend in {"clob_v2", "ts_clob_v2", "typescript"}:
-        return TsClobV2TradingAdapter(tick_size=market.tick_size, neg_risk=market.neg_risk)
-    if backend in {"py_clob", "python", ""}:
-        return LiveClobTradingAdapter()
-    raise SystemExit(f"unsupported POLYBOT_EXECUTION_BACKEND={backend!r}; expected py_clob, clob_v2, or polymarket_beta")
+    return live_adapter_from_env(tick_size=market.tick_size, neg_risk=market.neg_risk)
 
 
 class IranProtectionBot:

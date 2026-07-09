@@ -338,6 +338,28 @@ class TsPolymarketBetaTradingAdapter(TsClobV2TradingAdapter):
     bridge_name = "polymarket beta bridge"
 
 
+def live_adapter_from_env(*, tick_size: str = "0.01", neg_risk: bool = False) -> TradingAdapter:
+    backend = os.getenv("POLYBOT_EXECUTION_BACKEND", "py_clob").strip().lower()
+    if backend in {"polymarket_beta", "beta", "ts_beta"}:
+        return TsPolymarketBetaTradingAdapter(tick_size=tick_size, neg_risk=neg_risk)
+    if backend in {"clob_v2", "ts_clob_v2", "typescript"}:
+        return TsClobV2TradingAdapter(tick_size=tick_size, neg_risk=neg_risk)
+    if backend in {"py_clob", "python", ""}:
+        return LiveClobTradingAdapter()
+    raise SystemExit(f"unsupported POLYBOT_EXECUTION_BACKEND={backend!r}; expected py_clob, clob_v2, or polymarket_beta")
+
+
+def live_backend_name() -> str:
+    backend = os.getenv("POLYBOT_EXECUTION_BACKEND", "py_clob").strip().lower()
+    if backend in {"polymarket_beta", "beta", "ts_beta"}:
+        return "polymarket_beta"
+    if backend in {"clob_v2", "ts_clob_v2", "typescript"}:
+        return "clob_v2"
+    if backend in {"py_clob", "python", ""}:
+        return "py_clob"
+    return backend
+
+
 def _extract_first(value: Any, keys: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
         for key in keys:
@@ -411,4 +433,6 @@ __all__ = [
     "TradingAdapter",
     "TsClobV2TradingAdapter",
     "TsPolymarketBetaTradingAdapter",
+    "live_adapter_from_env",
+    "live_backend_name",
 ]
