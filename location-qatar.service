@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=/home/tstuv/poly/anthropic-exec-bot
 EnvironmentFile=/home/tstuv/poly/anthropic-exec-bot/.env
 Environment=PATH=/home/tstuv/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/tstuv/poly/anthropic-exec-bot/.venv/bin/python -m polybot.main run-location-protection --config qatar-sept30-yes-protection.yaml
+ExecStart=/home/tstuv/poly/anthropic-exec-bot/.venv/bin/python -m polybot.main run-location-protection --config qatar-sept30-yes-protection.yaml --live
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/home/tstuv/poly/anthropic-exec-bot/logs/location_qatar_live.out

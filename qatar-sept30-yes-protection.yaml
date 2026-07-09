@@ -231,8 +231,13 @@ classifier:
   require_verbatim_quote: true
   include_market_rule_text: true
   if_api_down: "urgent_alert_no_trade"
-  max_escalations_per_hour: 4
-  max_escalations_per_day: 20
+  # Raised 2026-07-09: the point of this bot is to act the instant a senior-level
+  # venue is confirmed, so the classifier budget must never be the reason a
+  # confirming article is dropped to alert-only. At passes:2 these caps allow
+  # ~10 fully-classified articles/hour, 60/day -- the keyword gate already
+  # filters out the war/escalation noise so real throughput stays well under this.
+  max_escalations_per_hour: 20
+  max_escalations_per_day: 120
   max_classifier_errors_per_hour: 3
   classify_feed_summaries: false
 
@@ -263,9 +268,12 @@ monitoring:
     interval_hours: 24
 
 execution:
-  # Dry-run until you review and explicitly ack live via set-location-mode /
-  # ack-location-live -- same safety posture as the July17 bot.
-  dry_run: true
+  # STAGED LIVE 2026-07-09: dry_run is off and the bot runs the real CLOB
+  # backend (--live), but the operator position_mode is held at alert_only so
+  # nothing actually trades. Flip to live with a single command when ready:
+  #   python -m polybot.main set-location-mode --config qatar-sept30-yes-protection.yaml --mode live
+  # (config hash is already acked; revert with --mode alert_only or dry_run: true).
+  dry_run: false
   sell:
     enabled: true
     min_price: 0.03
