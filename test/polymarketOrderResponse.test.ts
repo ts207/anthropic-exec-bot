@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isSuccessfulOrderResponse } from "../src/polymarket.ts";
+import { isSuccessfulOrderResponse } from "../src/valuation/legacy/polymarket.ts";
 
 test("rejected CLOB response is not accepted", () => {
   assert.equal(

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectThresholdMarket, type GammaEvent } from "../src/polymarket.ts";
+import { selectThresholdMarket, type GammaEvent } from "../src/valuation/legacy/polymarket.ts";
 
 test("selects the unique 1.1T market and extracts CLOB fields", () => {
   const event: GammaEvent = {

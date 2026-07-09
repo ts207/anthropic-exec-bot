@@ -4,13 +4,16 @@
 
 - geopolitics position-protection bots under `polybot/iran/`,
   `polybot/location/`, and shared `polybot/core/` infrastructure;
-- TypeScript valuation strategy tooling under `src/strategy/` and
-  `src/valuationStrategy.ts`.
+- TypeScript valuation strategy tooling under `src/valuation/strategy/` and
+  `src/valuation/cli.ts`.
 
 Domain configs live under `configs/geopolitics/` and `configs/valuation/`.
 Operational geopolitics wrappers live under `scripts/geopolitics/`, systemd
 units under `services/`, and shared Polymarket TypeScript bridges under
 `tools/polymarket-ts/`.
+
+See `docs/valuation/runbook.md` for valuation commands and live-readiness
+checks.
 
 ## Install
 

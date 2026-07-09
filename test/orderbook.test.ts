@@ -5,8 +5,8 @@ import {
   createOrderbookCache,
   getBestAsk,
   getFreshBestAsk,
-} from "../src/orderbook.ts";
-import type { SelectedMarket } from "../src/polymarket.ts";
+} from "../src/valuation/legacy/orderbook.ts";
+import type { SelectedMarket } from "../src/valuation/legacy/polymarket.ts";
 
 const market: SelectedMarket = {
   eventSlug: "will-anthropics-valuation-hit-by-june-30",

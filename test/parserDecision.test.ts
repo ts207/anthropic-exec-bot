@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decide } from "../src/decision.ts";
+import { decide } from "../src/valuation/legacy/decision.ts";
 import {
   parseNpmApiResponse,
   parseNpmValuationText,
-} from "../src/npmParser.ts";
+} from "../src/valuation/legacy/npmParser.ts";
 
 test("parser below threshold decides NO", () => {
   const parsed = parseNpmValuationText(`

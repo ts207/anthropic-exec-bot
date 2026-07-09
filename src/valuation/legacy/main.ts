@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { decide } from "./decision.ts";
 import { loadConfig } from "./config.ts";
-import { appendJsonl } from "./logging.ts";
+import { appendJsonl } from "../logging.ts";
 import { watchNpmUntilValuation } from "./npmWatcher.ts";
 import { getFreshBestAsk, subscribeOrderbook } from "./orderbook.ts";
 import {
