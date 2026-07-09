@@ -231,15 +231,22 @@ classifier:
   require_verbatim_quote: true
   include_market_rule_text: true
   if_api_down: "urgent_alert_no_trade"
-  # Raised 2026-07-09: the point of this bot is to act the instant a senior-level
-  # venue is confirmed, so the classifier budget must never be the reason a
-  # confirming article is dropped to alert-only. At passes:2 these caps allow
-  # ~10 fully-classified articles/hour, 60/day -- the keyword gate already
-  # filters out the war/escalation noise so real throughput stays well under this.
-  max_escalations_per_hour: 20
-  max_escalations_per_day: 120
+  # Raised again 2026-07-09: with classify_feed_summaries on (Reuters/Dawn wire
+  # summaries now classify) and evolving war liveblogs re-classifying on change,
+  # the budget must not be the reason a real confirmation is dropped. At passes:2
+  # these caps allow ~20 fully-classified articles/hour, 120/day; the keyword
+  # gate + the listing-delta guard (only re-classify a liveblog when the NEW
+  # lines themselves name a venue/principal) keep real throughput well under this.
+  max_escalations_per_hour: 40
+  max_escalations_per_day: 240
   max_classifier_errors_per_hour: 3
-  classify_feed_summaries: false
+  # Enabled 2026-07-09 to close the wire blind spot: Reuters/Dawn resolve to
+  # promoted_feed_summary (publisher blocks full-text fetch), and with this off
+  # they were alerted but NEVER classified -- so a wire confirmation of a
+  # senior-level round elsewhere could not fire the protective exit/rotate.
+  # Trades off thin-summary noise, still gated by 2-pass agreement + wire-tier
+  # source_tier + verbatim quote_must_match_article_text.
+  classify_feed_summaries: true
 
 time_decay:
   enabled: true

@@ -17,6 +17,14 @@ _MEETING_TERMS = (
     "round",
     "dialogue",
     "summit",
+    # "convene/convened" is the exact qualifying verb in the resolution rules
+    # ("formally convened senior-level round"); without it a headline like
+    # "US and Iran to convene in Doha" (no talks/round/meeting word) would fail
+    # the gate and never be seen.
+    "convene",
+    "convened",
+    "convenes",
+    "convening",
 )
 _LOCATION_CONTEXT_TERMS = (
     "venue",
@@ -39,12 +47,22 @@ _CITY_ALIASES = {
 # a venue at all -- so these escalate the same way a location term does,
 # not just as a location-context fallback.
 _SENIOR_OFFICIAL_TERMS = {
+    # US side
     "witkoff",
     "kushner",
     "vance",
+    "rubio",
+    "barrack",
+    # Iran side
     "araqchi",
     "ghalibaf",
     "gharibabadi",
+    "larijani",
+    "ravanchi",
+    "takht-ravanchi",
+    # IAEA / nuclear-file mediator whose named involvement often signals a
+    # formally convened process
+    "grossi",
 }
 _COLLAPSE_TERMS = (
     "no meeting",

@@ -257,7 +257,22 @@ def _apollo_post_text(state: dict, url: str) -> str | None:
     return None
 
 
+def _normalize_fetch_url(url: str) -> str:
+    """dawn.com returns 403 for slugged article URLs (/news/<id>/<slug>) to
+    non-browser clients but 200 for the bare /news/<id> form, so truncate Dawn
+    article paths to the numeric id. Without this Dawn never fetches to full
+    text and stays a promoted_feed_summary (never classified)."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host == "dawn.com" or host.endswith(".dawn.com"):
+        match = re.match(r"(/news/\d+)(?:/.*)?$", parsed.path)
+        if match:
+            return parsed._replace(path=match.group(1), query="", fragment="").geturl()
+    return url
+
+
 def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
+    url = _normalize_fetch_url(url)
     response = requests.get(url, headers={"User-Agent": user_agent}, timeout=20)
     response.raise_for_status()
     markup = response.text
