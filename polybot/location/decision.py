@@ -39,15 +39,17 @@ _AMBIGUOUS_DELAY_TERMS = ("postpone", "paused", "pause", "delay", "on hold", "su
 
 @dataclass(frozen=True)
 class LocationDecision:
-    action: str  # NO_ACTION | ALERT_ONLY | ROTATE_YES | EXIT_YES_ONLY | TRIM_YES
+    action: str  # NO_ACTION | ALERT_ONLY | ROTATE_YES | EXIT_YES_ONLY | TRIM_YES | ENTER_YES
     level: str
     reason: str
-    target_outcome: str | None = None  # outcome name to rotate into, only set for ROTATE_YES
+    target_outcome: str | None = None  # outcome name to buy into, only set for ROTATE_YES/ENTER_YES
     factors: LocationSignal | None = None
 
 
-def final_decision(config: LocationBotConfig, factors: LocationSignal) -> LocationDecision:
-    held = config.event.held_location
+def final_decision(config: LocationBotConfig, factors: LocationSignal, held: str | None = None) -> LocationDecision:
+    # `held` is the LIVE holding (from HoldingsStore) when the caller has one;
+    # the config value is only the initial default before any entry/rotation.
+    held = held if held is not None else config.event.held_location
 
     if not factors.source_is_trusted:
         return LocationDecision("ALERT_ONLY", factors.level, "source_not_trusted", factors=factors)
@@ -106,6 +108,64 @@ def final_decision(config: LocationBotConfig, factors: LocationSignal) -> Locati
     return LocationDecision("EXIT_YES_ONLY", "4B", f"confirmed_non_held_location_not_rotated:{location}", factors=factors)
 
 
+def entry_decision(config: LocationBotConfig, factors: LocationSignal) -> LocationDecision:
+    """Decision table for a FLAT bot (no held YES leg).
+
+    The only trade action this can produce is ENTER_YES on a configured entry
+    target, at the same evidence bar as a rotation buy: trusted tier-one
+    source, qualifying senior round, confirmed_scheduled or better. Everything
+    weaker alerts; everything irrelevant no-ops. There is nothing to protect
+    while flat, so no sell action ever fires from here.
+    """
+    if not factors.source_is_trusted:
+        return LocationDecision("ALERT_ONLY", factors.level, "source_not_trusted", factors=factors)
+
+    location = factors.confirmed_location
+    strong = factors.evidence_strength in STRONG_EVIDENCE
+    tier_one = factors.source_tier in TIER_ONE_SOURCES
+
+    if location == "no_meeting":
+        # Checked before the senior-round gate for the same reason as in
+        # final_decision. Flat means a collapse costs us nothing, but the
+        # "no meeting" leg itself can be a configured entry target: a
+        # tier-one confirmed collapse is then a buyable YES on that leg.
+        target = config.outcome("no_meeting")
+        if (
+            config.entry.enabled
+            and target is not None
+            and target.name in config.entry_target_names()
+            and tier_one
+            and factors.evidence_strength in NO_MEETING_EVIDENCE
+        ):
+            return LocationDecision("ENTER_YES", "4B", "confirmed_location:no_meeting", target_outcome=target.name, factors=factors)
+        return LocationDecision("ALERT_ONLY", factors.level, "no_meeting_reported_while_flat", factors=factors)
+
+    if factors.round_status == "technical_only" or not factors.qualifies_as_senior_round:
+        return LocationDecision("NO_ACTION", factors.level, "technical_or_non_qualifying", factors=factors)
+
+    if location in {"none", "unclear", ""}:
+        return LocationDecision("NO_ACTION", factors.level, "no_location_signal", factors=factors)
+
+    if not strong or not tier_one:
+        return LocationDecision("ALERT_ONLY", factors.level, f"entry_signal_not_yet_confirmed:{location}", factors=factors)
+
+    if not config.entry.enabled:
+        return LocationDecision("ALERT_ONLY", factors.level, f"entry_disabled_confirmed_location:{location}", factors=factors)
+
+    target = config.outcome(location)
+    if target is None:
+        # A real, confirmed venue we haven't wired up (or "other_specific"):
+        # nothing to buy safely -- alert so the operator can act manually.
+        return LocationDecision("ALERT_ONLY", factors.level, f"confirmed_location_not_configured:{location}", factors=factors)
+    if target.name not in config.entry_target_names():
+        return LocationDecision("ALERT_ONLY", factors.level, f"entry_target_not_allowed:{location}", factors=factors)
+    if not factors.final_decision_announced:
+        # Opening a NEW position is held to a stricter bar than defending an
+        # existing one: a confirmed-but-not-final venue can still shift.
+        return LocationDecision("ALERT_ONLY", factors.level, f"entry_venue_not_final:{location}", factors=factors)
+    return LocationDecision("ENTER_YES", "4B", f"confirmed_location:{location}", target_outcome=target.name, factors=factors)
+
+
 def _is_unambiguous_collapse(factors: LocationSignal) -> bool:
     """Fast-path check for a genuine, tier-one-sourced no-meeting collapse.
 
@@ -124,26 +184,41 @@ def _is_unambiguous_collapse(factors: LocationSignal) -> bool:
     return not any(term in quote for term in _AMBIGUOUS_DELAY_TERMS)
 
 
-def classify_agreement(config: LocationBotConfig, passes: list[LocationSignal]) -> LocationDecision:
+def classify_agreement(
+    config: LocationBotConfig,
+    passes: list[LocationSignal],
+    *,
+    held: str | None = None,
+    flat: bool = False,
+) -> LocationDecision:
     """Require multi-pass classifier agreement before any live trade action.
 
     A single classifier call is noisy on exactly the wording this market is
     settled on (technical vs. senior-level); requiring N passes to agree on
     the decision-relevant fields before acting on ROTATE_YES/EXIT_YES_ONLY/
-    TRIM_YES catches a stray misread instead of trading on it.
+    TRIM_YES/ENTER_YES catches a stray misread instead of trading on it.
 
     Exception: a genuine no-meeting collapse (see _is_unambiguous_collapse)
     is allowed to fast-path on the very first pass alone -- waiting for a
     second pass to agree on a confirmed collapse only delays protecting the
-    position against a real, already-confirmed loss scenario.
+    position against a real, already-confirmed loss scenario. The fast path
+    never applies while flat: with nothing held there is no loss to race,
+    and an entry (buying the no-meeting leg) must meet the full agreement bar
+    like any other new position.
     """
+
+    def decide(signal: LocationSignal) -> LocationDecision:
+        if flat:
+            return entry_decision(config, signal)
+        return final_decision(config, signal, held=held)
+
     if not passes:
         return LocationDecision("ALERT_ONLY", "3", "classifier_unavailable")
     first = passes[0]
-    if _is_unambiguous_collapse(first):
-        return final_decision(config, first)
+    if _is_unambiguous_collapse(first) and not flat:
+        return decide(first)
     if len(passes) == 1:
-        return final_decision(config, first)
+        return decide(first)
     differing = sorted(
         {
             field
@@ -154,7 +229,7 @@ def classify_agreement(config: LocationBotConfig, passes: list[LocationSignal]) 
     )
     if differing:
         return LocationDecision("ALERT_ONLY", "3", f"classifier_pass_disagreement:{','.join(differing)}", factors=first)
-    return final_decision(config, first)
+    return decide(first)
 
 
 def time_decay_decision(config: LocationBotConfig, today: date | None = None) -> LocationDecision:

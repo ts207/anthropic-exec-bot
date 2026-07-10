@@ -24,14 +24,19 @@ from polybot.core.verifier import quote_in_article
 
 from .classifier import build_location_classifier
 from .config import LocationBotConfig, load_location_config
-from .decision import LocationDecision, classify_agreement, final_decision, time_decay_decision
+from .decision import LocationDecision, classify_agreement, entry_decision, final_decision, time_decay_decision
 from .executor import TERMINAL_STATES, LocationExecutor
+from .holdings import HoldingsStore
 from .market_verifier import verify_all_outcomes, verify_location_event
 from .keyword_gate import should_escalate_location_article
 
 
 PROMOTED_FEED_SUMMARY_AUTO_TRADE_DOMAINS = {"reuters.com", "apnews.com", "afp.com"}
 LOCATION_EXECUTION_STATES = {"TRIMMED", "EXITED", "ROTATED", "FLIP_INCOMPLETE"}
+# ENTER_YES deliberately excluded from LOCATION_EXECUTION_STATES/max_executions:
+# entries are capped separately by entry.max_entries, so an entry never
+# consumes the execution budget reserved for defending the resulting position.
+TRADE_ACTIONS = {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES", "ENTER_YES"}
 _ALERT_ONLY_STARTUP_BLOCKERS = {"operator_mode_alert_only"}
 
 
@@ -60,9 +65,17 @@ def location_execution_count(store: StateStore) -> int:
     return count
 
 
+def _config_holdings(config: LocationBotConfig) -> HoldingsStore:
+    # Mirror of the executor's _effective_store dry-run isolation, for command
+    # paths that need the live holding before a bot/executor exists.
+    data_dir = config.data_dir / "dry_run" if config.execution.dry_run else config.data_dir
+    return HoldingsStore(data_dir, default_held=config.event.held_location or None)
+
+
 def inspect_location_command(config_path: Path) -> int:
     config = load_location_config(config_path)
-    held = config.held_outcome()
+    holdings = _config_holdings(config)
+    held = config.outcome(holdings.held_location() or "")
     result: dict[str, Any] = {
         "config": str(config_path),
         "event": {
@@ -71,12 +84,24 @@ def inspect_location_command(config_path: Path) -> int:
             "deadline_date": config.event.deadline_date,
             "held_location": config.event.held_location,
         },
-        "held_outcome": {
-            "name": held.name,
-            "label": held.label,
-            "condition_id": held.condition_id,
-            "yes_token_id": held.yes_token_id,
-            "no_token_id": held.no_token_id,
+        "holdings": holdings.record().as_dict(),
+        "held_outcome": (
+            {
+                "name": held.name,
+                "label": held.label,
+                "condition_id": held.condition_id,
+                "yes_token_id": held.yes_token_id,
+                "no_token_id": held.no_token_id,
+            }
+            if held is not None
+            else None
+        ),
+        "entry": {
+            "enabled": config.entry.enabled,
+            "targets": sorted(config.entry_target_names()),
+            "usd_budget": config.entry.usd_budget,
+            "max_price": config.entry.max_price,
+            "max_entries": config.entry.max_entries,
         },
         "rotation_targets": [o.name for o in config.rotation_targets()],
         "all_outcomes": [o.name for o in config.outcomes],
@@ -111,22 +136,34 @@ def _location_preflight_result(
     adapter: TradingAdapter,
     verification: Any | None = None,
 ) -> dict[str, Any]:
-    held = config.held_outcome()
+    holdings = _config_holdings(config)
+    held = config.outcome(holdings.held_location() or "")
     gate = OperatorGate(config_path, config)
     status = gate.status(live_requested=live_flag)
     result: dict[str, Any] = {
         "status": "blocked" if status.blockers else "ok",
         "operator": status.as_dict(),
         "config": str(config_path),
-        "held_outcome": held.name,
+        "held_outcome": held.name if held is not None else None,
+        "holdings": holdings.record().as_dict(),
+        "entry": {
+            "enabled": config.entry.enabled,
+            "targets": sorted(config.entry_target_names()),
+            "usd_budget": config.entry.usd_budget,
+            "max_price": config.entry.max_price,
+            "max_entries": config.entry.max_entries,
+        },
         "execution_backend": live_backend_name() if live_flag else "dry_run",
     }
-    try:
-        position = adapter.query_live_position(held.yes_token_id, held.no_token_id)
-        result["live_position"] = {"yes_shares": position.yes_shares, "no_shares": position.no_shares}
-    except Exception as exc:
-        result["live_position_error"] = str(exc)
-        status.blockers.append("live_position_query_failed")
+    if held is not None:
+        try:
+            position = adapter.query_live_position(held.yes_token_id, held.no_token_id)
+            result["live_position"] = {"yes_shares": position.yes_shares, "no_shares": position.no_shares}
+        except Exception as exc:
+            result["live_position_error"] = str(exc)
+            status.blockers.append("live_position_query_failed")
+    elif not config.entry.enabled:
+        status.blockers.append("flat_without_entry_enabled")
     try:
         verification = verification or verify_location_event(config)
         verify_all_outcomes(config, verification, require_tradeable=live_flag)
@@ -181,13 +218,15 @@ def smoke_location_classifier_command(
         raw_text=text or "",
         hash=f"smoke:{hash(text or '')}",
     )
+    holdings = _config_holdings(config)
+    held = holdings.held_location()
     classifier = build_location_classifier(config)
     try:
-        factors = classifier.classify(article, config.event.resolution_rules)
+        factors = classifier.classify(article, config.event.resolution_rules, held_location=held or "")
     except Exception as exc:
         print(json.dumps({"article": article.__dict__, "ok": False, "error": str(exc)}, indent=2, sort_keys=True))
         return 1
-    decision = final_decision(config, factors)
+    decision = entry_decision(config, factors) if held is None else final_decision(config, factors, held=held)
     print(
         json.dumps(
             {
@@ -216,15 +255,30 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
         raise SystemExit("execution.dry_run=false requires --live")
     if live_flag and config.execution.dry_run:
         raise SystemExit("--live requires execution.dry_run=false")
+    holdings = _config_holdings(config)
+    held_name = holdings.held_location()
+    if held_name is None and not config.entry.enabled:
+        raise SystemExit("holdings are flat and entry is disabled; nothing to protect or enter")
+    if held_name is not None and config.outcome(held_name) is None:
+        raise SystemExit(f"live holding {held_name!r} is not in configured outcomes; refusing to run")
     verification = verify_location_event(config)
     verify_all_outcomes(config, verification, require_tradeable=live_flag)
     adapter: TradingAdapter
     if live_flag:
-        held = config.held_outcome()
-        held_verification = verification.outcomes.get(held.name)
-        if held_verification is None or not held_verification.tradeable:
-            raise SystemExit("held outcome market is not active/open/accepting orders; refusing live execution")
-        adapter = _live_adapter(tick_size=held_verification.tick_size, neg_risk=held_verification.neg_risk)
+        # The markets the bot may actually trade first: the held leg when
+        # holding, otherwise every configured entry target.
+        critical = [config.outcome(held_name)] if held_name else config.entry_targets()
+        critical_verified = []
+        for outcome in critical:
+            if outcome is None:
+                continue
+            outcome_verification = verification.outcomes.get(outcome.name)
+            if outcome_verification is None or not outcome_verification.tradeable:
+                raise SystemExit(f"{outcome.name} market is not active/open/accepting orders; refusing live execution")
+            critical_verified.append(outcome_verification)
+        if not critical_verified:
+            raise SystemExit("no tradeable held or entry-target market; refusing live execution")
+        adapter = _live_adapter(tick_size=critical_verified[0].tick_size, neg_risk=critical_verified[0].neg_risk)
     else:
         adapter = DryRunTradingAdapter()
     gate = OperatorGate(config_path, config)
@@ -266,6 +320,7 @@ class LocationProtectionBot:
         self.classifier = build_location_classifier(config)
         self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
         self.executor = LocationExecutor(config, self.store, self.notifier, adapter)
+        self.holdings = self.executor.holdings
         self.operator_gate = operator_gate
         self.live_requested = live_requested
         self._monitoring_books: dict[str, BookCache] = {}
@@ -277,9 +332,12 @@ class LocationProtectionBot:
             return []
         self._process_monitoring()
         decisions: list[LocationDecision] = []
-        decay = time_decay_decision(self.config)
-        if decay.action != "NO_ACTION" and self._decay_still_actionable(decay):
-            decisions.append(self._execute_if_allowed(decay, _synthetic_article(decay.reason)))
+        if self.holdings.held_location() is not None:
+            # Time decay only applies to a held position; a flat bot has
+            # nothing to trim or exit on the calendar.
+            decay = time_decay_decision(self.config)
+            if decay.action != "NO_ACTION" and self._decay_still_actionable(decay):
+                decisions.append(self._execute_if_allowed(decay, _synthetic_article(decay.reason)))
         for url in self.config.sources.poll_urls:
             for article in self._fetch_poll_articles(url):
                 if not self.article_store.store(article):
@@ -378,10 +436,15 @@ class LocationProtectionBot:
             self._log_decision(article, decision)
             self.notifier.notify("Location classifier unavailable or failed; no trade", error=str(exc))
             return decision
+        # Route on the LIVE holding: a flat bot can only produce an entry, a
+        # holding bot only protection actions on what it actually holds.
+        held = self.holdings.held_location()
         if self.config.classifier.require_pass_agreement:
-            decision = classify_agreement(self.config, passes)
+            decision = classify_agreement(self.config, passes, held=held, flat=held is None)
+        elif held is None:
+            decision = entry_decision(self.config, passes[0])
         else:
-            decision = final_decision(self.config, passes[0])
+            decision = final_decision(self.config, passes[0], held=held)
         decision = self._verify_quote_or_alert(decision, article)
         decision = self._enforce_source_policy(article, decision)
         decision = self._enforce_execution_policy(decision)
@@ -393,7 +456,7 @@ class LocationProtectionBot:
     def _verify_quote_or_alert(self, decision: LocationDecision, article: Article) -> LocationDecision:
         if decision.factors is None:
             return decision
-        is_trade_action = decision.action in {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}
+        is_trade_action = decision.action in TRADE_ACTIONS
         requires_quote = self.config.safety.quote_must_match_article_text and is_trade_action
         if not requires_quote and decision.level not in {"4A", "4B"}:
             return decision
@@ -411,7 +474,7 @@ class LocationProtectionBot:
         return promoted
 
     def _enforce_source_policy(self, article: Article, decision: LocationDecision) -> LocationDecision:
-        if decision.action not in {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}:
+        if decision.action not in TRADE_ACTIONS:
             return decision
         if article.source_kind in {"feed", "promoted_feed_summary"} and not self.config.sources.allow_feed_auto_trade:
             return LocationDecision("ALERT_ONLY", "3", "feed_item_auto_trade_disabled", decision.target_outcome, decision.factors)
@@ -438,19 +501,31 @@ class LocationProtectionBot:
         return decision
 
     def _enforce_execution_policy(self, decision: LocationDecision) -> LocationDecision:
-        if decision.action not in {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}:
+        if decision.action not in TRADE_ACTIONS:
             return decision
         if not self.config.trigger.trusted_single_source_execution:
             return LocationDecision("ALERT_ONLY", "3", "single_source_execution_disabled", decision.target_outcome, decision.factors)
         if not _level_meets_threshold(decision.level, self.config.trigger.auto_execute_level):
             return LocationDecision("ALERT_ONLY", "3", "below_auto_execute_level", decision.target_outcome, decision.factors)
-        if self.config.safety.max_executions <= 0:
-            return LocationDecision("ALERT_ONLY", "3", "max_executions_zero", decision.target_outcome, decision.factors)
-        execution_count = location_execution_count(self.store)
-        if execution_count >= self.config.safety.max_executions:
-            return LocationDecision(
-                "ALERT_ONLY", "3", f"max_executions_reached:{execution_count}", decision.target_outcome, decision.factors
-            )
+        if decision.action == "ENTER_YES":
+            # Entries are budgeted separately from protection executions so an
+            # entry can never consume the execution allowance needed to later
+            # defend the position it just opened.
+            if not self.config.entry.enabled:
+                return LocationDecision("ALERT_ONLY", "3", "entry_disabled", decision.target_outcome, decision.factors)
+            entry_count = self.executor.entry_count()
+            if entry_count >= self.config.entry.max_entries:
+                return LocationDecision(
+                    "ALERT_ONLY", "3", f"max_entries_reached:{entry_count}", decision.target_outcome, decision.factors
+                )
+        else:
+            if self.config.safety.max_executions <= 0:
+                return LocationDecision("ALERT_ONLY", "3", "max_executions_zero", decision.target_outcome, decision.factors)
+            execution_count = location_execution_count(self.store)
+            if execution_count >= self.config.safety.max_executions:
+                return LocationDecision(
+                    "ALERT_ONLY", "3", f"max_executions_reached:{execution_count}", decision.target_outcome, decision.factors
+                )
         market_block = self._market_verification_block_reason()
         if market_block is not None:
             return LocationDecision("ALERT_ONLY", "3", market_block, decision.target_outcome, decision.factors)
@@ -567,9 +642,13 @@ class LocationProtectionBot:
         price_config = self.config.monitoring.price_alerts
         if not price_config.enabled or not price_config.thresholds:
             return
-        outcome = self.config.outcome(price_config.outcome or self.config.event.held_location)
+        outcome_name = price_config.outcome or (self.holdings.held_location() or "")
+        if not outcome_name:
+            log_event("location_price_alert_skip", reason="flat_and_no_outcome_configured")
+            return
+        outcome = self.config.outcome(outcome_name)
         if outcome is None:
-            log_event("location_price_alert_skip", reason="outcome_not_found", outcome=price_config.outcome)
+            log_event("location_price_alert_skip", reason="outcome_not_found", outcome=outcome_name)
             return
         bid, ask, quote_source = self._price_alert_quote(outcome.yes_token_id)
         price = _monitor_price(bid, ask)
@@ -686,22 +765,29 @@ class LocationProtectionBot:
         interval_seconds = max(1.0, heartbeat.interval_hours * 3600.0)
         if last_sent is not None and (now - last_sent).total_seconds() < interval_seconds:
             return
-        held = self.config.held_outcome()
-        bid = self.executor.adapter.yes_best_bid(held.yes_token_id)
-        ask = self.executor.adapter.yes_best_ask(held.yes_token_id)
+        held = self.executor.held_outcome()
+        bid = self.executor.adapter.yes_best_bid(held.yes_token_id) if held is not None else None
+        ask = self.executor.adapter.yes_best_ask(held.yes_token_id) if held is not None else None
         budget = self.classifier_budget.status(self.config.classifier)
         current_state = self.store.current()
         operator_status = self.operator_gate.status(live_requested=self.live_requested).as_dict() if self.operator_gate else None
         position_payload: dict[str, Any] = {}
-        try:
-            position = self.executor.adapter.query_live_position(held.yes_token_id, held.no_token_id)
-            position_payload = {"held_yes_shares": position.yes_shares, "held_no_shares": position.no_shares}
-        except Exception as exc:
-            position_payload = {"position_query_error": str(exc)}
+        if held is not None:
+            try:
+                position = self.executor.adapter.query_live_position(held.yes_token_id, held.no_token_id)
+                position_payload = {"held_yes_shares": position.yes_shares, "held_no_shares": position.no_shares}
+            except Exception as exc:
+                position_payload = {"position_query_error": str(exc)}
+        else:
+            position_payload = {
+                "entry_enabled": self.config.entry.enabled,
+                "entry_targets": ",".join(sorted(self.config.entry_target_names())),
+                "entry_count": self.executor.entry_count(),
+            }
         market_verification = self._monitoring_state().get("market_verification")
         self.notifier.notify(
             "Location protection heartbeat",
-            held_outcome=held.label,
+            held_outcome=held.label if held is not None else "flat",
             dry_run=self.config.execution.dry_run,
             execution_backend=live_backend_name() if self.live_requested else "dry_run",
             current_state=current_state.state if current_state else None,
@@ -716,7 +802,7 @@ class LocationProtectionBot:
         )
         state["heartbeat"] = {"last_sent_at": now.isoformat()}
         self._write_monitoring_state(state)
-        log_event("location_heartbeat_sent", held_outcome=held.name, yes_best_bid=bid, yes_best_ask=ask)
+        log_event("location_heartbeat_sent", held_outcome=held.name if held is not None else None, yes_best_bid=bid, yes_best_ask=ask)
 
     def _monitoring_state_path(self) -> Path:
         return self.store.data_dir / "monitoring.json"
@@ -768,7 +854,7 @@ class LocationProtectionBot:
         log_event("location_classifier_attempt", **telemetry)
         if hasattr(self.classifier, "last_usage"):
             setattr(self.classifier, "last_usage", None)
-        factors = self.classifier.classify(article, context)
+        factors = self.classifier.classify(article, context, held_location=self.holdings.held_location() or "")
         usage = getattr(self.classifier, "last_usage", None)
         if isinstance(usage, dict):
             telemetry["usage"] = usage

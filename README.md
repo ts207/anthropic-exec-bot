@@ -2,8 +2,15 @@
 
 `polybot` now has two distinct product areas:
 
-- geopolitics position-protection bots under `polybot/iran/`,
-  `polybot/location/`, and shared `polybot/core/` infrastructure;
+- geopolitics position bots under `polybot/iran/`,
+  `polybot/location/`, and shared `polybot/core/` infrastructure.
+  The location bot supports automated position ENTRY as well as protection:
+  with `entry.enabled` and an empty `event.held_location` it starts flat,
+  buys a configured entry target's YES when a trusted tier-one source
+  confirms a qualifying senior round there, records the holding in
+  `data_dir/holdings.json`, and then defends the entered leg with the same
+  protection machinery (see `docs/geopolitics/location-bot-spec.md` and
+  `configs/geopolitics/location-entry.example.yaml`);
 - TypeScript valuation strategy tooling under `src/valuation/strategy/` and
   `src/valuation/cli.ts`.
 

@@ -59,7 +59,9 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 class LocationClassifierProtocol(Protocol):
-    def classify(self, article: Article, market_rule_text: str) -> LocationSignal:
+    # held_location is the LIVE holding: None means "use the config default",
+    # empty string means explicitly flat (entry mode, or after an exit).
+    def classify(self, article: Article, market_rule_text: str, held_location: str | None = None) -> LocationSignal:
         ...
 
 
@@ -69,9 +71,9 @@ class RuleBasedFixtureLocationClassifier:
     def __init__(self, config: LocationBotConfig):
         self.config = config
 
-    def classify(self, article: Article, market_rule_text: str) -> LocationSignal:
+    def classify(self, article: Article, market_rule_text: str, held_location: str | None = None) -> LocationSignal:
         text = f"{article.title}\n{article.raw_text}".lower()
-        held = self.config.event.held_location
+        held = self.config.event.held_location if held_location is None else held_location
         tracked_names = {o.name: o.label.lower() for o in self.config.outcomes}
         technical = any(
             term in text
@@ -139,8 +141,8 @@ class RuleBasedFixtureLocationClassifier:
         strength = "confirmed_scheduled" if confirmed not in {"none", "no_meeting"} else ("denied" if confirmed == "no_meeting" else "speculative")
         status = "scheduled" if confirmed not in {"none", "no_meeting"} else ("technical_only" if technical else ("none" if no_meeting else "unclear"))
         trusted = article.domain in {"reuters.com", "apnews.com", "afp.com", "aljazeera.com", "dawn.com"}
-        would_yes = confirmed == held
-        would_no = confirmed not in {"none", held}
+        would_yes = bool(held) and confirmed == held
+        would_no = bool(held) and confirmed not in {"none", held}
         level = "4A" if confirmed != "none" and trusted else "1"
         quote = article.raw_text.split(".")[0].strip() if article.raw_text else ""
         return LocationSignal(
@@ -176,10 +178,10 @@ class LLMLocationClassifier:
         self._cli_runner = cli_runner
         self.last_usage: dict[str, Any] | None = None
 
-    def classify(self, article: Article, market_rule_text: str) -> LocationSignal:
+    def classify(self, article: Article, market_rule_text: str, held_location: str | None = None) -> LocationSignal:
         self.last_usage = None
         provider = self.config.provider.lower()
-        prompt = _prompt(article, market_rule_text, self.bot_config)
+        prompt = _prompt(article, market_rule_text, self.bot_config, held_location=held_location)
         if provider == "openai":
             raw = self._openai(prompt)
         elif provider == "anthropic":
@@ -489,12 +491,14 @@ def _json_object(raw: str) -> dict:
     return parsed
 
 
-def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig) -> str:
+def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig, held_location: str | None = None) -> str:
     all_locations = list(config.outcomes)
     all_location_labels = ", ".join(f'"{o.name}" ({o.label})' for o in all_locations)
     rotation_targets = config.rotation_targets()
     rotation_target_labels = ", ".join(f'"{o.name}" ({o.label})' for o in rotation_targets) or "none"
-    held = config.held_outcome()
+    held_name = config.event.held_location if held_location is None else held_location
+    held = config.outcome(held_name) if held_name else None
+    entry_target_labels = ", ".join(f'"{o.name}" ({o.label})' for o in config.entry_targets()) or "none"
     schema_hint = {
         "source_is_trusted": True,
         "qualifies_as_senior_round": True,
@@ -512,14 +516,25 @@ def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig) 
         "future_expected_formal_location": "configured key for expected future high-level/formal venue, or other_specific, or none",
         "final_decision_announced": True,
     }
+    if held is not None:
+        position_lines = (
+            f"Held position: YES on \"{held.label}\" ({held.name}).\n"
+            f"Configured location keys (use these exact keys in confirmed_location when they match, including the held location): {all_location_labels}.\n"
+            f"Automatic rotation buy targets only: {rotation_target_labels}. A configured non-held location that is not listed here is sell-only.\n"
+            f"If the article confirms the held venue {held.label}, set confirmed_location to \"{held.name}\"; do not use other_specific for the held venue.\n"
+        )
+    else:
+        position_lines = (
+            "Held position: NONE -- the bot is currently flat and holds no leg of this market.\n"
+            f"Configured location keys (use these exact keys in confirmed_location when they match): {all_location_labels}.\n"
+            f"Automatic entry buy targets only: {entry_target_labels}. Confirmation of any other venue is alert-only.\n"
+            "With no held position, set would_resolve_held_location_yes and would_resolve_held_location_no to false.\n"
+        )
     return (
         "Classify this news article for a categorical Polymarket location-prediction market.\n"
         f"Market question: {config.event.question}\n"
         f"Deadline: {config.event.deadline_date}\n"
-        f"Held position: YES on \"{held.label}\" ({held.name}).\n"
-        f"Configured location keys (use these exact keys in confirmed_location when they match, including the held location): {all_location_labels}.\n"
-        f"Automatic rotation buy targets only: {rotation_target_labels}. A configured non-held location that is not listed here is sell-only.\n"
-        f"If the article confirms the held venue {held.label}, set confirmed_location to \"{held.name}\"; do not use other_specific for the held venue.\n"
+        + position_lines +
         "Use \"other_specific\" if a real, different, named country is confirmed that is NOT one of the configured location keys above.\n"
         "Use \"no_meeting\" only if credible reporting indicates no qualifying round will occur by the deadline (this resolves every location NO).\n"
         "Use \"none\" if no location is confirmed or implied at all.\n"

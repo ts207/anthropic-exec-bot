@@ -1,0 +1,91 @@
+# Example: automated position ENTRY + defense on a grouped location market.
+#
+# The bot starts FLAT (event.held_location is empty). When a trusted tier-one
+# source confirms a qualifying senior-level round at one of entry.targets, it
+# buys that leg's YES (capped by entry.usd_budget / entry.max_price and the
+# global POLYBOT_MAX_ENTRY_PRICE guardrail), records the holding in
+# data_dir/holdings.json, and from then on defends the entered leg exactly
+# like a pre-held position: news-triggered exits, rotation, and time decay.
+#
+# All existing safety machinery applies to entries too: dry-run is the
+# default, the operator gate must be `live` with the config hash acked, the
+# quote/source/freshness policies gate ENTER_YES like every other trade
+# action, and entry.max_entries caps lifetime entries separately from
+# safety.max_executions (which protects the defense budget).
+#
+# This file is NOT a live config: replace every slug/ID after running
+# inspect-location and reviewing the live event, then pin
+# expected_rule_text_sha256.
+
+event:
+  slug: "REPLACE-with-parent-grouped-event-slug"
+  question: "Where will the next diplomatic US-Iran meeting be by September 30, 2026?"
+  deadline_date: "2026-09-30"
+  # Empty = start flat; requires entry.enabled below. Once the bot enters or
+  # rotates, data_dir/holdings.json overrides this value.
+  held_location: ""
+  expected_rule_text_sha256: ""  # pin after inspect-location review
+  resolution_rules: |
+    Paste the verbatim market resolution text here after review.
+
+outcomes:
+  - name: qatar
+    label: "Qatar"
+    condition_id: "0xREPLACE"
+    yes_token_id: "REPLACE"
+    no_token_id: "REPLACE"
+    rotation_target: true
+  - name: oman
+    label: "Oman"
+    condition_id: "0xREPLACE"
+    yes_token_id: "REPLACE"
+    no_token_id: "REPLACE"
+    rotation_target: true
+
+entry:
+  enabled: true
+  # Only these outcome keys may be auto-bought from flat; confirmation of any
+  # other venue is alert-only. Must not include held_location.
+  targets: ["qatar", "oman"]
+  usd_budget: 100.0
+  max_price: 0.90
+  max_entries: 1
+
+position:
+  max_yes_shares_to_sell: 100000.0
+  max_rotation_usd_to_buy: 500.0
+
+trigger:
+  auto_execute_level: 4
+  trusted_single_source_execution: true
+
+classifier:
+  provider: anthropic
+  model: claude-opus-4-8
+  passes: 2
+  require_pass_agreement: true
+
+execution:
+  dry_run: true
+  sell:
+    enabled: true
+    min_price: 0.03
+  buy_rotation:
+    enabled: true
+    max_price: 0.95
+    usd_budget: 500.0
+
+safety:
+  one_shot: true
+  # Defense budget only -- entries are capped by entry.max_entries instead,
+  # so an entry never consumes the executions needed to protect the position
+  # it just opened. 2 allows e.g. one rotation plus one final exit.
+  max_executions: 2
+  poll_seconds: 30.0
+
+sources:
+  poll_urls: []
+  feed_urls: []
+
+data_dir: data/location-entry-example
+logs_dir: logs

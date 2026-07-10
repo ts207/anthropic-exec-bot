@@ -122,14 +122,17 @@ def verify_location_event(config: LocationBotConfig) -> LocationMarketVerificati
 
 
 def verify_critical_outcomes(config: LocationBotConfig, verification: LocationMarketVerification) -> None:
-    """Fail closed: raise if the held outcome or any active rotation target
-    doesn't verify cleanly against the live Gamma event.
+    """Fail closed: raise if the held outcome, any active rotation target, or
+    any configured entry target doesn't verify cleanly against the live Gamma
+    event.
 
     Long-shot/untracked outcomes are deliberately not required to verify --
     if one of them is ever confirmed the bot only sells the held leg
     (EXIT_YES_ONLY), which doesn't require that outcome's token IDs at all.
     """
-    critical = {config.event.held_location} | {o.name for o in config.rotation_targets()}
+    critical = {o.name for o in config.rotation_targets()} | {o.name for o in config.entry_targets()}
+    if config.event.held_location:
+        critical.add(config.event.held_location)
     problems: list[str] = []
     for name in sorted(critical):
         v = verification.outcomes.get(name)

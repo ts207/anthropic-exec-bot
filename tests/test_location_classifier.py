@@ -1043,7 +1043,7 @@ class _CountingLocationClassifier:
     def __init__(self) -> None:
         self.calls = 0
 
-    def classify(self, article: Article, market_rule_text: str) -> LocationSignal:
+    def classify(self, article: Article, market_rule_text: str, held_location: str | None = None) -> LocationSignal:
         self.calls += 1
         return _signal(confirmed_location="qatar", quote_supporting_trigger="The next round will begin in Qatar.")
 

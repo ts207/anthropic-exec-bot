@@ -32,7 +32,11 @@ class EventConfig:
     slug: str
     question: str
     deadline_date: str  # ISO date the grouped market resolves by
-    held_location: str  # key into outcomes, e.g. "qatar" -- the location currently held YES
+    # Key into outcomes, e.g. "qatar" -- the INITIAL/default location held YES.
+    # Empty string means the bot starts flat; that is only valid with
+    # entry.enabled, and once the bot has entered/rotated/exited, the live
+    # holding in HoldingsStore overrides this value.
+    held_location: str = ""
     resolution_rules: str = ""  # full market resolution-criteria text, fed to the classifier as context
     analyst_context: str = ""  # user's own thesis/background reasoning, fed to the classifier as context
     # Opt-in pin, mirroring polybot.iran.market_verifier's pattern: left blank
@@ -70,6 +74,25 @@ class BuyRotationConfig:
     max_price: float = 0.95
     usd_budget: float = 500.0
     skip_if_above_cap: bool = True
+
+
+@dataclass(frozen=True)
+class EntryConfig:
+    """Automated flat-to-position entry.
+
+    Disabled by default: the bot stays a pure protection bot unless entry is
+    explicitly configured. Entry uses the same evidence bar as a rotation buy
+    (trusted tier-one source, confirmed senior round at a configured venue),
+    and the same operator gate / live ack applies before any real order.
+    """
+
+    enabled: bool = False
+    # Outcome keys eligible for automatic entry; must be a subset of outcomes.
+    targets: list[str] = field(default_factory=list)
+    usd_budget: float = 100.0
+    max_price: float = 0.90
+    # Lifetime cap on entry executions for this position config.
+    max_entries: int = 1
 
 
 @dataclass(frozen=True)
@@ -125,6 +148,7 @@ class LocationBotConfig:
     position: PositionConfig = field(default_factory=PositionConfig)
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+    entry: EntryConfig = field(default_factory=EntryConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     time_decay: TimeDecayConfig = field(default_factory=TimeDecayConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
@@ -149,6 +173,13 @@ class LocationBotConfig:
     def rotation_targets(self) -> list[OutcomeMarket]:
         return [o for o in self.outcomes if o.rotation_target and o.name != self.event.held_location]
 
+    def entry_target_names(self) -> set[str]:
+        return {name.strip().lower().replace(" ", "_") for name in self.entry.targets}
+
+    def entry_targets(self) -> list[OutcomeMarket]:
+        names = self.entry_target_names()
+        return [o for o in self.outcomes if o.name in names]
+
 
 def load_location_config(path: Path) -> LocationBotConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -160,12 +191,13 @@ def load_location_config(path: Path) -> LocationBotConfig:
     outcomes = [OutcomeMarket(**_normalize_outcome(item)) for item in outcomes_raw]
     execution_raw = _section(raw, "execution")
     monitoring_raw = _section(raw, "monitoring")
-    return LocationBotConfig(
+    config = LocationBotConfig(
         event=EventConfig(**_section(raw, "event")),
         outcomes=outcomes,
         position=PositionConfig(**_section(raw, "position")),
         trigger=TriggerConfig(**_section(raw, "trigger")),
         classifier=ClassifierConfig(**_section(raw, "classifier")),
+        entry=EntryConfig(**_section(raw, "entry")),
         execution=ExecutionConfig(
             dry_run=bool(execution_raw.get("dry_run", True)),
             sell=SellConfig(**_section(execution_raw, "sell")),
@@ -182,6 +214,21 @@ def load_location_config(path: Path) -> LocationBotConfig:
         data_dir=Path(str(raw.get("data_dir", "data/location-protection-bot"))),
         logs_dir=Path(str(raw.get("logs_dir", "logs"))),
     )
+    _validate_entry(config)
+    return config
+
+
+def _validate_entry(config: LocationBotConfig) -> None:
+    outcome_names = {o.name for o in config.outcomes}
+    unknown = sorted(config.entry_target_names() - outcome_names)
+    if unknown:
+        raise ValueError(f"entry.targets not found in outcomes: {', '.join(unknown)}")
+    if not config.event.held_location and not config.entry.enabled:
+        raise ValueError("event.held_location is empty and entry is disabled: nothing to protect or enter")
+    if config.entry.enabled and not config.entry.targets:
+        raise ValueError("entry.enabled requires at least one entry.targets outcome key")
+    if config.entry.enabled and config.event.held_location and config.event.held_location in config.entry_target_names():
+        raise ValueError("event.held_location must not be listed in entry.targets (it is already held)")
 
 
 def _normalize_outcome(item: dict[str, Any]) -> dict[str, Any]:
