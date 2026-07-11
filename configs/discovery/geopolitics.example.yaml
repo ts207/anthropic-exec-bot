@@ -1,0 +1,74 @@
+# Market-first geopolitics discovery pipeline configuration.
+#
+# Workflow (each stage is a CLI command; all state lives under data_dir):
+#   1. discover-markets     enumerate active Polymarket events, keep
+#                           geopolitical candidates, build durable context
+#                           records (rules pinned by SHA-256)
+#   2. grade-markets        run the rule/context analyzer, score the 8 quality
+#                           dimensions, assign a state
+#   3. plan-sources         derive per-market source plans from the context
+#   4. scan-opportunities   price eligible outcomes vs estimated probability,
+#                           through the portfolio allocator preview
+#   5. emit-bot-config      render a ready-to-review binary/location executor
+#                           config for one eligible market
+#   6. funnel-report        all -> understandable -> observable -> eligible ->
+#                           mispriced -> executable, plus portfolio exposure
+#
+# Hard safety rules enforced by the pipeline: no rules text -> no trading;
+# discretionary rules -> monitor only; changed rule hash -> analysis dropped
+# and market demoted; unverified token mapping -> review required; no source
+# plan -> no config emission; excessive spread/thin book -> blocked; portfolio
+# caps -> blocked. Emitted configs are dry-run + operator-gated like every
+# hand-written config.
+
+universe:
+  max_events: 300
+  min_liquidity: 500.0
+  min_volume: 1000.0
+  max_days_to_deadline: 365.0
+  # include/exclude keyword and tag lists default to a broad geopolitical
+  # vocabulary; override here to narrow the universe.
+
+scoring:
+  min_rule_text_chars: 200
+  min_clarity_live: 0.75
+  min_clarity_paper: 0.55
+  min_observability_live: 0.7
+  min_observability_paper: 0.5
+  min_automation_live: 0.7
+  max_resolution_risk_live: 0.35
+  min_liquidity_live: 5000.0
+  min_liquidity_paper: 500.0
+  max_spread_live: 0.10
+  max_days_to_deadline_live: 180.0
+  max_markets_per_correlation_group: 2
+
+opportunity:
+  min_edge: 0.05
+  slippage_buffer: 0.01
+  resolution_risk_buffer: 0.02
+  model_uncertainty_buffer: 0.03
+  max_entry_price: 0.90
+  max_spread: 0.15
+  # Operator-supplied probability estimates (market_id -> outcome -> p).
+  # Without an estimate an outcome is reported as no_probability_estimate,
+  # never traded. Forecast paper state can supply these once promoted.
+  probability_estimates: {}
+
+allocator:
+  per_order_usd: 50.0
+  per_market_usd: 100.0
+  per_event_usd: 150.0
+  per_group_usd: 200.0
+  daily_usd: 300.0
+  total_usd: 1000.0
+  max_open_positions: 5
+  max_per_deadline_week_usd: 400.0
+
+classifier:
+  # rule analysis provider: anthropic for real runs, rule_based for offline.
+  provider: anthropic
+  model: claude-opus-4-8
+
+data_dir: data/discovery
+logs_dir: logs

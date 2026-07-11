@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+from typing import Callable, Protocol
+
+from .allocator import AllocationRequest, PortfolioAllocator
+from .config import OpportunityConfig
+from .types import MarketContext, Opportunity, TRADEABLE_STATES
+
+
+class QuoteProviderProtocol(Protocol):
+    def yes_best_ask(self, yes_token_id: str) -> float | None:
+        ...
+
+    def yes_best_bid(self, yes_token_id: str) -> float | None:
+        ...
+
+
+# (market_id, outcome_name) -> (probability, source_label) or None
+ProbabilityLookup = Callable[[str, str], tuple[float, str] | None]
+
+
+def config_probability_lookup(config: OpportunityConfig) -> ProbabilityLookup:
+    def lookup(market_id: str, outcome: str) -> tuple[float, str] | None:
+        market = config.probability_estimates.get(market_id)
+        if not isinstance(market, dict):
+            return None
+        value = market.get(outcome)
+        if value is None:
+            return None
+        return float(value), "config_estimate"
+
+    return lookup
+
+
+def tradable_edge(probability: float, executable_price: float, config: OpportunityConfig) -> float:
+    """The question is never 'is this outcome likely?' -- it is whether the
+    estimated probability beats the executable price by enough to survive
+    costs, resolution risk, and model uncertainty."""
+    return round(
+        probability
+        - executable_price
+        - config.slippage_buffer
+        - config.resolution_risk_buffer
+        - config.model_uncertainty_buffer,
+        4,
+    )
+
+
+def scan_opportunities(
+    contexts: list[MarketContext],
+    config: OpportunityConfig,
+    quotes: QuoteProviderProtocol,
+    allocator: PortfolioAllocator,
+    probability_lookup: ProbabilityLookup | None = None,
+) -> list[Opportunity]:
+    """Evaluate every outcome of every PAPER/LIVE-eligible market against its
+    executable price. Every non-opportunity is still returned with blockers so
+    the funnel report can explain where edge died."""
+    probability_lookup = probability_lookup or config_probability_lookup(config)
+    results: list[Opportunity] = []
+    for context in contexts:
+        if context.state not in TRADEABLE_STATES:
+            continue
+        for outcome in context.outcomes:
+            if not outcome.accepting_orders or outcome.closed:
+                continue
+            estimate = probability_lookup(context.market_id, outcome.name)
+            if estimate is None:
+                results.append(
+                    Opportunity(
+                        market_id=context.market_id,
+                        outcome=outcome.name,
+                        side="YES",
+                        estimated_probability=0.0,
+                        probability_source="none",
+                        executable_price=None,
+                        spread=None,
+                        tradable_edge=None,
+                        blockers=["no_probability_estimate"],
+                    )
+                )
+                continue
+            probability, source = estimate
+            ask = quotes.yes_best_ask(outcome.yes_token_id)
+            bid = quotes.yes_best_bid(outcome.yes_token_id)
+            blockers: list[str] = []
+            spread = round(ask - bid, 4) if ask is not None and bid is not None else None
+            if ask is None:
+                blockers.append("quote_unavailable")
+            else:
+                if ask > config.max_entry_price:
+                    blockers.append(f"price_above_cap:{ask}")
+                if spread is None:
+                    blockers.append("spread_unknown")
+                elif spread > config.max_spread:
+                    blockers.append(f"spread_above_limit:{spread}")
+            edge = tradable_edge(probability, ask, config) if ask is not None else None
+            if edge is not None and edge < config.min_edge:
+                blockers.append(f"edge_below_minimum:{edge}")
+
+            allocation_usd = 0.0
+            if not blockers:
+                request = AllocationRequest(
+                    market_id=context.market_id,
+                    event_slug=context.event_slug,
+                    correlation_group=context.correlation_group or "uncategorized",
+                    deadline_iso=context.deadline_iso,
+                    usd=allocator.config.per_order_usd,
+                )
+                allocation_usd, allocation_blockers = allocator.preview(request)
+                blockers.extend(allocation_blockers)
+
+            results.append(
+                Opportunity(
+                    market_id=context.market_id,
+                    outcome=outcome.name,
+                    side="YES",
+                    estimated_probability=probability,
+                    probability_source=source,
+                    executable_price=ask,
+                    spread=spread,
+                    tradable_edge=edge,
+                    blockers=blockers,
+                    allocation_usd=allocation_usd if not blockers else 0.0,
+                    detail={"state": context.state, "correlation_group": context.correlation_group},
+                )
+            )
+    results.sort(key=lambda item: (item.tradable_edge is None, -(item.tradable_edge or 0.0)))
+    return results

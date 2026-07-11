@@ -82,6 +82,22 @@ def main(argv: list[str] | None = None) -> int:
     run_binary_parser.add_argument("--config", required=True)
     run_binary_parser.add_argument("--live", action="store_true")
 
+    discover_markets_parser = sub.add_parser("discover-markets")
+    discover_markets_parser.add_argument("--config", required=True)
+    grade_markets_parser = sub.add_parser("grade-markets")
+    grade_markets_parser.add_argument("--config", required=True)
+    plan_sources_parser = sub.add_parser("plan-sources")
+    plan_sources_parser.add_argument("--config", required=True)
+    plan_sources_parser.add_argument("--market")
+    scan_opportunities_parser = sub.add_parser("scan-opportunities")
+    scan_opportunities_parser.add_argument("--config", required=True)
+    emit_bot_config_parser = sub.add_parser("emit-bot-config")
+    emit_bot_config_parser.add_argument("--config", required=True)
+    emit_bot_config_parser.add_argument("--market", required=True)
+    emit_bot_config_parser.add_argument("--out")
+    funnel_report_parser = sub.add_parser("funnel-report")
+    funnel_report_parser.add_argument("--config", required=True)
+
     args = parser.parse_args(argv)
     if args.command == "inspect-iran":
         from .iran.runner import inspect_iran_command
@@ -171,6 +187,30 @@ def main(argv: list[str] | None = None) -> int:
         from .binary.runner import run_binary_command
 
         return run_binary_command(Path(args.config), live_flag=args.live)
+    if args.command == "discover-markets":
+        from .discovery.runner import discover_markets_command
+
+        return discover_markets_command(Path(args.config))
+    if args.command == "grade-markets":
+        from .discovery.runner import grade_markets_command
+
+        return grade_markets_command(Path(args.config))
+    if args.command == "plan-sources":
+        from .discovery.runner import plan_sources_command
+
+        return plan_sources_command(Path(args.config), market_id=args.market)
+    if args.command == "scan-opportunities":
+        from .discovery.runner import scan_opportunities_command
+
+        return scan_opportunities_command(Path(args.config))
+    if args.command == "emit-bot-config":
+        from .discovery.runner import emit_bot_config_command
+
+        return emit_bot_config_command(Path(args.config), args.market, out=Path(args.out) if args.out else None)
+    if args.command == "funnel-report":
+        from .discovery.runner import funnel_report_command
+
+        return funnel_report_command(Path(args.config))
     return 2
 
 

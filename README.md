@@ -2,15 +2,26 @@
 
 `polybot` now has two distinct product areas:
 
-- geopolitics position bots under `polybot/iran/`,
-  `polybot/location/`, and shared `polybot/core/` infrastructure.
+- geopolitics position bots under `polybot/iran/`, `polybot/location/`,
+  `polybot/binary/`, and shared `polybot/core/` infrastructure.
   The location bot supports automated position ENTRY as well as protection:
   with `entry.enabled` and an empty `event.held_location` it starts flat,
   buys a configured entry target's YES when a trusted tier-one source
   confirms a qualifying senior round there, records the holding in
   `data_dir/holdings.json`, and then defends the entered leg with the same
   protection machinery (see `docs/geopolitics/location-bot-spec.md` and
-  `configs/geopolitics/location-entry.example.yaml`);
+  `configs/geopolitics/location-entry.example.yaml`).
+  The binary rule bot (`polybot/binary/`) generalizes entry+defense to ANY
+  single YES/NO market: paste the market's verbatim resolution rules into
+  config and the classifier judges every article strictly against them
+  (see `configs/geopolitics/binary-entry.example.yaml`);
+- a market-first discovery pipeline under `polybot/discovery/` that
+  enumerates the live Polymarket universe, builds durable rule/context
+  packages, grades tradeability and ambiguity, derives per-market source
+  plans, prices estimated probability against executable quotes through a
+  portfolio allocator, and emits ready-to-review executor configs
+  (see `docs/geopolitics/market-first-pipeline.md` and
+  `configs/discovery/geopolitics.example.yaml`);
 - TypeScript valuation strategy tooling under `src/valuation/strategy/` and
   `src/valuation/cli.ts`.
 
