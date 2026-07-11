@@ -24,6 +24,9 @@ TRADE_ACTIONS = {
     "EXIT_YES_OPTIONAL_BUY_NO",
     "ROTATE_YES",
     "ENTER_YES",
+    "ENTER_NO",
+    "TRIM_HELD",
+    "EXIT_HELD",
 }
 
 

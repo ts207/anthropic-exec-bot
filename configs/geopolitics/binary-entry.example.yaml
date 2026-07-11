@@ -1,0 +1,100 @@
+# Example: generic rule-driven binary (YES/NO) geopolitics bot with
+# automated entry + defense.
+#
+# Point this at ANY binary Polymarket market: paste the market's verbatim
+# resolution rules below and the classifier judges every article strictly
+# against them -- "qualifying event" always means "an event that satisfies
+# THIS market's YES criteria". No code changes per market.
+#
+# Lifecycle: the bot starts FLAT (market.held_side empty). On a trusted
+# tier-one confirmation of the rule-qualifying event before the deadline it
+# buys YES (entry.side: "NO" instead buys NO on a confirmed foreclosure),
+# records the holding in data_dir/holdings.json, and then defends it:
+# - held YES: exits on a tier-one confirmed foreclosure ("will not happen"),
+#   plus optional calendar time-decay trims/exits with price floors;
+# - held NO: exits (optionally flips to YES, capped by confirmed sale
+#   proceeds) when the qualifying event is confirmed scheduled/underway.
+#
+# All existing safety machinery applies: dry-run default, operator gate +
+# config-hash ack, quote verification, source domain/freshness policy,
+# classifier pass agreement, rule-text SHA pinning, entry.max_entries
+# separate from safety.max_executions, and the global
+# POLYBOT_MAX_ENTRY_PRICE guardrail.
+#
+# This file is NOT a live config: replace the slug, run inspect-binary,
+# review the live rule text, then pin expected_rule_text_sha256.
+
+market:
+  slug: "REPLACE-with-market-or-event-slug"
+  question: "Will the qualifying event happen by September 30, 2026?"
+  # Guards slug resolution: the live market question/slug must contain this.
+  expected_question_contains: ""
+  deadline_date: "2026-09-30"
+  # Empty = start flat; requires entry.enabled below. "YES"/"NO" = initial
+  # holding. Once the bot enters/flips/exits, holdings.json overrides this.
+  held_side: ""
+  expected_rule_text_sha256: ""  # pin after inspect-binary review
+  resolution_rules: |
+    Paste the market's verbatim resolution text here after review. The
+    classifier's ONLY standard for "qualifying" is this text.
+  analyst_context: |
+    Optional: your own thesis/background. Prior context only; the classifier
+    still judges strictly from the article text and the rules above.
+
+entry:
+  enabled: true
+  side: "YES"        # "YES": buy on confirmed qualifying event; "NO": buy on confirmed foreclosure
+  usd_budget: 100.0
+  max_price: 0.90
+  max_entries: 1
+
+position:
+  expected_yes_token_id: ""   # optional pins, verified against Gamma
+  expected_no_token_id: ""
+  max_shares_to_sell: 100000.0
+  max_flip_usd_to_buy: 500.0
+
+trigger:
+  auto_execute_level: 4
+  trusted_single_source_execution: true
+
+classifier:
+  provider: anthropic
+  model: claude-opus-4-8
+  passes: 2
+  require_pass_agreement: true
+
+execution:
+  dry_run: true
+  sell:
+    enabled: true
+    min_price: 0.03
+  flip_buy:
+    enabled: false   # arm to buy the opposite side after a news-triggered exit
+    max_price: 0.95
+    usd_budget: 500.0
+
+time_decay:
+  enabled: false     # held-YES calendar brakes; see location bot docs
+  trim_after_date: ""
+  exit_after_date: ""
+  min_trim_price: 0.0
+  min_exit_price: 0.0
+
+keywords:
+  # Cheap pre-filter before classifier spend: the market's qualifying-event
+  # vocabulary AND its collapse terms. Empty = classify everything.
+  escalate_terms: []
+
+safety:
+  one_shot: true
+  # Defense budget only -- entries are capped by entry.max_entries.
+  max_executions: 2
+  poll_seconds: 30.0
+
+sources:
+  poll_urls: []
+  feed_urls: []
+
+data_dir: data/binary-entry-example
+logs_dir: logs

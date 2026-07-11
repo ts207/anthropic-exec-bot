@@ -57,6 +57,27 @@ def main(argv: list[str] | None = None) -> int:
     run_location_parser.add_argument("--config", required=True)
     run_location_parser.add_argument("--live", action="store_true")
 
+    inspect_binary_parser = sub.add_parser("inspect-binary")
+    inspect_binary_parser.add_argument("--config", required=True)
+    preflight_binary_parser = sub.add_parser("preflight-binary")
+    preflight_binary_parser.add_argument("--config", required=True)
+    preflight_binary_parser.add_argument("--live", action="store_true")
+    ack_binary_live_parser = sub.add_parser("ack-binary-live")
+    ack_binary_live_parser.add_argument("--config", required=True)
+    ack_binary_live_parser.add_argument("--note", default="")
+    set_binary_mode_parser = sub.add_parser("set-binary-mode")
+    set_binary_mode_parser.add_argument("--config", required=True)
+    set_binary_mode_parser.add_argument("--mode", required=True, choices=["off", "alert_only", "dry_run", "live"])
+    smoke_binary_classifier_parser = sub.add_parser("smoke-binary-classifier")
+    smoke_binary_classifier_parser.add_argument("--config", required=True)
+    smoke_binary_classifier_parser.add_argument("--url")
+    smoke_binary_classifier_parser.add_argument("--text")
+    smoke_binary_classifier_parser.add_argument("--title", default="classifier smoke")
+    smoke_binary_classifier_parser.add_argument("--domain", default="reuters.com")
+    run_binary_parser = sub.add_parser("run-binary")
+    run_binary_parser.add_argument("--config", required=True)
+    run_binary_parser.add_argument("--live", action="store_true")
+
     args = parser.parse_args(argv)
     if args.command == "inspect-iran":
         from .iran.runner import inspect_iran_command
@@ -114,6 +135,30 @@ def main(argv: list[str] | None = None) -> int:
         from .location.runner import run_location_command
 
         return run_location_command(Path(args.config), live_flag=args.live)
+    if args.command == "inspect-binary":
+        from .binary.runner import inspect_binary_command
+
+        return inspect_binary_command(Path(args.config))
+    if args.command == "preflight-binary":
+        from .binary.runner import preflight_binary_command
+
+        return preflight_binary_command(Path(args.config), live_flag=args.live)
+    if args.command == "ack-binary-live":
+        from .binary.runner import ack_binary_live_command
+
+        return ack_binary_live_command(Path(args.config), note=args.note)
+    if args.command == "set-binary-mode":
+        from .binary.runner import set_binary_mode_command
+
+        return set_binary_mode_command(Path(args.config), mode=args.mode)
+    if args.command == "smoke-binary-classifier":
+        from .binary.runner import smoke_binary_classifier_command
+
+        return smoke_binary_classifier_command(Path(args.config), url=args.url, text=args.text, title=args.title, domain=args.domain)
+    if args.command == "run-binary":
+        from .binary.runner import run_binary_command
+
+        return run_binary_command(Path(args.config), live_flag=args.live)
     return 2
 
 
