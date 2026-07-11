@@ -26,9 +26,12 @@ from .classifier import build_location_classifier
 from .config import LocationBotConfig, load_location_config
 from .decision import LocationDecision, classify_agreement, entry_decision, final_decision, time_decay_decision
 from .executor import TERMINAL_STATES, LocationExecutor
+from .forecast import ForecastPaperEngine
 from .holdings import HoldingsStore
 from .market_verifier import verify_all_outcomes, verify_location_event
 from .keyword_gate import should_escalate_location_article
+from .runtime import ProcessLock
+from .quotes import PublicClobQuoteAdapter, QuoteAdapter, QuoteOnlyFacade
 
 
 PROMOTED_FEED_SUMMARY_AUTO_TRADE_DOMAINS = {"reuters.com", "apnews.com", "afp.com"}
@@ -103,6 +106,12 @@ def inspect_location_command(config_path: Path) -> int:
             "max_price": config.entry.max_price,
             "max_entries": config.entry.max_entries,
         },
+        "forecast": {
+            "enabled": config.forecast.enabled,
+            "paper_only": config.forecast.paper_only,
+            "prior_probabilities": config.forecast.prior_probabilities,
+            "min_paper_edge": config.forecast.min_paper_edge,
+        },
         "rotation_targets": [o.name for o in config.rotation_targets()],
         "all_outcomes": [o.name for o in config.outcomes],
         "classifier": {"provider": config.classifier.provider, "model": config.classifier.model},
@@ -137,21 +146,37 @@ def _location_preflight_result(
     verification: Any | None = None,
 ) -> dict[str, Any]:
     holdings = _config_holdings(config)
-    held = config.outcome(holdings.held_location() or "")
     gate = OperatorGate(config_path, config)
     status = gate.status(live_requested=live_flag)
+    reconciliation = None
+    if live_flag:
+        try:
+            preflight_executor = LocationExecutor(config, StateStore(holdings.data_dir), TelegramNotifier(), adapter)
+            reconciliation = preflight_executor.reconcile_live_holding()
+            holdings = preflight_executor.holdings
+        except Exception as exc:
+            status.blockers.append("wallet_reconciliation_failed")
+            reconciliation = {"error": str(exc)}
+    held = config.outcome(holdings.held_location() or "")
     result: dict[str, Any] = {
         "status": "blocked" if status.blockers else "ok",
         "operator": status.as_dict(),
         "config": str(config_path),
         "held_outcome": held.name if held is not None else None,
         "holdings": holdings.record().as_dict(),
+        "wallet_reconciliation": reconciliation,
         "entry": {
             "enabled": config.entry.enabled,
             "targets": sorted(config.entry_target_names()),
             "usd_budget": config.entry.usd_budget,
             "max_price": config.entry.max_price,
             "max_entries": config.entry.max_entries,
+        },
+        "forecast": {
+            "enabled": config.forecast.enabled,
+            "paper_only": config.forecast.paper_only,
+            "min_paper_edge": config.forecast.min_paper_edge,
+            "paper_order_usd": config.forecast.paper_order_usd,
         },
         "execution_backend": live_backend_name() if live_flag else "dry_run",
     }
@@ -294,17 +319,34 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
         print(json.dumps(preflight, indent=2, sort_keys=True))
         if _hard_live_startup_blockers(preflight):
             raise SystemExit("live preflight blocked execution; fix blockers or use ack/set-mode commands")
-    bot = LocationProtectionBot(config=config, adapter=adapter, operator_gate=gate, live_requested=live_flag)
-    while True:
-        try:
-            bot.run_once()
-        except Exception as exc:
-            log_event("location_run_once_error", error=str(exc))
+    lock_dir = config.data_dir / "dry_run" if config.execution.dry_run else config.data_dir
+    process_lock = ProcessLock(lock_dir / "location_bot.lock")
+    with process_lock:
+        forecast_adapter: QuoteAdapter = QuoteOnlyFacade(adapter)
+        if config.forecast.enabled and config.execution.dry_run and config.forecast.live_quotes_in_dry_run:
+            forecast_adapter = PublicClobQuoteAdapter(
+                [outcome.yes_token_id for outcome in config.outcomes],
+                refresh_seconds=config.forecast.quote_refresh_seconds,
+            )
+        bot_kwargs: dict[str, Any] = {
+            "config": config,
+            "adapter": adapter,
+            "operator_gate": gate,
+            "live_requested": live_flag,
+        }
+        if config.forecast.enabled:
+            bot_kwargs["forecast_adapter"] = forecast_adapter
+        bot = LocationProtectionBot(**bot_kwargs)
+        while True:
             try:
-                bot.notifier.notify("Location protection polling cycle failed; continuing", error=str(exc))
-            except Exception as notify_exc:
-                log_event("location_notify_failed", error=str(notify_exc))
-        time.sleep(config.safety.poll_seconds)
+                bot.run_once()
+            except Exception as exc:
+                log_event("location_run_once_error", error=str(exc))
+                try:
+                    bot.notifier.notify("Location protection polling cycle failed; continuing", error=str(exc))
+                except Exception as notify_exc:
+                    log_event("location_notify_failed", error=str(notify_exc))
+            time.sleep(config.safety.poll_seconds)
 
 
 def _live_adapter(*, tick_size: str = "0.01", neg_risk: bool = False) -> TradingAdapter:
@@ -312,7 +354,15 @@ def _live_adapter(*, tick_size: str = "0.01", neg_risk: bool = False) -> Trading
 
 
 class LocationProtectionBot:
-    def __init__(self, *, config: LocationBotConfig, adapter: TradingAdapter, operator_gate: OperatorGate | None = None, live_requested: bool = False):
+    def __init__(
+        self,
+        *,
+        config: LocationBotConfig,
+        adapter: TradingAdapter,
+        forecast_adapter: QuoteAdapter | None = None,
+        operator_gate: OperatorGate | None = None,
+        live_requested: bool = False,
+    ):
         self.config = config
         self.store = StateStore(config.data_dir / "dry_run" if config.execution.dry_run else config.data_dir)
         self.article_store = ArticleStore(config.logs_dir / "location_articles.jsonl")
@@ -321,6 +371,12 @@ class LocationProtectionBot:
         self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
         self.executor = LocationExecutor(config, self.store, self.notifier, adapter)
         self.holdings = self.executor.holdings
+        self.forecast = ForecastPaperEngine(
+            config,
+            forecast_adapter or QuoteOnlyFacade(adapter),
+            self.store.data_dir,
+            config.logs_dir,
+        )
         self.operator_gate = operator_gate
         self.live_requested = live_requested
         self._monitoring_books: dict[str, BookCache] = {}
@@ -330,6 +386,12 @@ class LocationProtectionBot:
         if self.operator_gate is not None and self.operator_gate.current_mode() == "off":
             log_event("location_operator_off_cycle_skip")
             return []
+        if self.live_requested and not self.config.execution.dry_run:
+            reconciliation = self.executor.reconcile_live_holding()
+            if reconciliation.get("changed"):
+                log_event("location_wallet_reconciled", **reconciliation)
+        mark_report = self.forecast.mark_cycle()
+        self._notify_forecast_exits(mark_report.get("exits", []))
         self._process_monitoring()
         decisions: list[LocationDecision] = []
         if self.holdings.held_location() is not None:
@@ -436,6 +498,17 @@ class LocationProtectionBot:
             self._log_decision(article, decision)
             self.notifier.notify("Location classifier unavailable or failed; no trade", error=str(exc))
             return decision
+        forecast_report = self.forecast.process(article, passes)
+        if forecast_report.get("opened"):
+            opened = forecast_report["opened"]
+            self.notifier.notify(
+                "Anticipatory forecast paper entry",
+                outcome=opened.get("outcome"),
+                price=opened.get("price"),
+                fair_probability=opened.get("fair_probability"),
+                edge=opened.get("edge_after_buffers"),
+            )
+        self._notify_forecast_exits(forecast_report.get("exits", []))
         # Route on the LIVE holding: a flat bot can only produce an entry, a
         # holding bot only protection actions on what it actually holds.
         held = self.holdings.held_location()
@@ -452,6 +525,16 @@ class LocationProtectionBot:
         if decision.action == "ALERT_ONLY":
             self.notifier.notify("Location protection alert only; no trade", level=decision.level, reason=decision.reason, url=article.url)
         return self._execute_if_allowed(decision, article)
+
+    def _notify_forecast_exits(self, exits: list[dict[str, Any]]) -> None:
+        for closed in exits:
+            self.notifier.notify(
+                "Anticipatory forecast paper exit",
+                outcome=closed.get("outcome"),
+                price=closed.get("price"),
+                pnl=closed.get("pnl"),
+                trigger=closed.get("trigger_kind"),
+            )
 
     def _verify_quote_or_alert(self, decision: LocationDecision, article: Article) -> LocationDecision:
         if decision.factors is None:
@@ -476,6 +559,11 @@ class LocationProtectionBot:
     def _enforce_source_policy(self, article: Article, decision: LocationDecision) -> LocationDecision:
         if decision.action not in TRADE_ACTIONS:
             return decision
+        # Opening risk from a truncated discovery snippet is materially
+        # different from reducing an existing position. Full publisher text or
+        # a first-party full-text feed is required for autonomous entry.
+        if decision.action == "ENTER_YES" and article.source_kind in {"feed", "promoted_feed_summary"}:
+            return LocationDecision("ALERT_ONLY", "3", "entry_requires_full_source_text", decision.target_outcome, decision.factors)
         if article.source_kind in {"feed", "promoted_feed_summary"} and not self.config.sources.allow_feed_auto_trade:
             return LocationDecision("ALERT_ONLY", "3", "feed_item_auto_trade_disabled", decision.target_outcome, decision.factors)
         # A promoted_feed_summary is feed-derived text used when the publisher
@@ -521,7 +609,7 @@ class LocationProtectionBot:
         else:
             if self.config.safety.max_executions <= 0:
                 return LocationDecision("ALERT_ONLY", "3", "max_executions_zero", decision.target_outcome, decision.factors)
-            execution_count = location_execution_count(self.store)
+            execution_count = self.executor.protection_execution_count()
             if execution_count >= self.config.safety.max_executions:
                 return LocationDecision(
                     "ALERT_ONLY", "3", f"max_executions_reached:{execution_count}", decision.target_outcome, decision.factors
@@ -785,6 +873,7 @@ class LocationProtectionBot:
                 "entry_count": self.executor.entry_count(),
             }
         market_verification = self._monitoring_state().get("market_verification")
+        forecast_snapshot = self.forecast.snapshot() if self.config.forecast.enabled else None
         self.notifier.notify(
             "Location protection heartbeat",
             held_outcome=held.label if held is not None else "flat",
@@ -798,6 +887,7 @@ class LocationProtectionBot:
             yes_best_bid=bid,
             yes_best_ask=ask,
             classifier_budget=budget,
+            forecast_paper=forecast_snapshot,
             **position_payload,
         )
         state["heartbeat"] = {"last_sent_at": now.isoformat()}

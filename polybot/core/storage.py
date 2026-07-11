@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ TERMINAL_STATES = {"FLIPPED", "NO_SOLD_YES_SKIPPED", "YES_SOLD_NO_SKIPPED", "EXI
 # Non-terminal states that must survive being overwritten in state.json, because
 # later decisions consult them: TRIMMED gates duplicate trims, and the scheduled
 # hold signal suspends time-decay selling for a window.
-MARKER_STATES = TERMINAL_STATES | {"TRIMMED", "YES_SCHEDULED_HOLD_SIGNAL"}
+MARKER_STATES = TERMINAL_STATES | {"TRIMMED", "YES_SCHEDULED_HOLD_SIGNAL", "ROTATED"}
 
 
 @dataclass(frozen=True)
@@ -66,11 +67,11 @@ class StateStore:
             payload=payload,
         )
         encoded = json.dumps(asdict(record), indent=2, sort_keys=True, default=str)
-        self.state_path.write_text(encoded + "\n", encoding="utf-8")
+        _atomic_text_write(self.state_path, encoded + "\n")
         if state in MARKER_STATES:
-            (self.data_dir / f"{state}.json").write_text(encoded + "\n", encoding="utf-8")
+            _atomic_text_write(self.data_dir / f"{state}.json", encoded + "\n")
         if state == "NO_SOLD_YES_SKIPPED":
-            (self.data_dir / "NO_SOLD.json").write_text(encoded + "\n", encoding="utf-8")
+            _atomic_text_write(self.data_dir / "NO_SOLD.json", encoded + "\n")
         return record
 
 
@@ -78,5 +79,15 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":"), default=str) + "\n")
+
+
+def _atomic_text_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 __all__ = ["MARKER_STATES", "TERMINAL_STATES", "StateRecord", "StateStore", "append_jsonl"]

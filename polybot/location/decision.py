@@ -29,6 +29,8 @@ AGREEMENT_FIELDS = [
     "technical_location",
     "future_expected_formal_location",
     "final_decision_announced",
+    "forecast_target_location",
+    "evidence_direction",
 ]
 
 # Ambiguous language that must NOT appear in the supporting quote for the

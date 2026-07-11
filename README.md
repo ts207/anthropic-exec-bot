@@ -19,6 +19,30 @@ Operational geopolitics wrappers live under `scripts/geopolitics/`, systemd
 units under `services/`, and shared Polymarket TypeScript bridges under
 `tools/polymarket-ts/`.
 
+Autonomous entry is confirmation-only: full source text, agreeing structured
+facts, a final qualifying venue, positive execution-adjusted edge, verified
+market mappings, and a reconciled wallet are all required. Live holdings are
+rebuilt from on-chain balances on startup and every cycle. Atomic holding
+records, execution journals, and a process lock cover restart and duplicate-
+process failure modes.
+
+Optional anticipatory forecasting is implemented as a deterministic paper-only
+layer: configured priors plus source/evidence likelihoods produce normalized
+outcome probabilities, deduplicated observations, and simulated entry/exit
+markouts. The classifier explicitly separates a forecast claim's target from
+its direction, so denials reduce the named outcome instead of reinforcing it.
+Dry-run forecasting uses public live books through a quote-only adapter,
+rejects stale/wide quotes, simulates costs, and evaluates exits every polling
+cycle. It cannot submit an exchange order.
+
+After an event resolves, score its stored probability path with:
+
+```bash
+python -m polybot.geopolitics evaluate-location-forecast \
+  --config configs/geopolitics/<event>.yaml \
+  --resolved-outcome qatar
+```
+
 See `docs/valuation/runbook.md` for valuation commands and live-readiness
 checks.
 

@@ -74,6 +74,7 @@ class BuyRotationConfig:
     max_price: float = 0.95
     usd_budget: float = 500.0
     skip_if_above_cap: bool = True
+    max_spread: float = 0.50
 
 
 @dataclass(frozen=True)
@@ -91,8 +92,68 @@ class EntryConfig:
     targets: list[str] = field(default_factory=list)
     usd_budget: float = 100.0
     max_price: float = 0.90
+    max_spread: float = 0.50
+    # Deterministic confirmation valuation.  The classifier extracts facts;
+    # code converts the strongest accepted confirmation into this probability.
+    confirmed_probability: float = 0.97
+    min_edge: float = 0.05
+    slippage_buffer: float = 0.01
+    resolution_risk_buffer: float = 0.02
+    # Any positive live fill creates exposure and is recorded, but fills below
+    # these thresholds enter PARTIALLY_ENTERED and require reconciliation rather
+    # than being silently treated as a complete entry.
+    min_fill_usd: float = 5.0
+    min_fill_fraction: float = 0.25
+    reconcile_min_shares: float = 0.01
     # Lifetime cap on entry executions for this position config.
     max_entries: int = 1
+
+
+def _default_source_likelihoods() -> dict[str, float]:
+    return {
+        "official_government": 2.5,
+        "mediator_government": 2.5,
+        "wire": 2.0,
+        "state_media": 1.35,
+        "other": 1.15,
+    }
+
+
+def _default_evidence_likelihoods() -> dict[str, float]:
+    return {
+        "confirmed_started": 8.0,
+        "confirmed_scheduled": 5.0,
+        "reported_indirect": 2.0,
+        "speculative": 1.25,
+        "denied": 4.0,
+    }
+
+
+@dataclass(frozen=True)
+class ForecastConfig:
+    """Anticipatory probability research. Always paper-only in this release."""
+
+    enabled: bool = False
+    paper_only: bool = True
+    prior_probabilities: dict[str, float] = field(default_factory=dict)
+    source_likelihoods: dict[str, float] = field(default_factory=_default_source_likelihoods)
+    evidence_likelihoods: dict[str, float] = field(default_factory=_default_evidence_likelihoods)
+    min_paper_edge: float = 0.12
+    max_paper_price: float = 0.70
+    paper_order_usd: float = 10.0
+    slippage_buffer: float = 0.02
+    resolution_risk_buffer: float = 0.03
+    exit_remaining_edge: float = 0.03
+    max_processed_articles: int = 2000
+    model_version: str = "location-forecast-v2"
+    # Paper fills use live quote snapshots when the runner is dry-run.  Tests
+    # may still inject a deterministic quote adapter.
+    live_quotes_in_dry_run: bool = True
+    quote_refresh_seconds: float = 2.0
+    max_quote_age_seconds: float = 10.0
+    max_spread: float = 0.20
+    fee_rate: float = 0.0
+    simulated_slippage: float = 0.005
 
 
 @dataclass(frozen=True)
@@ -149,6 +210,7 @@ class LocationBotConfig:
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     entry: EntryConfig = field(default_factory=EntryConfig)
+    forecast: ForecastConfig = field(default_factory=ForecastConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     time_decay: TimeDecayConfig = field(default_factory=TimeDecayConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
@@ -170,8 +232,9 @@ class LocationBotConfig:
             raise ValueError(f"held_location {self.event.held_location!r} not found in outcomes")
         return outcome
 
-    def rotation_targets(self) -> list[OutcomeMarket]:
-        return [o for o in self.outcomes if o.rotation_target and o.name != self.event.held_location]
+    def rotation_targets(self, held_location: str | None = None) -> list[OutcomeMarket]:
+        held = self.event.held_location if held_location is None else held_location
+        return [o for o in self.outcomes if o.rotation_target and o.name != held]
 
     def entry_target_names(self) -> set[str]:
         return {name.strip().lower().replace(" ", "_") for name in self.entry.targets}
@@ -198,6 +261,7 @@ def load_location_config(path: Path) -> LocationBotConfig:
         trigger=TriggerConfig(**_section(raw, "trigger")),
         classifier=ClassifierConfig(**_section(raw, "classifier")),
         entry=EntryConfig(**_section(raw, "entry")),
+        forecast=ForecastConfig(**_section(raw, "forecast")),
         execution=ExecutionConfig(
             dry_run=bool(execution_raw.get("dry_run", True)),
             sell=SellConfig(**_section(execution_raw, "sell")),
@@ -215,6 +279,7 @@ def load_location_config(path: Path) -> LocationBotConfig:
         logs_dir=Path(str(raw.get("logs_dir", "logs"))),
     )
     _validate_entry(config)
+    _validate_forecast(config)
     return config
 
 
@@ -229,6 +294,84 @@ def _validate_entry(config: LocationBotConfig) -> None:
         raise ValueError("entry.enabled requires at least one entry.targets outcome key")
     if config.entry.enabled and config.event.held_location and config.event.held_location in config.entry_target_names():
         raise ValueError("event.held_location must not be listed in entry.targets (it is already held)")
+    if config.event.held_location and config.outcome(config.event.held_location) is None:
+        raise ValueError(f"event.held_location {config.event.held_location!r} not found in outcomes")
+    if config.entry.usd_budget <= 0:
+        raise ValueError("entry.usd_budget must be positive")
+    for name, value in {
+        "entry.max_price": config.entry.max_price,
+        "entry.confirmed_probability": config.entry.confirmed_probability,
+        "entry.max_spread": config.entry.max_spread,
+    }.items():
+        if value <= 0 or value > 1:
+            raise ValueError(f"{name} must be in (0, 1]")
+    for name, value in {
+        "entry.min_edge": config.entry.min_edge,
+        "entry.slippage_buffer": config.entry.slippage_buffer,
+        "entry.resolution_risk_buffer": config.entry.resolution_risk_buffer,
+        "entry.min_fill_usd": config.entry.min_fill_usd,
+        "entry.reconcile_min_shares": config.entry.reconcile_min_shares,
+    }.items():
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
+    if config.entry.min_fill_fraction < 0 or config.entry.min_fill_fraction > 1:
+        raise ValueError("entry.min_fill_fraction must be in [0, 1]")
+    if config.entry.max_entries < 1:
+        raise ValueError("entry.max_entries must be at least 1")
+    if config.execution.buy_rotation.max_spread <= 0 or config.execution.buy_rotation.max_spread > 1:
+        raise ValueError("execution.buy_rotation.max_spread must be in (0, 1]")
+    if config.entry.confirmed_probability <= (
+        config.entry.slippage_buffer + config.entry.resolution_risk_buffer
+    ):
+        raise ValueError("entry confirmation probability must exceed execution/rule-risk buffers")
+
+
+def _validate_forecast(config: LocationBotConfig) -> None:
+    forecast = config.forecast
+    if not forecast.paper_only:
+        raise ValueError("forecast.paper_only must remain true; anticipatory live execution is not implemented")
+    if not forecast.enabled:
+        return
+    outcome_names = {outcome.name for outcome in config.outcomes}
+    prior_names = {str(name).strip().lower().replace(" ", "_") for name in forecast.prior_probabilities}
+    if prior_names != outcome_names:
+        missing = sorted(outcome_names - prior_names)
+        extra = sorted(prior_names - outcome_names)
+        raise ValueError(f"forecast priors must cover every outcome exactly; missing={missing}, extra={extra}")
+    priors = [float(value) for value in forecast.prior_probabilities.values()]
+    if any(value < 0 or value > 1 for value in priors) or sum(priors) <= 0:
+        raise ValueError("forecast prior probabilities must be non-negative with positive total")
+    if abs(sum(priors) - 1.0) > 1e-6:
+        raise ValueError("forecast prior probabilities must sum to 1")
+    for mapping_name, mapping in {
+        "source_likelihoods": forecast.source_likelihoods,
+        "evidence_likelihoods": forecast.evidence_likelihoods,
+    }.items():
+        if not mapping or any(float(value) <= 0 for value in mapping.values()):
+            raise ValueError(f"forecast.{mapping_name} values must be positive")
+    for name, value in {
+        "min_paper_edge": forecast.min_paper_edge,
+        "slippage_buffer": forecast.slippage_buffer,
+        "resolution_risk_buffer": forecast.resolution_risk_buffer,
+        "exit_remaining_edge": forecast.exit_remaining_edge,
+        "max_spread": forecast.max_spread,
+        "fee_rate": forecast.fee_rate,
+        "simulated_slippage": forecast.simulated_slippage,
+    }.items():
+        if value < 0 or value > 1:
+            raise ValueError(f"forecast.{name} must be in [0, 1]")
+    if forecast.max_paper_price <= 0 or forecast.max_paper_price > 1:
+        raise ValueError("forecast.max_paper_price must be in (0, 1]")
+    if forecast.paper_order_usd <= 0:
+        raise ValueError("forecast.paper_order_usd must be positive")
+    if not forecast.model_version.strip():
+        raise ValueError("forecast.model_version must not be empty")
+    if forecast.quote_refresh_seconds < 0:
+        raise ValueError("forecast.quote_refresh_seconds must be non-negative")
+    if forecast.max_quote_age_seconds <= 0:
+        raise ValueError("forecast.max_quote_age_seconds must be positive")
+    if forecast.max_processed_articles < 1:
+        raise ValueError("forecast.max_processed_articles must be positive")
 
 
 def _normalize_outcome(item: dict[str, Any]) -> dict[str, Any]:

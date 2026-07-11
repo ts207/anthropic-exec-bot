@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,20 +45,23 @@ class RiskState:
     def save(self) -> None:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(
-                    {
-                        "per_market_spent": self.per_market_spent,
-                        "per_day_spent": self.per_day_spent,
-                        "traded_markets": sorted(self.traded_markets),
-                        "consecutive_failures": self.consecutive_failures,
-                        "halted": self.halted,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                ),
-                encoding="utf-8",
-            )
+            encoded = json.dumps(
+                {
+                    "per_market_spent": self.per_market_spent,
+                    "per_day_spent": self.per_day_spent,
+                    "traded_markets": sorted(self.traded_markets),
+                    "consecutive_failures": self.consecutive_failures,
+                    "halted": self.halted,
+                },
+                indent=2,
+                sort_keys=True,
+            ) + "\n"
+            temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+            try:
+                temporary.write_text(encoded, encoding="utf-8")
+                os.replace(temporary, self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def remaining_for_market(self, market_key: str) -> float:
         with self._lock:

@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 
 from polybot.core.config import SourcesConfig
-from polybot.core.execution import DryRunTradingAdapter
+from polybot.core.execution import DryRunTradingAdapter, Fill, LivePosition
 from polybot.core.operator import OperatorGate
 from polybot.core.storage import StateStore
 from polybot.core.types import Article
+from polybot.risk import RiskState, _today_key
 from polybot.location.config import (
     BuyRotationConfig,
     ClassifierConfig,
@@ -27,6 +28,7 @@ from polybot.location.config import (
 from polybot.location.decision import LocationDecision, classify_agreement, entry_decision, final_decision
 from polybot.location.executor import LocationExecutor
 from polybot.location.runner import LocationProtectionBot
+from polybot.location.runtime import ProcessLock, ProcessLockError, ReconciliationError
 
 
 def article(text: str, domain: str = "reuters.com", title: str | None = None) -> Article:
@@ -92,7 +94,7 @@ def _signal(**overrides):
     return LocationSignal(**defaults)
 
 
-def _executor(tmp_path, config: LocationBotConfig, adapter: DryRunTradingAdapter) -> LocationExecutor:
+def _executor(tmp_path, config: LocationBotConfig, adapter: DryRunTradingAdapter, risk: RiskState | None = None) -> LocationExecutor:
     store = StateStore(tmp_path / "state")
     notified: list[tuple[str, dict]] = []
 
@@ -100,7 +102,7 @@ def _executor(tmp_path, config: LocationBotConfig, adapter: DryRunTradingAdapter
         def notify(self, message, **fields):
             notified.append((message, fields))
 
-    executor = LocationExecutor(config, store, _Notifier(), adapter)
+    executor = LocationExecutor(config, store, _Notifier(), adapter, risk=risk)
     executor._notified = notified  # type: ignore[attr-defined]
     return executor
 
@@ -271,6 +273,57 @@ def test_executor_enters_and_records_holding(tmp_path) -> None:
     assert executor.entry_count() == 1
 
 
+def test_executor_requires_execution_adjusted_edge(tmp_path) -> None:
+    config = _flat_config(entry=EntryConfig(enabled=True, targets=["qatar"], max_price=0.90, confirmed_probability=0.97, min_edge=0.05))
+    adapter = DryRunTradingAdapter(yes_ask=0.90)
+    executor = _executor(tmp_path, config, adapter)
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(decision, article("Officials confirm the round will be held in Qatar.")) == "ENTRY_NO_EDGE"
+
+
+def test_entry_reserves_shared_risk_budget_before_order(tmp_path) -> None:
+    config = _flat_config()
+    risk = RiskState(path=tmp_path / "risk.json")
+    executor = _executor(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40, yes_bid=0.35), risk=risk)
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(decision, article("A new round will begin in Doha.")) == "ENTERED"
+    assert risk.per_market_spent["0xqatar"] == pytest.approx(risk.guardrails.per_order_notional)
+    assert risk.per_day_spent[_today_key()] == pytest.approx(risk.guardrails.per_order_notional)
+
+
+def test_entry_fails_closed_when_daily_risk_budget_is_exhausted(tmp_path) -> None:
+    config = _flat_config()
+    risk = RiskState(path=tmp_path / "risk.json")
+    risk.per_day_spent[_today_key()] = risk.guardrails.per_day_notional
+    executor = _executor(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40, yes_bid=0.35), risk=risk)
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(decision, article("A new round will begin in Doha.")) == "ENTRY_RISK_BLOCKED"
+    assert executor.store.current().payload["reason"] == "risk_budget_exhausted"
+
+
+def test_entry_fails_closed_when_shared_risk_state_is_halted(tmp_path) -> None:
+    config = _flat_config()
+    risk = RiskState(path=tmp_path / "risk.json", halted=True)
+    executor = _executor(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40, yes_bid=0.35), risk=risk)
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(decision, article("A new round will begin in Doha.")) == "ENTRY_RISK_BLOCKED"
+    assert executor.store.current().payload["reason"] == "risk_halted"
+    assert executor.holdings.held_location() is None
+
+
+def test_tiny_positive_fill_is_recorded_as_managed_partial_exposure(tmp_path) -> None:
+    class _TinyFillAdapter(DryRunTradingAdapter):
+        def verify_fill(self, result, token_id):
+            return Fill(filled_shares=1.0, raw=result)
+
+    config = _flat_config(entry=EntryConfig(enabled=True, targets=["qatar"], usd_budget=100.0, min_fill_usd=5.0, min_fill_fraction=0.25))
+    executor = _executor(tmp_path, config, _TinyFillAdapter(yes_ask=0.40))
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(decision, article("Officials confirm the round will be held in Qatar.")) == "PARTIALLY_ENTERED"
+    assert executor.holdings.held_location() == "qatar"
+    assert executor.entry_count() == 1
+
+
 def test_executor_entry_price_above_cap_stays_flat(tmp_path) -> None:
     config = _flat_config()
     adapter = DryRunTradingAdapter(yes_ask=0.95)
@@ -354,6 +407,120 @@ def test_entry_then_defend_rotates_the_entered_leg(tmp_path) -> None:
     assert current.payload["to_outcome"] == "pakistan"
     assert executor.holdings.held_location() == "pakistan"
     assert executor.holdings.record().source == "rotation"
+
+
+def test_rotated_position_remains_defendable_and_can_exit(tmp_path) -> None:
+    config = _flat_config()
+    adapter = DryRunTradingAdapter(yes_shares=250.0, yes_ask=0.40)
+    executor = _executor(tmp_path, config, adapter)
+    enter = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(enter, article("Officials confirm the round will be held in Qatar.")) == "ENTERED"
+    rotate = LocationDecision("ROTATE_YES", "4B", "confirmed_location:pakistan", target_outcome="pakistan", factors=_signal(confirmed_location="pakistan"))
+    assert executor.execute(rotate, article("The round moves to Pakistan.")) == "ROTATED"
+    assert executor.holdings.held_location() == "pakistan"
+    assert executor.protection_execution_count() == 1
+    exit_decision = LocationDecision("EXIT_YES_ONLY", "4B", "confirmed_non_held_location_not_rotated:russia", factors=_signal(confirmed_location="russia"))
+    assert executor.execute(exit_decision, article("The qualifying round begins in Russia.")) == "EXITED"
+    assert executor.holdings.held_location() is None
+    assert executor.protection_execution_count() == 2
+
+
+def test_wallet_reconciliation_adopts_single_live_outcome(tmp_path) -> None:
+    class _WalletAdapter(DryRunTradingAdapter):
+        def query_live_position(self, yes_token_id, no_token_id):
+            shares = 12.0 if yes_token_id == "pk-yes" else 0.0
+            return LivePosition(yes_token_id=yes_token_id, no_token_id=no_token_id, no_shares=0.0, yes_shares=shares)
+
+    config = _flat_config(execution=ExecutionConfig(dry_run=False, sell=SellConfig(), buy_rotation=BuyRotationConfig()))
+    executor = _executor(tmp_path, config, _WalletAdapter())
+    result = executor.reconcile_live_holding()
+    assert result["held_location"] == "pakistan"
+    assert result["changed"] is True
+    assert executor.holdings.held_location() == "pakistan"
+
+
+def test_wallet_reconciliation_fails_closed_on_multiple_outcomes(tmp_path) -> None:
+    class _WalletAdapter(DryRunTradingAdapter):
+        def query_live_position(self, yes_token_id, no_token_id):
+            shares = 12.0 if yes_token_id in {"qatar-yes", "pk-yes"} else 0.0
+            return LivePosition(yes_token_id=yes_token_id, no_token_id=no_token_id, no_shares=0.0, yes_shares=shares)
+
+    config = _flat_config(execution=ExecutionConfig(dry_run=False, sell=SellConfig(), buy_rotation=BuyRotationConfig()))
+    executor = _executor(tmp_path, config, _WalletAdapter())
+    with pytest.raises(ReconciliationError, match="multiple live location YES balances"):
+        executor.reconcile_live_holding()
+
+
+def test_wallet_reconciliation_fails_closed_on_unexpected_no_exposure(tmp_path) -> None:
+    class _WalletAdapter(DryRunTradingAdapter):
+        def query_live_position(self, yes_token_id, no_token_id):
+            no_shares = 3.0 if no_token_id == "qatar-no" else 0.0
+            return LivePosition(yes_token_id=yes_token_id, no_token_id=no_token_id, no_shares=no_shares, yes_shares=0.0)
+
+    config = _flat_config(execution=ExecutionConfig(dry_run=False, sell=SellConfig(), buy_rotation=BuyRotationConfig()))
+    executor = _executor(tmp_path, config, _WalletAdapter())
+    with pytest.raises(ReconciliationError, match="unexpected location NO balances"):
+        executor.reconcile_live_holding()
+
+
+def test_wallet_reconciliation_fails_closed_on_resting_orders(tmp_path) -> None:
+    class _WalletAdapter(DryRunTradingAdapter):
+        def query_live_position(self, yes_token_id, no_token_id):
+            return LivePosition(yes_token_id=yes_token_id, no_token_id=no_token_id, no_shares=0.0, yes_shares=0.0)
+
+        def open_orders_for_market(self, condition_id):
+            return [{"id": "resting"}] if condition_id == "0xqatar" else []
+
+    config = _flat_config(execution=ExecutionConfig(dry_run=False, sell=SellConfig(), buy_rotation=BuyRotationConfig()))
+    executor = _executor(tmp_path, config, _WalletAdapter())
+    with pytest.raises(ReconciliationError, match="unexpected resting orders"):
+        executor.reconcile_live_holding()
+
+
+def test_entry_budget_is_clamped_by_global_per_order_guardrail(tmp_path) -> None:
+    config = _flat_config(entry=EntryConfig(enabled=True, targets=["qatar"], usd_budget=100.0))
+    executor = _executor(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40))
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    assert executor.execute(decision, article("Officials confirm the round will be held in Qatar.")) == "ENTERED"
+    current = executor.store.current()
+    assert current is not None
+    assert current.payload["usd_budget"] == 25.0
+
+
+def test_corrupt_entry_counter_fails_closed(tmp_path) -> None:
+    executor = _executor(tmp_path, _flat_config(), DryRunTradingAdapter())
+    path = executor._entry_count_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt entry counter"):
+        executor.entry_count()
+
+
+def test_process_lock_rejects_second_live_process(tmp_path) -> None:
+    first = ProcessLock(tmp_path / "location.lock").acquire()
+    try:
+        with pytest.raises(ProcessLockError, match="already running"):
+            ProcessLock(tmp_path / "location.lock").acquire()
+    finally:
+        first.release()
+
+
+def test_promoted_feed_summary_cannot_open_position(tmp_path) -> None:
+    config = _flat_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(
+            allow_feed_auto_trade=True,
+            auto_trade_domains=["reuters.com"],
+            max_trade_article_age_hours=0.0,
+        ),
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter())
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    summary = Article(**{**article("A new round will begin in Doha.").__dict__, "source_kind": "promoted_feed_summary"})
+    blocked = bot._enforce_source_policy(summary, decision)
+    assert blocked.action == "ALERT_ONLY"
+    assert blocked.reason == "entry_requires_full_source_text"
 
 
 def test_exit_clears_holding_and_one_shot_blocks_reentry(tmp_path) -> None:
@@ -529,4 +696,19 @@ def test_load_config_rejects_held_location_in_entry_targets(tmp_path) -> None:
         ),
     )
     with pytest.raises(ValueError, match="must not be listed in entry.targets"):
+        load_location_config(path)
+
+
+@pytest.mark.parametrize(
+    ("entry_block", "message"),
+    [
+        ("entry:\n  enabled: true\n  targets: [qatar]\n  usd_budget: 0\n", "usd_budget must be positive"),
+        ("entry:\n  enabled: true\n  targets: [qatar]\n  max_price: 1.2\n", "max_price must be in"),
+        ("entry:\n  enabled: true\n  targets: [qatar]\n  min_fill_fraction: 1.2\n", "min_fill_fraction must be in"),
+        ("entry:\n  enabled: true\n  targets: [qatar]\n  max_entries: 0\n", "max_entries must be at least 1"),
+    ],
+)
+def test_load_config_rejects_unsafe_entry_numbers(tmp_path, entry_block, message) -> None:
+    path = _yaml_config(tmp_path, held_location="", entry_block=entry_block)
+    with pytest.raises(ValueError, match=message):
         load_location_config(path)

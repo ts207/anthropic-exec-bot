@@ -9,6 +9,7 @@ from typing import Any
 
 from polybot.config import SETTINGS
 from polybot.log import log_event
+from polybot.risk import RiskState
 
 from polybot.core.execution import DryRunTradingAdapter, Fill, LivePosition, LiveClobTradingAdapter, TradingAdapter  # noqa: F401
 from polybot.core.notifier import Notifier
@@ -18,21 +19,34 @@ from polybot.core.types import Article
 from .config import LocationBotConfig, OutcomeMarket
 from .decision import LocationDecision
 from .holdings import HoldingsStore
+from .runtime import ExecutionJournal, JournalRecord, ReconciliationError
 
 # Local terminal-state set. Location has "ROTATED", which is not part of the
 # shared StateStore contract and should stay strategy-specific.
-TERMINAL_STATES = {"EXITED", "ROTATED", "FLIP_INCOMPLETE", "STOPPED"}
+# ROTATED is deliberately non-terminal: the newly acquired leg must remain
+# protected and may later be rotated again or exited.
+TERMINAL_STATES = {"EXITED", "FLIP_INCOMPLETE", "STOPPED"}
 
 PROTECTION_ACTIONS = {"TRIM_YES", "EXIT_YES_ONLY", "ROTATE_YES"}
 
 
 class LocationExecutor:
-    def __init__(self, config: LocationBotConfig, store: StateStore, notifier: Notifier, adapter: TradingAdapter):
+    def __init__(
+        self,
+        config: LocationBotConfig,
+        store: StateStore,
+        notifier: Notifier,
+        adapter: TradingAdapter,
+        risk: RiskState | None = None,
+    ):
         self.config = config
         self.store = _effective_store(config, store)
         self.notifier = notifier
         self.adapter = adapter
         self.holdings = HoldingsStore(self.store.data_dir, default_held=config.event.held_location or None)
+        self.journal = ExecutionJournal(self.store.data_dir)
+        risk_path = SETTINGS.risk_state_path if not config.execution.dry_run else self.store.data_dir / "risk_state.json"
+        self.risk = risk or RiskState.load(path=risk_path)
 
     def held_outcome(self) -> OutcomeMarket | None:
         name = self.holdings.held_location()
@@ -46,30 +60,125 @@ class LocationExecutor:
             return 0
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return 0
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"corrupt entry counter {path}: {exc}") from exc
         try:
             return int(raw.get("count", 0)) if isinstance(raw, dict) else 0
         except (TypeError, ValueError):
-            return 0
+            raise ValueError(f"invalid entry counter {path}")
 
     def _record_entry_execution(self) -> int:
         count = self.entry_count() + 1
         path = self._entry_count_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"count": count, "updated_at": datetime.now(timezone.utc).isoformat()}, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        from .holdings import _atomic_json_write
+
+        _atomic_json_write(path, {"count": count, "updated_at": datetime.now(timezone.utc).isoformat()})
         return count
 
     def _entry_count_path(self) -> Path:
         return self.store.data_dir / "entry_count.json"
 
+    def protection_execution_count(self) -> int:
+        path = self.store.data_dir / "protection_execution_count.json"
+        if not path.exists():
+            # Backward-compatible migration from state markers written before
+            # the durable per-execution ledger existed.
+            states = ("TRIMMED", "EXITED", "ROTATED", "FLIP_INCOMPLETE")
+            current = self.store.current()
+            return sum(
+                1
+                for state in states
+                if self.store.marker(state) is not None or (current is not None and current.state == state)
+            )
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"corrupt protection execution counter {path}: {exc}") from exc
+        if not isinstance(raw, dict) or not isinstance(raw.get("execution_ids"), list):
+            raise ValueError(f"invalid protection execution counter {path}")
+        return len({str(item) for item in raw["execution_ids"] if str(item)})
+
+    def _record_protection_execution(self, execution_id: str) -> int:
+        from .holdings import _atomic_json_write
+
+        path = self.store.data_dir / "protection_execution_count.json"
+        execution_ids: list[str] = []
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) or not isinstance(raw.get("execution_ids"), list):
+                raise ValueError(f"invalid protection execution counter {path}")
+            execution_ids = [str(item) for item in raw["execution_ids"] if str(item)]
+        if execution_id not in execution_ids:
+            execution_ids.append(execution_id)
+        _atomic_json_write(
+            path,
+            {
+                "count": len(set(execution_ids)),
+                "execution_ids": execution_ids,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return len(set(execution_ids))
+
+    def reconcile_live_holding(self) -> dict[str, Any]:
+        """Make the wallet authoritative for the single-outcome strategy.
+
+        A local file can disappear or a process can die after an order fills.
+        Exactly one meaningful YES balance is adopted. Multiple outcome
+        balances are ambiguous and fail closed instead of guessing which leg
+        the strategy should defend.
+        """
+        found: list[tuple[OutcomeMarket, LivePosition]] = []
+        balances: dict[str, float] = {}
+        no_balances: dict[str, float] = {}
+        open_orders: dict[str, Any] = {}
+        threshold = self.config.entry.reconcile_min_shares
+        for outcome in self.config.outcomes:
+            position = self.adapter.query_live_position(outcome.yes_token_id, outcome.no_token_id)
+            balances[outcome.name] = position.yes_shares
+            no_balances[outcome.name] = position.no_shares
+            orders = self.adapter.open_orders_for_market(outcome.condition_id)
+            if orders:
+                open_orders[outcome.name] = orders
+            if position.yes_shares > threshold:
+                found.append((outcome, position))
+        if open_orders:
+            raise ReconciliationError(
+                "unexpected resting orders exist on location markets; cancel or adopt them before autonomous execution: "
+                + ", ".join(sorted(open_orders))
+            )
+        unexpected_no = {name: shares for name, shares in no_balances.items() if shares > threshold}
+        if unexpected_no:
+            details = ", ".join(f"{name}={shares:g}" for name, shares in sorted(unexpected_no.items()))
+            raise ReconciliationError(f"unexpected location NO balances require manual reconciliation: {details}")
+        if len(found) > 1:
+            names = ", ".join(f"{outcome.name}={position.yes_shares:g}" for outcome, position in found)
+            raise ReconciliationError(f"multiple live location YES balances require manual reconciliation: {names}")
+        local = self.holdings.held_location()
+        if not found:
+            if local is not None:
+                self.holdings.clear_held(source="wallet_reconciliation", previous_local=local, balances=balances)
+            return {"held_location": None, "balances": balances, "no_balances": no_balances, "open_orders": open_orders, "changed": local is not None}
+        outcome, position = found[0]
+        changed = local != outcome.name
+        if changed:
+            self.holdings.set_held(
+                outcome.name,
+                source="wallet_reconciliation",
+                previous_local=local,
+                yes_shares=position.yes_shares,
+                balances=balances,
+            )
+        return {"held_location": outcome.name, "balances": balances, "no_balances": no_balances, "open_orders": open_orders, "changed": changed}
+
     def execute(self, decision: LocationDecision, article: Article) -> str:
         try:
-            return self._execute(decision, article)
+            result = self._execute(decision, article)
+            if result in {"ENTERED", "PARTIALLY_ENTERED", "TRIMMED", "EXITED", "ROTATED"}:
+                self.risk.record_settlement_success(decision.target_outcome)
+            return result
         except Exception as exc:
+            self.risk.record_settlement_failure(decision.target_outcome, str(exc))
             current = self.store.current()
             self.store.write(
                 "EXECUTION_ERROR",
@@ -119,7 +228,8 @@ class LocationExecutor:
         if floor_state is not None:
             return floor_state
 
-        self.store.write("TRIGGER_DETECTED", decision=_decision_dict(decision), article=article.__dict__)
+        journal = self.journal.start(decision.action, decision=_decision_dict(decision), article=article.__dict__)
+        self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", outcome=held.name)
@@ -159,8 +269,13 @@ class LocationExecutor:
             sell_min_price=self.config.execution.sell.min_price,
             cancel_result=cancel_result,
         )
+        # Consume the protection execution allowance before posting. If the
+        # process dies after the exchange accepts the order, a restart must not
+        # forget that the mutation was attempted.
+        self._record_protection_execution(journal.execution_id)
         sell_result = self.adapter.sell_yes_fak(held.yes_token_id, target_shares, self.config.execution.sell.min_price)
         sell_fill = self.adapter.verify_fill(sell_result, held.yes_token_id)
+        journal = self.journal.update(journal, "sell_reconciled", sell_result=sell_result, filled_shares=sell_fill.filled_shares)
         total_sold = sell_fill.filled_shares
 
         if total_sold < target_shares and self.config.execution.sell.retry_partial_once:
@@ -191,6 +306,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.notifier.notify("YES partially sold on held outcome. Manual intervention required.", total_sold=total_sold)
+            self.journal.update(journal, "failed", reason="yes_partially_sold", total_sold=total_sold)
             return "FLIP_INCOMPLETE"
 
         if decision.action == "TRIM_YES":
@@ -208,6 +324,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.notifier.notify("Trimmed held-outcome YES exposure", outcome=held.label, total_sold=total_sold)
+            self.journal.update(journal, "completed", result="TRIMMED", total_sold=total_sold)
             return "TRIMMED"
 
         if decision.action == "EXIT_YES_ONLY" or not self.config.execution.buy_rotation.enabled:
@@ -226,6 +343,7 @@ class LocationExecutor:
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold)
             self.notifier.notify("Exited held-outcome YES exposure (sell-only)", outcome=held.label, total_sold=total_sold)
+            self.journal.update(journal, "completed", result="EXITED", total_sold=total_sold)
             return "EXITED"
 
         target = self.config.outcome(decision.target_outcome or "")
@@ -246,12 +364,15 @@ class LocationExecutor:
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason="rotation_target_missing")
             self.notifier.notify("Rotation target missing from config; exited without buying", total_sold=total_sold)
+            self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_missing")
             return "EXITED"
 
-        return self._buy_rotation_leg(decision, article, held, target, total_sold, target_shares, sell_fill, pre_trade_bid, pre_trade_ask)
+        return self._buy_rotation_leg(decision, article, held, target, total_sold, target_shares, sell_fill, pre_trade_bid, pre_trade_ask, journal)
 
     def _execute_entry(self, decision: LocationDecision, article: Article) -> str:
         entry = self.config.entry
+        if not self.config.execution.dry_run:
+            self.reconcile_live_holding()
         held = self.held_outcome()
         if held is not None:
             log_event("location_entry_skip", reason="already_holding", held=held.name, target=decision.target_outcome)
@@ -277,19 +398,23 @@ class LocationExecutor:
         # The global guardrail can only lower the config's price cap, mirroring
         # exec_engine's entry-price policy for the legacy engine.
         cap = min(entry.max_price, SETTINGS.guardrails.max_entry_price)
-        usd_budget = entry.usd_budget
+        usd_budget = self._allowed_buy_notional(target.condition_id, entry.usd_budget)
         min_viable_order_usd = 1.0
         if usd_budget < min_viable_order_usd:
-            log_event("location_entry_skip", reason="entry_budget_below_minimum", usd_budget=usd_budget)
-            return "SKIPPED"
+            reason = "risk_halted" if self.risk.halted else "risk_budget_exhausted"
+            self.store.write("ENTRY_RISK_BLOCKED", reason=reason, target_outcome=target.name, usd_budget=usd_budget)
+            log_event("location_entry_skip", reason=reason, usd_budget=usd_budget)
+            return "ENTRY_RISK_BLOCKED"
 
-        self.store.write("TRIGGER_DETECTED", decision=_decision_dict(decision), article=article.__dict__)
+        journal = self.journal.start("ENTER_YES", decision=_decision_dict(decision), article=article.__dict__)
+        self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", outcome=target.name)
             cancel_result = self.adapter.cancel_open_orders_for_market(target.condition_id)
 
         target_ask = self.adapter.yes_best_ask(target.yes_token_id)
+        target_bid = self.adapter.yes_best_bid(target.yes_token_id)
         if target_ask is None or target_ask > cap:
             previous = current.state if current is not None else None
             self.store.write(
@@ -309,7 +434,36 @@ class LocationExecutor:
                     target_best_ask=target_ask,
                     cap=cap,
                 )
+            self.journal.update(journal, "blocked", reason="entry_price_above_cap", target_best_ask=target_ask)
             return "ENTRY_PRICE_ABOVE_CAP"
+        spread = target_ask - target_bid if target_bid is not None else None
+        if spread is None or spread > entry.max_spread:
+            self.store.write(
+                "ENTRY_SPREAD_TOO_WIDE",
+                target_outcome=target.name,
+                target_best_bid=target_bid,
+                target_best_ask=target_ask,
+                spread=spread,
+                max_spread=entry.max_spread,
+                article=article.__dict__,
+            )
+            self.journal.update(journal, "blocked", reason="entry_spread_too_wide", spread=spread)
+            return "ENTRY_SPREAD_TOO_WIDE"
+
+        fair_probability = entry.confirmed_probability
+        execution_edge = fair_probability - target_ask - entry.slippage_buffer - entry.resolution_risk_buffer
+        if execution_edge < entry.min_edge:
+            self.store.write(
+                "ENTRY_NO_EDGE",
+                target_outcome=target.name,
+                target_best_ask=target_ask,
+                fair_probability=fair_probability,
+                execution_edge=execution_edge,
+                minimum_edge=entry.min_edge,
+                article=article.__dict__,
+            )
+            self.journal.update(journal, "blocked", reason="insufficient_entry_edge", execution_edge=execution_edge)
+            return "ENTRY_NO_EDGE"
 
         self.store.write(
             "BUYING_ENTRY",
@@ -319,8 +473,10 @@ class LocationExecutor:
             target_best_ask=target_ask,
             cancel_result=cancel_result,
         )
+        self.risk.reserve_order_attempt(target.condition_id, usd_budget)
         buy_result = self.adapter.buy_yes_fak(target.yes_token_id, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
+        journal = self.journal.update(journal, "buy_reconciled", buy_result=buy_result, filled_shares=buy_fill.filled_shares)
         if buy_fill.filled_shares <= 0:
             self.store.write(
                 "ENTRY_UNFILLED",
@@ -331,17 +487,24 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.notifier.notify("Entry buy did not fill; still flat", target=target.label, usd_budget=usd_budget)
+            self.journal.update(journal, "unfilled", target_outcome=target.name)
             return "ENTRY_UNFILLED"
 
         total_entries = self._record_entry_execution()
+        estimated_fill_usd = buy_fill.filled_shares * target_ask
+        fill_fraction = min(1.0, estimated_fill_usd / usd_budget) if usd_budget > 0 else 0.0
+        partial = estimated_fill_usd < entry.min_fill_usd or fill_fraction < entry.min_fill_fraction
+        resulting_state = "PARTIALLY_ENTERED" if partial else "ENTERED"
         self.store.write(
-            "ENTERED",
+            resulting_state,
             target_outcome=target.name,
             filled_shares=buy_fill.filled_shares,
             usd_budget=usd_budget,
             entry_max_price=cap,
             target_best_ask=target_ask,
             entry_count=total_entries,
+            estimated_fill_usd=estimated_fill_usd,
+            fill_fraction=fill_fraction,
             article=article.__dict__,
         )
         self.holdings.set_held(
@@ -352,12 +515,20 @@ class LocationExecutor:
             reason=decision.reason,
         )
         self.notifier.notify(
-            f"Entered {target.label}-YES; now defending it",
+            f"{'Partially entered' if partial else 'Entered'} {target.label}-YES; now defending it",
             filled_shares=buy_fill.filled_shares,
             usd_budget=usd_budget,
             target_best_ask=target_ask,
         )
-        return "ENTERED"
+        self.journal.update(
+            journal,
+            "completed",
+            result=resulting_state,
+            held_location=target.name,
+            filled_shares=buy_fill.filled_shares,
+            estimated_fill_usd=estimated_fill_usd,
+        )
+        return resulting_state
 
     def _time_decay_floor_block(self, decision: LocationDecision, held: OutcomeMarket) -> str | None:
         """Mirror of the iran executor's TIME_DECAY_PRICE_FLOOR guard.
@@ -422,6 +593,19 @@ class LocationExecutor:
             return pre_trade_bid
         return self.config.execution.sell.min_price
 
+    def _allowed_buy_notional(self, market_key: str, requested: float) -> float:
+        if self.risk.halted:
+            return 0.0
+        return max(
+            0.0,
+            min(
+                requested,
+                SETTINGS.guardrails.per_order_notional,
+                self.risk.remaining_for_market(market_key),
+                self.risk.remaining_for_day(),
+            ),
+        )
+
     def _buy_rotation_leg(
         self,
         decision: LocationDecision,
@@ -433,11 +617,13 @@ class LocationExecutor:
         sell_fill: Fill,
         pre_trade_bid: float | None,
         pre_trade_ask: float | None,
+        journal: JournalRecord,
     ) -> str:
         cap = self.config.execution.buy_rotation.max_price
         sale_price = self._estimate_sale_price(sell_fill, pre_trade_bid)
         confirmed_proceeds = total_sold * sale_price
         target_ask = self.adapter.yes_best_ask(target.yes_token_id)
+        target_bid = self.adapter.yes_best_bid(target.yes_token_id)
         if target_ask is None or target_ask > cap:
             self.store.write(
                 "EXITED",
@@ -464,24 +650,54 @@ class LocationExecutor:
                 target_best_ask=target_ask,
                 cap=cap,
             )
+            self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_above_cap_or_unavailable")
+            return "EXITED"
+        target_spread = target_ask - target_bid if target_bid is not None else None
+        if target_spread is None or target_spread > self.config.execution.buy_rotation.max_spread:
+            self.store.write(
+                "EXITED",
+                outcome=held.name,
+                total_sold=total_sold,
+                reason="rotation_target_spread_too_wide",
+                target_outcome=target.name,
+                target_best_bid=target_bid,
+                target_best_ask=target_ask,
+                target_spread=target_spread,
+                max_spread=self.config.execution.buy_rotation.max_spread,
+                confirmed_proceeds=confirmed_proceeds,
+                article=article.__dict__,
+            )
+            self.holdings.clear_held(
+                source="exit",
+                from_outcome=held.name,
+                total_sold=total_sold,
+                reason="rotation_target_spread_too_wide",
+            )
+            self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_spread_too_wide")
             return "EXITED"
 
         # Rotation buy is capped by actual confirmed sale proceeds, not blindly
         # by the configured budget -- a partial fill, thin book, or bad price
         # on the sell leg must not let the buy leg overspend relative to what
         # was actually raised (found during 2026-07-06 hardening review).
-        usd_budget = min(
+        requested_budget = min(
             self.config.execution.buy_rotation.usd_budget,
             self.config.position.max_rotation_usd_to_buy,
             confirmed_proceeds,
         )
+        usd_budget = self._allowed_buy_notional(target.condition_id, requested_budget)
         min_viable_order_usd = 1.0
         if usd_budget < min_viable_order_usd:
+            block_reason = (
+                "insufficient_sale_proceeds_for_rotation_buy"
+                if requested_budget < min_viable_order_usd
+                else ("risk_halted" if self.risk.halted else "rotation_risk_budget_exhausted")
+            )
             self.store.write(
                 "EXITED",
                 outcome=held.name,
                 total_sold=total_sold,
-                reason="insufficient_sale_proceeds_for_rotation_buy",
+                reason=block_reason,
                 target_outcome=target.name,
                 target_best_ask=target_ask,
                 target_max_price=cap,
@@ -495,12 +711,13 @@ class LocationExecutor:
                 max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
                 article=article.__dict__,
             )
-            self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason="insufficient_sale_proceeds_for_rotation_buy")
+            self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason=block_reason)
             self.notifier.notify(
                 "Sold held YES. Rotation buy skipped (confirmed sale proceeds too small to fund a real order).",
                 target=target.label,
                 confirmed_proceeds=confirmed_proceeds,
             )
+            self.journal.update(journal, "completed", result="EXITED", reason="insufficient_sale_proceeds_for_rotation_buy")
             return "EXITED"
 
         if self.config.safety.cancel_open_orders_first:
@@ -516,8 +733,10 @@ class LocationExecutor:
             configured_rotation_usd_budget=self.config.execution.buy_rotation.usd_budget,
             max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
         )
+        self.risk.reserve_order_attempt(target.condition_id, usd_budget)
         buy_result = self.adapter.buy_yes_fak(target.yes_token_id, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
+        journal = self.journal.update(journal, "rotation_buy_reconciled", buy_result=buy_result, filled_shares=buy_fill.filled_shares)
         if buy_fill.filled_shares <= 0:
             self.store.write(
                 "FLIP_INCOMPLETE",
@@ -536,6 +755,7 @@ class LocationExecutor:
             # book position is flat even though the state is FLIP_INCOMPLETE.
             self.holdings.clear_held(source="rotation_incomplete", from_outcome=held.name, total_sold=total_sold, intended_target=target.name)
             self.notifier.notify("Sold held YES but rotation buy did not fill. Manual intervention required.", total_sold=total_sold, target=target.label)
+            self.journal.update(journal, "failed", result="FLIP_INCOMPLETE", reason="rotation_buy_unfilled")
             return "FLIP_INCOMPLETE"
 
         self.store.write(
@@ -564,6 +784,7 @@ class LocationExecutor:
             filled_shares=buy_fill.filled_shares,
             article_url=article.url,
         )
+        self.journal.update(journal, "completed", result="ROTATED", held_location=target.name, filled_shares=buy_fill.filled_shares)
         self.notifier.notify(
             f"Rotated: sold {held.label}-YES, bought {target.label}-YES",
             total_sold=total_sold,

@@ -10,7 +10,12 @@ Optionally, the bot can also OPEN the position itself: with `entry.enabled` and 
 
 ## Position lifecycle
 
-The live holding is persisted in `data_dir/holdings.json` (dry-run isolated under `data_dir/dry_run/`), not in the YAML: `event.held_location` is only the initial default, and an explicit holdings record always wins — including an explicit flat record after an exit.
+The wallet is authoritative. `data_dir/holdings.json` is an atomic local cache
+(dry-run isolated under `data_dir/dry_run/`): `event.held_location` is only the
+initial default. Live preflight and every live cycle query all configured YES
+and NO balances. Exactly one meaningful YES balance is adopted; multiple YES
+balances, any unexpected NO exposure, or resting orders fail closed for manual
+reconciliation.
 
 ```
 FLAT --(ENTER_YES, verified fill)--> HOLDING <--(ROTATE_YES, verified fill)--+
@@ -21,7 +26,9 @@ FLAT --(ENTER_YES, verified fill)--> HOLDING <--(ROTATE_YES, verified fill)--+
 
 - Flat bot: articles are routed through the entry decision table; time decay, trims, and exits do not apply.
 - Holding bot: articles are routed through the protection decision table against the LIVE holding (which may be the entered or rotated-into leg, not the configured one).
-- After an exit the bot is flat again, but `safety.one_shot` (terminal state) and `entry.max_entries` block automatic re-entry.
+- `ROTATED` is non-terminal: the new leg remains protected and can later be
+  rotated again or exited. After an exit, `safety.one_shot` and
+  `entry.max_entries` control automatic re-entry.
 
 ## Entry decision table (flat only)
 
@@ -43,9 +50,17 @@ FLAT --(ENTER_YES, verified fill)--> HOLDING <--(ROTATE_YES, verified fill)--+
 - Entry uses the same evidence bar as a rotation buy, plus a stricter finality requirement (`final_decision_announced`).
 - The no-meeting collapse fast path (first-pass execution without multi-pass agreement) never applies while flat: there is no loss to race, so an entry always requires full pass agreement.
 - Entry spend is capped by `entry.usd_budget`, `entry.max_price`, and the global `POLYBOT_MAX_ENTRY_PRICE` guardrail (which can only lower the cap).
+- Entry requires positive execution-adjusted edge: `confirmed_probability - ask - slippage_buffer - resolution_risk_buffer >= min_edge`.
 - Entries are counted against `entry.max_entries` (lifetime, persisted in `entry_count.json`), separately from `safety.max_executions`, so an entry can never consume the execution budget needed to defend the position it opened.
-- All trade-action policies apply to `ENTER_YES` unchanged: operator gate + live ack, quote verification, source domain policy, article freshness, feed auto-trade restrictions, auto-execute level, and market re-verification blocks.
-- An unfilled or above-cap entry leaves the bot flat (`ENTRY_UNFILLED` / `ENTRY_PRICE_ABOVE_CAP` are non-terminal); a filled entry writes `ENTERED` and updates holdings before anything else can trade.
+- All trade-action policies apply to `ENTER_YES`: operator gate + live ack,
+  quote verification, source domain policy, freshness, auto-execute level, and
+  market verification. Feed and promoted-feed summaries cannot open risk;
+  entry requires fetched publisher text or a first-party full-text feed.
+- An unfilled, above-cap, or no-edge entry remains flat. Any positive fill is
+  adopted and defended. A sub-threshold fill becomes `PARTIALLY_ENTERED`.
+- Every mutation has an execution journal. Startup wallet reconciliation repairs
+  local holdings after a crash between exchange acceptance and persistence.
+- A process lock prevents two instances from trading the same strategy directory.
 
 ## Qualifying meeting standard
 
@@ -61,6 +76,40 @@ The following do not qualify on their own:
 - deconfliction contacts
 - greetings, chance encounters, or photo opportunities
 - vague mediator diplomacy without a confirmed qualifying venue
+
+## Anticipatory forecast research
+
+`forecast.enabled` activates a deterministic, paper-only probability engine.
+It is structurally separate from confirmed live entry and has no order-posting
+method.
+
+- Priors must cover every categorical outcome and sum to one.
+- Classifier passes must agree on the explicit forecast target and direction,
+  evidence strength, source tier, finality, and qualification fields before an
+  update is accepted.
+- The supporting quote must occur verbatim in article text. Supportive evidence
+  uses a likelihood ratio above one; contradictory evidence uses the reciprocal
+  ratio below one; neutral evidence cannot update probabilities.
+- Exact articles and repeated supporting claims are deduplicated.
+- Source-tier and evidence-strength likelihood ratios update the target with a
+  bounded Bayesian odds update; every outcome remains normalized to one.
+- Future expected formal venues can update probabilities. Technical venues
+  alone do not become forecast targets.
+- Dry-run paper execution reads public live CLOB books through an adapter with
+  no mutation methods. Paper entry requires a fresh, sufficiently tight quote,
+  buffered edge, and a maximum simulated fill price.
+- Paper positions exit when fair probability no longer exceeds the executable
+  bid by `exit_remaining_edge` after resolution-risk allowance. This check runs
+  every poll, even when no new article arrives.
+- Simulated entry/exit prices include configured fees and adverse slippage.
+- Probability and paper states carry a model version plus configuration
+  fingerprint; incompatible prior state is archived rather than silently used.
+- Final confirmed reports update probabilities but are excluded from forecast
+  entries because they belong to the separately gated confirmation strategy.
+
+State is written atomically to `forecast_probability.json` and
+`forecast_paper.json`; observations and simulated actions are appended to
+`location_forecast_paper.jsonl`.
 
 ## Decision table
 
@@ -95,6 +144,12 @@ The following do not qualify on their own:
 - Rotation buy is optional and only runs after a verified held-YES sale.
 - Rotation buy can only target configured rotation targets.
 - Rotation buy budget is capped by configured budget, configured max rotation spend, and confirmed sale proceeds.
+- Every entry and rotation buy is additionally capped by the persistent global
+  per-order, per-market, and daily notional state; a halted risk state blocks
+  new buys.
+- Entry and rotation buys enforce configured maximum spreads.
+- Protection counts use unique execution IDs, so repeated rotations consume
+  the allowance instead of overwriting a single marker.
 - Calendar/time-decay sales are blocked below configured bid floors.
 - News-triggered exits are not blocked by calendar/time-decay price floors.
 
@@ -104,10 +159,12 @@ Do not run live unless all of the following hold:
 
 - event rule text hash has been inspected and pinned;
 - every configured outcome verifies against live Gamma condition/token IDs;
-- live position query confirms held YES exposure (or, for a flat entry-enabled
-  config, every entry target verifies tradeable);
+- wallet reconciliation across every configured outcome confirms exactly one
+  held YES leg or a genuinely flat wallet;
 - operator position mode is live and config hash is acknowledged;
 - execution `dry_run` is false and command uses `--live`;
 - Telegram alerting is configured;
 - classifier provider is available;
 - source freshness policy blocks stale and unknown-age auto-trades unless explicitly overridden.
+- no incomplete or ambiguous wallet reconciliation remains;
+- the single-instance process lock can be acquired.

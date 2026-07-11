@@ -36,6 +36,8 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "technical_location": {"type": "string"},
         "future_expected_formal_location": {"type": "string"},
         "final_decision_announced": _bool_field(),
+        "forecast_target_location": {"type": "string"},
+        "evidence_direction": {"type": "string", "enum": ["supportive", "contradictory", "neutral"]},
     },
     "required": [
         "source_is_trusted",
@@ -53,6 +55,8 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
         "technical_location",
         "future_expected_formal_location",
         "final_decision_announced",
+        "forecast_target_location",
+        "evidence_direction",
     ],
     "additionalProperties": False,
 }
@@ -161,6 +165,8 @@ class RuleBasedFixtureLocationClassifier:
             technical_location=technical_location,
             future_expected_formal_location=future_expected_formal_location,
             final_decision_announced=final_decision_announced,
+            forecast_target_location=(confirmed if confirmed != "none" else future_expected_formal_location),
+            evidence_direction=("supportive" if confirmed != "none" or future_expected_formal_location != "none" else "neutral"),
         )
 
 
@@ -494,10 +500,10 @@ def _json_object(raw: str) -> dict:
 def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig, held_location: str | None = None) -> str:
     all_locations = list(config.outcomes)
     all_location_labels = ", ".join(f'"{o.name}" ({o.label})' for o in all_locations)
-    rotation_targets = config.rotation_targets()
-    rotation_target_labels = ", ".join(f'"{o.name}" ({o.label})' for o in rotation_targets) or "none"
     held_name = config.event.held_location if held_location is None else held_location
     held = config.outcome(held_name) if held_name else None
+    rotation_targets = config.rotation_targets(held_name)
+    rotation_target_labels = ", ".join(f'"{o.name}" ({o.label})' for o in rotation_targets) or "none"
     entry_target_labels = ", ".join(f'"{o.name}" ({o.label})' for o in config.entry_targets()) or "none"
     schema_hint = {
         "source_is_trusted": True,
@@ -515,6 +521,8 @@ def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig, 
         "technical_location": "configured key for technical/preparatory venue, or other_specific, or none",
         "future_expected_formal_location": "configured key for expected future high-level/formal venue, or other_specific, or none",
         "final_decision_announced": True,
+        "forecast_target_location": "configured outcome key that this forecast claim concerns, or other_specific, or none",
+        "evidence_direction": "supportive | contradictory | neutral",
     }
     if held is not None:
         position_lines = (
@@ -552,6 +560,8 @@ def _prompt(article: Article, market_rule_text: str, config: LocationBotConfig, 
         "If a venue is tied only to technical/preparatory talks, put it in technical_location and keep confirmed_location as none. "
         "If the body says the final venue/decision has not been announced, set final_decision_announced=false and do not treat a frontrunner/expected venue as confirmed. "
         "If the body separately says high-level/direct/formal talks are expected later in another venue, put that venue in future_expected_formal_location; do not rotate away from the held venue on the technical venue. "
+        "For forecasting, set forecast_target_location to the configured outcome the quoted claim concerns and evidence_direction to supportive, contradictory, or neutral relative to that outcome. "
+        "A denial that a named venue will host is contradictory evidence for that venue; do not encode it as supportive merely because the venue is named. "
         "Brief greetings, chance encounters, or photo ops do NOT count.\n"
         "A merely 'scheduled' round can still shift location before it begins -- treat 'scheduled' as weaker evidence than 'underway'/'concluded' "
         "unless the source is a wire service or an official government statement giving a specific confirmed venue and date.\n"

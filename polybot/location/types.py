@@ -13,6 +13,7 @@ Level = Literal["0", "1", "2", "3", "4A", "4B"]
 # "confirmed_scheduled" or "confirmed_started" are trusted enough to justify a
 # real trade; weaker tiers are alert-only regardless of which location is named.
 EvidenceStrength = Literal["confirmed_started", "confirmed_scheduled", "reported_indirect", "speculative", "denied"]
+EvidenceDirection = Literal["supportive", "contradictory", "neutral"]
 
 RoundStatus = Literal["none", "rumor", "scheduled", "underway", "concluded", "technical_only", "unclear"]
 
@@ -46,6 +47,13 @@ class LocationSignal:
     technical_location: str = "none"
     future_expected_formal_location: str = "none"
     final_decision_announced: bool = True
+    # Forecast-only claim semantics.  These are deliberately separate from
+    # confirmed_location: a report can discuss Qatar while explicitly denying
+    # that Qatar will host.  In that case forecast_target_location="qatar" and
+    # evidence_direction="contradictory".  Live execution still uses the
+    # stricter confirmed/future fields above.
+    forecast_target_location: str = "none"
+    evidence_direction: EvidenceDirection = "neutral"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "LocationSignal":
@@ -65,6 +73,8 @@ class LocationSignal:
             technical_location=_confirmed_location(str(raw.get("technical_location") or "none")),
             future_expected_formal_location=_confirmed_location(str(raw.get("future_expected_formal_location") or "none")),
             final_decision_announced=bool(raw.get("final_decision_announced", True)),
+            forecast_target_location=_confirmed_location(str(raw.get("forecast_target_location") or "none")),
+            evidence_direction=_evidence_direction(str(raw.get("evidence_direction") or "neutral")),
         )
 
 
@@ -88,3 +98,9 @@ def _evidence_strength(value: str) -> EvidenceStrength:
 
 def _confirmed_location(value: str) -> str:
     return value.strip().lower().replace(" ", "_") if value else "none"
+
+
+def _evidence_direction(value: str) -> EvidenceDirection:
+    if value in {"supportive", "contradictory", "neutral"}:
+        return value  # type: ignore[return-value]
+    return "neutral"

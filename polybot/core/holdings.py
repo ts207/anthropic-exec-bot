@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,8 +76,18 @@ class HoldingsStore:
             updated_at=datetime.now(timezone.utc).isoformat(),
             payload=payload,
         )
-        self.path.write_text(json.dumps(asdict(record), indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        _atomic_json_write(self.path, asdict(record))
         return record
+
+
+def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(value, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _normalize(value: str | None) -> str | None:
@@ -86,4 +97,4 @@ def _normalize(value: str | None) -> str | None:
     return cleaned or None
 
 
-__all__ = ["HoldingRecord", "HoldingsStore"]
+__all__ = ["HoldingRecord", "HoldingsStore", "_atomic_json_write"]

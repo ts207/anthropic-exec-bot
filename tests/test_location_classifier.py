@@ -538,7 +538,7 @@ def test_extract_published_at_discards_bogus_future_timestamp() -> None:
 # ---- rotation buy capped by confirmed sale proceeds (2026-07-06 hardening) ----
 
 
-def test_rotation_buy_capped_by_confirmed_proceeds_not_full_budget(tmp_path) -> None:
+def test_rotation_buy_capped_by_global_order_limit_and_confirmed_proceeds(tmp_path) -> None:
     # Configured budget/cap allow up to $500, but the held outcome only has a
     # $0.10 best bid -- confirmed proceeds (1000 * 0.10 = $100) must cap the
     # rotation buy, not the full $500 configured budget.
@@ -550,9 +550,9 @@ def test_rotation_buy_capped_by_confirmed_proceeds_not_full_budget(tmp_path) -> 
     assert result == "ROTATED"
     current = executor.store.current()
     assert current is not None
-    # confirmed proceeds (1000 shares * $0.10 bid = $100) cap the buy, so the
-    # filled shares reflect a $100 order at the default 0.95 cap, not a $500 one.
-    assert current.payload["rotation_filled_shares"] == pytest.approx(100.0 / 0.95)
+    # The $100 proceeds cap is further reduced by the global $25 per-order
+    # guardrail; rotations cannot bypass the same limit as flat entries.
+    assert current.payload["rotation_filled_shares"] == pytest.approx(25.0 / 0.95)
 
 
 def test_rotation_buy_skipped_when_proceeds_too_small(tmp_path) -> None:
@@ -1217,6 +1217,7 @@ def test_run_location_live_preflight_blocks_before_poll_loop(tmp_path, monkeypat
 
 def test_run_location_live_preflight_allows_acknowledged_alert_only_monitoring(tmp_path, monkeypatch, capsys) -> None:
     from polybot.core.operator import OperatorGate
+    from polybot.core.execution import LivePosition
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
@@ -1230,7 +1231,12 @@ def test_run_location_live_preflight_allows_acknowledged_alert_only_monitoring(t
     )
     OperatorGate(config_path, config).write_ack(note="test")
     monkeypatch.setattr(runner_mod, "load_location_config", lambda path: config)
-    monkeypatch.setattr(runner_mod, "_live_adapter", lambda **kwargs: DryRunTradingAdapter(yes_shares=1000.0))
+    class _TokenAwareAdapter(DryRunTradingAdapter):
+        def query_live_position(self, yes_token_id, no_token_id):
+            shares = 1000.0 if yes_token_id == config.held_outcome().yes_token_id else 0.0
+            return LivePosition(yes_token_id=yes_token_id, no_token_id=no_token_id, no_shares=0.0, yes_shares=shares)
+
+    monkeypatch.setattr(runner_mod, "_live_adapter", lambda **kwargs: _TokenAwareAdapter())
     monkeypatch.setattr(market_verifier_mod, "fetch_event_by_slug", lambda slug, **kw: _event_for_config(config))
     started = {}
 
@@ -1306,7 +1312,7 @@ def test_rotated_state_records_execution_audit_fields(tmp_path) -> None:
     assert payload["confirmed_proceeds"] == pytest.approx(100.0)
     assert payload["target_best_ask"] == 0.40
     assert payload["target_max_price"] == config.execution.buy_rotation.max_price
-    assert payload["rotation_usd_budget"] == pytest.approx(100.0)
+    assert payload["rotation_usd_budget"] == pytest.approx(25.0)
     assert payload["configured_rotation_usd_budget"] == config.execution.buy_rotation.usd_budget
     assert payload["max_rotation_usd_to_buy"] == config.position.max_rotation_usd_to_buy
 

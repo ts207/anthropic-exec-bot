@@ -66,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
     run_location_parser = sub.add_parser("run-location-protection")
     run_location_parser.add_argument("--config", required=True)
     run_location_parser.add_argument("--live", action="store_true")
+    evaluate_location_parser = sub.add_parser("evaluate-location-forecast")
+    evaluate_location_parser.add_argument("--config", required=True)
+    evaluate_location_parser.add_argument("--resolved-outcome", required=True)
+    evaluate_location_parser.add_argument("--state")
     args = parser.parse_args(argv)
     if args.command == "inspect":
         return inspect_command(args.slug)
@@ -133,6 +137,14 @@ def main(argv: list[str] | None = None) -> int:
         from .location.runner import run_location_command
 
         return run_location_command(Path(args.config), live_flag=args.live)
+    if args.command == "evaluate-location-forecast":
+        from .location.calibration import evaluate_forecast_command
+
+        return evaluate_forecast_command(
+            Path(args.config),
+            args.resolved_outcome,
+            state_path=Path(args.state) if args.state else None,
+        )
     return 2
 
 

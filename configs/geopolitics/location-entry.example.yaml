@@ -12,6 +12,9 @@
 # quote/source/freshness policies gate ENTER_YES like every other trade
 # action, and entry.max_entries caps lifetime entries separately from
 # safety.max_executions (which protects the defense budget).
+# Live startup and every cycle reconcile all configured YES balances; multiple
+# meaningful balances fail closed. Discovery/feed snippets may alert but cannot
+# open a position without full publisher text.
 #
 # This file is NOT a live config: replace every slug/ID after running
 # inspect-location and reviewing the live event, then pin
@@ -49,7 +52,38 @@ entry:
   targets: ["qatar", "oman"]
   usd_budget: 100.0
   max_price: 0.90
+  max_spread: 0.20
+  confirmed_probability: 0.97
+  min_edge: 0.05
+  slippage_buffer: 0.01
+  resolution_risk_buffer: 0.02
+  min_fill_usd: 5.0
+  min_fill_fraction: 0.25
+  reconcile_min_shares: 0.01
   max_entries: 1
+
+# Anticipatory evidence is research-only. It updates deterministic categorical
+# probabilities and simulates entries/exits; no forecast code can submit an
+# exchange order. Priors must cover every configured outcome and sum to 1.
+forecast:
+  enabled: true
+  paper_only: true
+  prior_probabilities:
+    qatar: 0.60
+    oman: 0.40
+  min_paper_edge: 0.12
+  max_paper_price: 0.70
+  paper_order_usd: 10.0
+  slippage_buffer: 0.02
+  resolution_risk_buffer: 0.03
+  exit_remaining_edge: 0.03
+  model_version: "location-forecast-v2"
+  live_quotes_in_dry_run: true
+  quote_refresh_seconds: 2.0
+  max_quote_age_seconds: 10.0
+  max_spread: 0.20
+  fee_rate: 0.0
+  simulated_slippage: 0.005
 
 position:
   max_yes_shares_to_sell: 100000.0
@@ -73,6 +107,7 @@ execution:
   buy_rotation:
     enabled: true
     max_price: 0.95
+    max_spread: 0.20
     usd_budget: 500.0
 
 safety:
