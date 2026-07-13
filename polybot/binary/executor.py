@@ -12,6 +12,7 @@ from polybot.log import log_event
 from polybot.core.execution import Fill, TradingAdapter
 from polybot.core.holdings import HoldingsStore
 from polybot.core.notifier import Notifier
+from polybot.core.portfolio import PortfolioLink
 from polybot.core.storage import StateStore
 from polybot.core.types import Article
 
@@ -40,9 +41,26 @@ class BinaryExecutor:
         self.notifier = notifier
         self.adapter = adapter
         self.holdings = HoldingsStore(self.store.data_dir, default_held=config.market.held_side.lower() or None)
+        self.portfolio = PortfolioLink.from_config(config.portfolio)
 
     def held_side(self) -> str | None:
         return self.holdings.held_location()
+
+    def _portfolio_allowed(self, requested: float) -> tuple[float, list[str]]:
+        """Clamp by the shared cross-market ledger (discovery pipeline
+        allocator). No-op for standalone configs without a ledger."""
+        if self.portfolio is None:
+            return requested, []
+        granted, blockers = self.portfolio.allowed(requested)
+        return min(requested, granted), blockers
+
+    def _portfolio_reserve(self, usd: float) -> None:
+        if self.portfolio is not None and usd > 0:
+            self.portfolio.reserve(usd)
+
+    def _portfolio_release(self) -> None:
+        if self.portfolio is not None:
+            self.portfolio.release()
 
     def entry_count(self) -> int:
         path = self._entry_count_path()
@@ -221,6 +239,7 @@ class BinaryExecutor:
             article=article.__dict__,
         )
         self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold)
+        self._portfolio_release()
         self.notifier.notify("Exited held exposure (sell-only)", side=held, total_sold=total_sold)
         return "EXITED"
 
@@ -253,6 +272,12 @@ class BinaryExecutor:
         if usd_budget < 1.0:
             log_event("binary_entry_skip", reason="entry_budget_below_minimum", usd_budget=usd_budget)
             return "SKIPPED"
+        usd_budget, portfolio_blockers = self._portfolio_allowed(usd_budget)
+        if portfolio_blockers or usd_budget < 1.0:
+            reason = ",".join(portfolio_blockers) or "portfolio_allowance_exhausted"
+            self.store.write("ENTRY_PORTFOLIO_BLOCKED", reason=reason, side=side, usd_budget=usd_budget)
+            log_event("binary_entry_skip", reason=f"portfolio:{reason}", usd_budget=usd_budget)
+            return "ENTRY_PORTFOLIO_BLOCKED"
 
         token = self.market.yes_token_id if side == "yes" else self.market.no_token_id
         self.store.write("TRIGGER_DETECTED", decision=_decision_dict(decision), article=article.__dict__)
@@ -286,9 +311,11 @@ class BinaryExecutor:
             best_ask=ask,
             cancel_result=cancel_result,
         )
+        self._portfolio_reserve(usd_budget)
         buy_result = self.adapter.buy_yes_fak(token, usd_budget, cap) if side == "yes" else self.adapter.buy_no_fak(token, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, token)
         if buy_fill.filled_shares <= 0:
+            self._portfolio_release()
             self.store.write(
                 "ENTRY_UNFILLED",
                 side=side,
@@ -353,6 +380,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold, reason="flip_target_above_cap_or_unavailable")
+            self._portfolio_release()
             self.notifier.notify("Sold held side. Flip buy skipped (price above cap or unavailable).", flip_side=opposite, flip_best_ask=ask, cap=cap)
             return "EXITED"
 
@@ -364,6 +392,22 @@ class BinaryExecutor:
             self.config.position.max_flip_usd_to_buy,
             confirmed_proceeds,
         )
+        usd_budget, portfolio_blockers = self._portfolio_allowed(usd_budget)
+        if portfolio_blockers:
+            self.store.write(
+                "EXITED",
+                side=held,
+                total_sold=total_sold,
+                reason=f"flip_portfolio_blocked:{','.join(portfolio_blockers)}",
+                flip_side=opposite,
+                sale_price_used=sale_price,
+                confirmed_proceeds=confirmed_proceeds,
+                article=article.__dict__,
+            )
+            self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold, reason="flip_portfolio_blocked")
+            self._portfolio_release()
+            self.notifier.notify("Sold held side. Flip buy skipped (portfolio limits).", flip_side=opposite, blockers=",".join(portfolio_blockers))
+            return "EXITED"
         if usd_budget < 1.0:
             self.store.write(
                 "EXITED",
@@ -376,6 +420,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold, reason="insufficient_sale_proceeds_for_flip_buy")
+            self._portfolio_release()
             self.notifier.notify("Sold held side. Flip buy skipped (proceeds too small).", flip_side=opposite, confirmed_proceeds=confirmed_proceeds)
             return "EXITED"
 
@@ -388,6 +433,7 @@ class BinaryExecutor:
             confirmed_proceeds=confirmed_proceeds,
             sale_price_used=sale_price,
         )
+        self._portfolio_reserve(usd_budget)
         buy_result = self.adapter.buy_no_fak(opposite_token, usd_budget, cap) if opposite == "no" else self.adapter.buy_yes_fak(opposite_token, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, opposite_token)
         if buy_fill.filled_shares <= 0:
@@ -403,6 +449,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="flip_incomplete", from_side=held, total_sold=total_sold, intended_side=opposite)
+            self._portfolio_release()
             self.notifier.notify("Sold held side but flip buy did not fill. Manual intervention required.", total_sold=total_sold, flip_side=opposite)
             return "FLIP_INCOMPLETE"
 

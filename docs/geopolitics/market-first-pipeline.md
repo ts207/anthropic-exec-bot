@@ -56,6 +56,40 @@ under the config's `data_dir` as atomic JSON records.
   (`alert_only`) — the standard inspect/preflight/ack/soak sequence from
   `autonomous-entry-hardening.md` still governs live arming.
 
+## Recurring operation
+
+`run-discovery` runs the full cycle (discover → grade → plan-sources → scan)
+on `schedule.interval_minutes`, alerting via Telegram whenever a market newly
+becomes `LIVE_CONFIRMATION_ELIGIBLE` or an opportunity newly clears every
+gate. `run-discovery --once` performs a single cycle for cron/systemd timers.
+Cycle diffs persist in `pipeline_state.json`; failures log and wait for the
+next cycle instead of killing the loop.
+
+## Shared portfolio ledger
+
+The allocator persists its caps into `allocations.json` (the ledger) on every
+pipeline run. Emitted executor configs carry a `portfolio:` section binding
+them to that ledger, and both the location and binary executors then:
+
+- clamp every entry/rotation/flip buy by the ledger preview **in addition to**
+  their own risk budgets and guardrails (any ledger problem fails closed);
+- debit the ledger on order attempt (reserve-on-attempt, matching RiskState
+  semantics: an unfilled order still consumed allowance);
+- free the simultaneous-position slot when the position closes (exit,
+  incomplete rotation/flip, or wallet reconciliation to flat).
+
+Hand-written configs without a `portfolio:` section are unaffected.
+
+## Probability sources for the scan
+
+`scan-opportunities` prices an outcome only when it has a probability
+estimate, in priority order: fresh paper-forecast state
+(`forecast_probability.json` written by the location bot's forecast engine
+under the emitted config's data dir), then operator-supplied
+`opportunity.probability_estimates`. Stale forecast state (older than
+`forecast_max_age_hours`) is ignored, and an outcome with no estimate is
+reported as `no_probability_estimate` -- never traded.
+
 ## What stays manual (deliberately)
 
 - Probability estimates for the opportunity scan are operator- or

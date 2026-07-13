@@ -9,6 +9,7 @@ import yaml
 # Reused as-is, same rationale as polybot.location.config: these shapes are
 # provider/market-agnostic and OperatorGate duck-types on them.
 from polybot.core.config import ClassifierConfig, SafetyConfig, SourcesConfig  # noqa: F401
+from polybot.core.portfolio import PortfolioConfig  # noqa: F401
 
 HELD_SIDES = {"", "YES", "NO"}
 ENTRY_SIDES = {"YES", "NO"}
@@ -123,6 +124,7 @@ class BinaryBotConfig:
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     entry: EntryConfig = field(default_factory=EntryConfig)
+    portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     time_decay: TimeDecayConfig = field(default_factory=TimeDecayConfig)
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
@@ -148,6 +150,7 @@ def load_binary_config(path: Path) -> BinaryBotConfig:
         trigger=TriggerConfig(**_section(raw, "trigger")),
         classifier=ClassifierConfig(**_section(raw, "classifier")),
         entry=EntryConfig(**entry_raw),
+        portfolio=PortfolioConfig(**_section(raw, "portfolio")),
         execution=ExecutionConfig(
             dry_run=bool(execution_raw.get("dry_run", True)),
             sell=SellConfig(**_section(execution_raw, "sell")),

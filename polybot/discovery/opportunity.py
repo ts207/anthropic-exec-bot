@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Protocol
 
 from .allocator import AllocationRequest, PortfolioAllocator
 from .config import OpportunityConfig
-from .types import MarketContext, Opportunity, TRADEABLE_STATES
+from .types import MarketContext, Opportunity, TRADEABLE_STATES, market_dir_slug
 
 
 class QuoteProviderProtocol(Protocol):
@@ -32,6 +35,64 @@ def config_probability_lookup(config: OpportunityConfig) -> ProbabilityLookup:
     return lookup
 
 
+def forecast_probability_lookup(config: OpportunityConfig) -> ProbabilityLookup:
+    """Read the paper forecast engine's persisted probabilities for a market.
+
+    Emitted executor configs keep their state under
+    <forecast_data_root>/<market-slug>[/dry_run]/forecast_probability.json.
+    Stale or malformed state is ignored -- a probability the engine stopped
+    updating must not keep pricing opportunities.
+    """
+
+    def lookup(market_id: str, outcome: str) -> tuple[float, str] | None:
+        base = Path(config.forecast_data_root) / market_dir_slug(market_id)
+        for candidate in (base / "dry_run" / "forecast_probability.json", base / "forecast_probability.json"):
+            if not candidate.exists():
+                continue
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            if _too_old(str(raw.get("updated_at") or ""), config.forecast_max_age_hours):
+                continue
+            probabilities = raw.get("probabilities")
+            if not isinstance(probabilities, dict) or outcome not in probabilities:
+                continue
+            try:
+                return float(probabilities[outcome]), "forecast_state"
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    return lookup
+
+
+def combined_probability_lookup(config: OpportunityConfig) -> ProbabilityLookup:
+    """Fresh forecast state wins over operator config estimates."""
+    forecast = forecast_probability_lookup(config)
+    static = config_probability_lookup(config)
+
+    def lookup(market_id: str, outcome: str) -> tuple[float, str] | None:
+        return forecast(market_id, outcome) or static(market_id, outcome)
+
+    return lookup
+
+
+def _too_old(updated_at: str, max_age_hours: float) -> bool:
+    if max_age_hours <= 0:
+        return False
+    text = updated_at.strip().replace("Z", "+00:00")
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        return True
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - stamp).total_seconds() > max_age_hours * 3600.0
+
+
 def tradable_edge(probability: float, executable_price: float, config: OpportunityConfig) -> float:
     """The question is never 'is this outcome likely?' -- it is whether the
     estimated probability beats the executable price by enough to survive
@@ -56,7 +117,7 @@ def scan_opportunities(
     """Evaluate every outcome of every PAPER/LIVE-eligible market against its
     executable price. Every non-opportunity is still returned with blockers so
     the funnel report can explain where edge died."""
-    probability_lookup = probability_lookup or config_probability_lookup(config)
+    probability_lookup = probability_lookup or combined_probability_lookup(config)
     results: list[Opportunity] = []
     for context in contexts:
         if context.state not in TRADEABLE_STATES:

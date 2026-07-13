@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from polybot.core.config import ClassifierConfig  # noqa: F401
+from polybot.core.portfolio import AllocatorConfig  # noqa: F401
 
 
 def _default_include_keywords() -> list[str]:
@@ -79,22 +80,20 @@ class OpportunityConfig:
     max_entry_price: float = 0.90
     max_spread: float = 0.15
     # Operator-supplied probability estimates: market_id -> outcome -> p.
-    # Forecast paper state, when present, overrides these.
+    # Forecast paper state, when present and fresh, overrides these.
     probability_estimates: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Where emitted executor configs keep their data dirs; the paper forecast
+    # engine persists forecast_probability.json under
+    # <root>/<market-slug>[/dry_run]/ and the scan reads it from there.
+    forecast_data_root: str = "data/geopolitics"
+    forecast_max_age_hours: float = 24.0
 
 
 @dataclass(frozen=True)
-class AllocatorConfig:
-    """Portfolio-level exposure caps across every discovered market."""
+class ScheduleConfig:
+    """Pacing for the recurring run-discovery loop."""
 
-    per_order_usd: float = 50.0
-    per_market_usd: float = 100.0
-    per_event_usd: float = 150.0
-    per_group_usd: float = 200.0  # correlation-group concentration
-    daily_usd: float = 300.0
-    total_usd: float = 1000.0
-    max_open_positions: int = 5
-    max_per_deadline_week_usd: float = 400.0
+    interval_minutes: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -103,6 +102,7 @@ class DiscoveryConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     opportunity: OpportunityConfig = field(default_factory=OpportunityConfig)
     allocator: AllocatorConfig = field(default_factory=AllocatorConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     data_dir: Path = Path("data/discovery")
     logs_dir: Path = Path("logs")
@@ -117,6 +117,7 @@ def load_discovery_config(path: Path) -> DiscoveryConfig:
         scoring=ScoringConfig(**_section(raw, "scoring")),
         opportunity=OpportunityConfig(**_section(raw, "opportunity")),
         allocator=AllocatorConfig(**_section(raw, "allocator")),
+        schedule=ScheduleConfig(**_section(raw, "schedule")),
         classifier=ClassifierConfig(**_section(raw, "classifier")),
         data_dir=Path(str(raw.get("data_dir", "data/discovery"))),
         logs_dir=Path(str(raw.get("logs_dir", "logs"))),

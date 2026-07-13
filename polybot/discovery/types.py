@@ -20,6 +20,14 @@ MARKET_STATES = {
 TRADEABLE_STATES = {"PAPER_ELIGIBLE", "LIVE_CONFIRMATION_ELIGIBLE"}
 
 
+def market_dir_slug(market_id: str) -> str:
+    """Filesystem-safe market key. Shared by config emission (executor
+    data_dir) and the forecast-state lookup so both resolve the same path."""
+    import re
+
+    return re.sub(r"[^A-Za-z0-9_-]", "-", market_id)[:120]
+
+
 @dataclass(frozen=True)
 class OutcomeRecord:
     """One tradeable leg: for a binary market this is the single YES/NO pair;

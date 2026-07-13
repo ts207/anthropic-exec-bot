@@ -13,6 +13,7 @@ from polybot.risk import RiskState
 
 from polybot.core.execution import DryRunTradingAdapter, Fill, LivePosition, LiveClobTradingAdapter, TradingAdapter  # noqa: F401
 from polybot.core.notifier import Notifier
+from polybot.core.portfolio import PortfolioLink
 from polybot.core.storage import StateStore
 from polybot.core.types import Article
 
@@ -47,6 +48,7 @@ class LocationExecutor:
         self.journal = ExecutionJournal(self.store.data_dir)
         risk_path = SETTINGS.risk_state_path if not config.execution.dry_run else self.store.data_dir / "risk_state.json"
         self.risk = risk or RiskState.load(path=risk_path)
+        self.portfolio = PortfolioLink.from_config(config.portfolio)
 
     def held_outcome(self) -> OutcomeMarket | None:
         name = self.holdings.held_location()
@@ -158,6 +160,7 @@ class LocationExecutor:
         if not found:
             if local is not None:
                 self.holdings.clear_held(source="wallet_reconciliation", previous_local=local, balances=balances)
+                self._portfolio_release()
             return {"held_location": None, "balances": balances, "no_balances": no_balances, "open_orders": open_orders, "changed": local is not None}
         outcome, position = found[0]
         changed = local != outcome.name
@@ -342,6 +345,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold)
+            self._portfolio_release()
             self.notifier.notify("Exited held-outcome YES exposure (sell-only)", outcome=held.label, total_sold=total_sold)
             self.journal.update(journal, "completed", result="EXITED", total_sold=total_sold)
             return "EXITED"
@@ -363,6 +367,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason="rotation_target_missing")
+            self._portfolio_release()
             self.notifier.notify("Rotation target missing from config; exited without buying", total_sold=total_sold)
             self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_missing")
             return "EXITED"
@@ -405,6 +410,12 @@ class LocationExecutor:
             self.store.write("ENTRY_RISK_BLOCKED", reason=reason, target_outcome=target.name, usd_budget=usd_budget)
             log_event("location_entry_skip", reason=reason, usd_budget=usd_budget)
             return "ENTRY_RISK_BLOCKED"
+        usd_budget, portfolio_blockers = self._portfolio_allowed(usd_budget)
+        if portfolio_blockers or usd_budget < min_viable_order_usd:
+            reason = ",".join(portfolio_blockers) or "portfolio_allowance_exhausted"
+            self.store.write("ENTRY_PORTFOLIO_BLOCKED", reason=reason, target_outcome=target.name, usd_budget=usd_budget)
+            log_event("location_entry_skip", reason=f"portfolio:{reason}", usd_budget=usd_budget)
+            return "ENTRY_PORTFOLIO_BLOCKED"
 
         journal = self.journal.start("ENTER_YES", decision=_decision_dict(decision), article=article.__dict__)
         self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
@@ -474,10 +485,12 @@ class LocationExecutor:
             cancel_result=cancel_result,
         )
         self.risk.reserve_order_attempt(target.condition_id, usd_budget)
+        self._portfolio_reserve(usd_budget)
         buy_result = self.adapter.buy_yes_fak(target.yes_token_id, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
         journal = self.journal.update(journal, "buy_reconciled", buy_result=buy_result, filled_shares=buy_fill.filled_shares)
         if buy_fill.filled_shares <= 0:
+            self._portfolio_release()
             self.store.write(
                 "ENTRY_UNFILLED",
                 target_outcome=target.name,
@@ -606,6 +619,22 @@ class LocationExecutor:
             ),
         )
 
+    def _portfolio_allowed(self, requested: float) -> tuple[float, list[str]]:
+        """Additional clamp by the shared cross-market ledger (discovery
+        pipeline allocator). No-op for standalone configs without a ledger."""
+        if self.portfolio is None:
+            return requested, []
+        granted, blockers = self.portfolio.allowed(requested)
+        return min(requested, granted), blockers
+
+    def _portfolio_reserve(self, usd: float) -> None:
+        if self.portfolio is not None and usd > 0:
+            self.portfolio.reserve(usd)
+
+    def _portfolio_release(self) -> None:
+        if self.portfolio is not None:
+            self.portfolio.release()
+
     def _buy_rotation_leg(
         self,
         decision: LocationDecision,
@@ -644,6 +673,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason="rotation_target_above_cap_or_unavailable")
+            self._portfolio_release()
             self.notifier.notify(
                 "Sold held YES. Rotation buy skipped (target price above cap or unavailable).",
                 target=target.label,
@@ -673,6 +703,7 @@ class LocationExecutor:
                 total_sold=total_sold,
                 reason="rotation_target_spread_too_wide",
             )
+            self._portfolio_release()
             self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_spread_too_wide")
             return "EXITED"
 
@@ -686,12 +717,17 @@ class LocationExecutor:
             confirmed_proceeds,
         )
         usd_budget = self._allowed_buy_notional(target.condition_id, requested_budget)
+        usd_budget, portfolio_blockers = self._portfolio_allowed(usd_budget)
         min_viable_order_usd = 1.0
         if usd_budget < min_viable_order_usd:
             block_reason = (
                 "insufficient_sale_proceeds_for_rotation_buy"
                 if requested_budget < min_viable_order_usd
-                else ("risk_halted" if self.risk.halted else "rotation_risk_budget_exhausted")
+                else (
+                    f"rotation_portfolio_blocked:{','.join(portfolio_blockers)}"
+                    if portfolio_blockers
+                    else ("risk_halted" if self.risk.halted else "rotation_risk_budget_exhausted")
+                )
             )
             self.store.write(
                 "EXITED",
@@ -712,6 +748,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason=block_reason)
+            self._portfolio_release()
             self.notifier.notify(
                 "Sold held YES. Rotation buy skipped (confirmed sale proceeds too small to fund a real order).",
                 target=target.label,
@@ -734,6 +771,7 @@ class LocationExecutor:
             max_rotation_usd_to_buy=self.config.position.max_rotation_usd_to_buy,
         )
         self.risk.reserve_order_attempt(target.condition_id, usd_budget)
+        self._portfolio_reserve(usd_budget)
         buy_result = self.adapter.buy_yes_fak(target.yes_token_id, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
         journal = self.journal.update(journal, "rotation_buy_reconciled", buy_result=buy_result, filled_shares=buy_fill.filled_shares)
@@ -754,6 +792,7 @@ class LocationExecutor:
             # The held YES was fully sold before the buy failed, so the live
             # book position is flat even though the state is FLIP_INCOMPLETE.
             self.holdings.clear_held(source="rotation_incomplete", from_outcome=held.name, total_sold=total_sold, intended_target=target.name)
+            self._portfolio_release()
             self.notifier.notify("Sold held YES but rotation buy did not fill. Manual intervention required.", total_sold=total_sold, target=target.label)
             self.journal.update(journal, "failed", result="FLIP_INCOMPLETE", reason="rotation_buy_unfilled")
             return "FLIP_INCOMPLETE"

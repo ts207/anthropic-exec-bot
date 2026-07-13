@@ -417,3 +417,199 @@ opportunity:
     assert report["funnel"]["understandable_markets"] == 2
     assert report["funnel"]["live_confirmation_eligible"] == 2
     assert report["funnel"]["executable_opportunities"] == 1
+
+
+# ---- portfolio ledger caps + executor link ----
+
+
+def test_allocator_caps_roundtrip_from_ledger(tmp_path) -> None:
+    allocator = _allocator(tmp_path, per_order_usd=25.0, total_usd=500.0)
+    allocator.write_caps()
+    attached = PortfolioAllocator.from_ledger(tmp_path / "allocations.json")
+    assert attached.config.per_order_usd == 25.0
+    assert attached.config.total_usd == 500.0
+
+    with pytest.raises(ValueError, match="does not exist"):
+        PortfolioAllocator.from_ledger(tmp_path / "missing.json")
+
+
+def test_binary_executor_debits_and_releases_ledger(tmp_path) -> None:
+    from polybot.binary.config import BinaryBotConfig as _BinaryBotConfig  # local alias to avoid confusion
+    from polybot.binary.config import EntryConfig as BinaryEntryConfig
+    from polybot.binary.config import MarketConfig as BinaryMarketConfig
+    from polybot.binary.decision import BinaryDecision
+    from polybot.binary.executor import BinaryExecutor
+    from polybot.binary.market_verifier import BinaryMarketVerification
+    from polybot.core.execution import DryRunTradingAdapter
+    from polybot.core.portfolio import PortfolioConfig
+    from polybot.core.storage import StateStore
+
+    ledger = tmp_path / "allocations.json"
+    _allocator(tmp_path, per_order_usd=40.0).write_caps()
+
+    config = _BinaryBotConfig(
+        market=BinaryMarketConfig(slug="s", deadline_date="2026-09-30", held_side="", resolution_rules="rules"),
+        entry=BinaryEntryConfig(enabled=True, side="YES", usd_budget=100.0, max_price=0.90),
+        portfolio=PortfolioConfig(
+            ledger_path=str(ledger),
+            market_id="mkt-1",
+            event_slug="evt-1",
+            correlation_group="iran|united_states",
+            deadline_iso="2026-09-30T23:59:00Z",
+        ),
+    )
+    verification = BinaryMarketVerification(
+        event_slug="s", market_question="q", rule_text="rules", rule_text_sha256="d",
+        condition_id="0xc", yes_token_id="yt", no_token_id="nt", tradeable=True, tick_size="0.01", neg_risk=False,
+    )
+
+    class _Notifier:
+        def notify(self, message, **fields):
+            pass
+
+    executor = BinaryExecutor(config, verification, StateStore(tmp_path / "state"), _Notifier(), DryRunTradingAdapter(yes_shares=250.0, yes_ask=0.40))
+    decision = BinaryDecision("ENTER_YES", "4B", "qualifying_event_confirmed:scheduled")
+    assert executor.execute(decision, _sig_article("The round will be held next week.")) == "ENTERED"
+
+    # Entry budget (100) was clamped to the ledger's per-order cap (40) and debited.
+    snapshot = PortfolioAllocator.from_ledger(ledger).snapshot()
+    assert snapshot["per_market"]["mkt-1"] == 40.0
+    assert snapshot["open_positions"] == ["mkt-1"]
+    entered = executor.store.current()
+    assert entered is not None and entered.payload["usd_budget"] == 40.0
+
+    exit_decision = BinaryDecision("EXIT_HELD", "4B", "yes_foreclosure_confirmed")
+    assert executor.execute(exit_decision, _sig_article("Talks cancelled, will not happen.")) == "EXITED"
+    snapshot = PortfolioAllocator.from_ledger(ledger).snapshot()
+    assert snapshot["open_positions"] == []  # slot freed; spend history retained
+    assert snapshot["per_market"]["mkt-1"] == 40.0
+
+
+def test_binary_executor_blocked_when_ledger_exhausted(tmp_path) -> None:
+    from polybot.binary.config import BinaryBotConfig as _BinaryBotConfig
+    from polybot.binary.config import EntryConfig as BinaryEntryConfig
+    from polybot.binary.config import MarketConfig as BinaryMarketConfig
+    from polybot.binary.decision import BinaryDecision
+    from polybot.binary.executor import BinaryExecutor
+    from polybot.binary.market_verifier import BinaryMarketVerification
+    from polybot.core.execution import DryRunTradingAdapter
+    from polybot.core.portfolio import AllocationRequest, PortfolioConfig
+    from polybot.core.storage import StateStore
+
+    ledger = tmp_path / "allocations.json"
+    allocator = _allocator(tmp_path, per_market_usd=50.0)
+    allocator.write_caps()
+    allocator.commit(AllocationRequest(market_id="mkt-1", event_slug="evt-1", correlation_group="g", deadline_iso="2026-09-30T23:59:00Z", usd=50.0))
+
+    config = _BinaryBotConfig(
+        market=BinaryMarketConfig(slug="s", deadline_date="2026-09-30", held_side="", resolution_rules="rules"),
+        entry=BinaryEntryConfig(enabled=True, side="YES", usd_budget=100.0, max_price=0.90),
+        portfolio=PortfolioConfig(ledger_path=str(ledger), market_id="mkt-1", event_slug="evt-1", correlation_group="g", deadline_iso="2026-09-30T23:59:00Z"),
+    )
+    verification = BinaryMarketVerification(
+        event_slug="s", market_question="q", rule_text="rules", rule_text_sha256="d",
+        condition_id="0xc", yes_token_id="yt", no_token_id="nt", tradeable=True, tick_size="0.01", neg_risk=False,
+    )
+
+    class _Notifier:
+        def notify(self, message, **fields):
+            pass
+
+    executor = BinaryExecutor(config, verification, StateStore(tmp_path / "state"), _Notifier(), DryRunTradingAdapter(yes_ask=0.40))
+    decision = BinaryDecision("ENTER_YES", "4B", "qualifying_event_confirmed:scheduled")
+    assert executor.execute(decision, _sig_article("The round will be held next week.")) == "ENTRY_PORTFOLIO_BLOCKED"
+    assert executor.holdings.held_location() is None
+
+
+def _sig_article(text: str):
+    from polybot.core.types import Article
+
+    return Article(
+        url="https://reuters.com/story",
+        domain="reuters.com",
+        title=text,
+        published_at=None,
+        fetched_at="2026-07-10T00:00:00Z",
+        raw_text=text,
+        hash=str(abs(hash(text))),
+    )
+
+
+# ---- forecast probability source ----
+
+
+def _write_forecast_state(root: Path, market_id: str, probabilities: dict, updated_at: str) -> None:
+    from polybot.discovery.types import market_dir_slug
+
+    path = root / market_dir_slug(market_id) / "dry_run" / "forecast_probability.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"updated_at": updated_at, "probabilities": probabilities}), encoding="utf-8")
+
+
+def test_scan_prefers_fresh_forecast_state(tmp_path) -> None:
+    from datetime import datetime, timezone
+
+    context = _graded(_binary_event())
+    root = tmp_path / "geo"
+    _write_forecast_state(root, context.market_id, {"yes": 0.70}, datetime.now(timezone.utc).isoformat())
+    config = OpportunityConfig(
+        probability_estimates={context.market_id: {"yes": 0.55}},
+        forecast_data_root=str(root),
+    )
+    results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
+    assert results[0].probability_source == "forecast_state"
+    assert results[0].estimated_probability == 0.70
+
+
+def test_scan_ignores_stale_forecast_state(tmp_path) -> None:
+    context = _graded(_binary_event())
+    root = tmp_path / "geo"
+    _write_forecast_state(root, context.market_id, {"yes": 0.70}, "2020-01-01T00:00:00+00:00")
+    config = OpportunityConfig(
+        probability_estimates={context.market_id: {"yes": 0.55}},
+        forecast_data_root=str(root),
+    )
+    results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
+    assert results[0].probability_source == "config_estimate"
+    assert results[0].estimated_probability == 0.55
+
+
+# ---- scheduled loop ----
+
+
+def test_run_discovery_once_alerts_on_new_eligible(tmp_path) -> None:
+    from polybot.discovery.runner import run_discovery_command
+
+    config_path = _pipeline_config(tmp_path)
+    binary_id = "0xiran-ceasefire-m"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + f"""
+opportunity:
+  probability_estimates:
+    "{binary_id}":
+      "yes": 0.60
+""",
+        encoding="utf-8",
+    )
+    events = [_grouped_event(), _binary_event()]
+
+    def fetch(url: str, params: dict) -> list[dict]:
+        return events if params.get("offset", 0) == 0 else []
+
+    notified: list[tuple[str, dict]] = []
+
+    class _Notifier:
+        def notify(self, message, **fields):
+            notified.append((message, fields))
+
+    assert run_discovery_command(config_path, once=True, events_fetch=fetch, quotes=_FakeQuotes(), notifier=_Notifier()) == 0
+    new_live = [n for n in notified if "newly LIVE_CONFIRMATION_ELIGIBLE" in n[0]]
+    new_exec = [n for n in notified if "newly executable" in n[0]]
+    assert len(new_live) == 2
+    assert len(new_exec) == 1
+    assert (tmp_path / "data" / "pipeline_state.json").exists()
+
+    notified.clear()
+    assert run_discovery_command(config_path, once=True, events_fetch=fetch, quotes=_FakeQuotes(), notifier=_Notifier()) == 0
+    assert not [n for n in notified if "newly" in n[0]]  # no repeats on an unchanged universe

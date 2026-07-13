@@ -24,6 +24,9 @@ def _load(config_path: Path) -> tuple[DiscoveryConfig, DiscoveryStore, Portfolio
     config = load_discovery_config(config_path)
     store = DiscoveryStore(config.data_dir)
     allocator = PortfolioAllocator(config.data_dir / "allocations.json", config.allocator)
+    # Persist the caps into the ledger so executor-side PortfolioLinks enforce
+    # exactly the limits this pipeline run was configured with.
+    allocator.write_caps()
     return config, store, allocator
 
 
@@ -180,7 +183,13 @@ def emit_bot_config_command(config_path: Path, market_id: str, out: Path | None 
     if plan is None:
         raise SystemExit(f"market {market_id} has no source plan; run plan-sources first")
     out = out or Path("configs/geopolitics/generated") / f"{_safe(market_id)}.yaml"
-    path = emit_bot_config(context, plan, entry_usd=allocator.config.per_order_usd, out_path=out)
+    path = emit_bot_config(
+        context,
+        plan,
+        entry_usd=allocator.config.per_order_usd,
+        out_path=out,
+        ledger_path=str(allocator.state_path),
+    )
     print(json.dumps({"written": str(path), "kind": context.kind, "state": context.state}, indent=2))
     return 0
 
@@ -222,6 +231,111 @@ def funnel_report_command(config_path: Path) -> int:
     }
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return 0
+
+
+def run_discovery_command(
+    config_path: Path,
+    *,
+    once: bool = False,
+    events_fetch: Callable[[str, dict[str, Any]], list[dict[str, Any]]] | None = None,
+    quotes: QuoteProviderProtocol | None = None,
+    analyzer=None,
+    notifier=None,
+) -> int:
+    """Scheduled pipeline loop: discover -> grade -> plan-sources -> scan on
+    an interval, alerting (Telegram) on newly LIVE_CONFIRMATION_ELIGIBLE
+    markets and newly executable opportunities. Each stage is fault-isolated:
+    one bad cycle logs and waits for the next instead of killing the loop."""
+    import time
+
+    from polybot.core.notifier import TelegramNotifier
+
+    config, _, _ = _load(config_path)
+    notifier = notifier or TelegramNotifier()
+    while True:
+        try:
+            _run_discovery_cycle(config_path, config, events_fetch=events_fetch, quotes=quotes, analyzer=analyzer, notifier=notifier)
+        except Exception as exc:
+            log_event("discovery_cycle_error", error=str(exc))
+            try:
+                notifier.notify("Discovery pipeline cycle failed; continuing", error=str(exc))
+            except Exception as notify_exc:
+                log_event("discovery_notify_failed", error=str(notify_exc))
+        if once:
+            return 0
+        time.sleep(max(60.0, config.schedule.interval_minutes * 60.0))
+
+
+def _run_discovery_cycle(
+    config_path: Path,
+    config: DiscoveryConfig,
+    *,
+    events_fetch,
+    quotes,
+    analyzer,
+    notifier,
+) -> None:
+    store = DiscoveryStore(config.data_dir)
+    previous = _pipeline_state(config)
+    discover_markets_command(config_path, events_fetch=events_fetch)
+    grade_markets_command(config_path, analyzer=analyzer)
+    plan_sources_command(config_path)
+    scan_opportunities_command(config_path, quotes=quotes)
+
+    contexts = store.all_contexts()
+    live_now = sorted(c.market_id for c in contexts if c.state == "LIVE_CONFIRMATION_ELIGIBLE")
+    executable_now = sorted(
+        f"{o.get('market_id')}:{o.get('outcome')}"
+        for o in _last_scan(config)
+        if not o.get("blockers")
+    )
+    new_live = [m for m in live_now if m not in set(previous.get("live_eligible", []))]
+    new_executable = [o for o in executable_now if o not in set(previous.get("executable", []))]
+    for market_id in new_live:
+        context = store.load_context(market_id)
+        notifier.notify(
+            "Discovery: market newly LIVE_CONFIRMATION_ELIGIBLE",
+            market_id=market_id,
+            question=(context.question if context else ""),
+            deadline=(context.deadline_iso if context else ""),
+            next_step=f"emit-bot-config --market {market_id}",
+        )
+    for key in new_executable:
+        notifier.notify("Discovery: newly executable opportunity", opportunity=key)
+    _atomic_json_write(
+        config.data_dir / "pipeline_state.json",
+        {"live_eligible": live_now, "executable": executable_now},
+    )
+    log_event(
+        "discovery_cycle_complete",
+        live_eligible=len(live_now),
+        executable=len(executable_now),
+        new_live=len(new_live),
+        new_executable=len(new_executable),
+    )
+
+
+def _pipeline_state(config: DiscoveryConfig) -> dict[str, Any]:
+    path = config.data_dir / "pipeline_state.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _last_scan(config: DiscoveryConfig) -> list[dict[str, Any]]:
+    path = config.data_dir / "opportunities.json"
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    items = raw.get("opportunities") if isinstance(raw, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
 def _live_quotes(contexts: list[MarketContext]) -> QuoteProviderProtocol:

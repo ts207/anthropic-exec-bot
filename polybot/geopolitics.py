@@ -97,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     emit_bot_config_parser.add_argument("--out")
     funnel_report_parser = sub.add_parser("funnel-report")
     funnel_report_parser.add_argument("--config", required=True)
+    run_discovery_parser = sub.add_parser("run-discovery")
+    run_discovery_parser.add_argument("--config", required=True)
+    run_discovery_parser.add_argument("--once", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "inspect-iran":
@@ -211,6 +214,10 @@ def main(argv: list[str] | None = None) -> int:
         from .discovery.runner import funnel_report_command
 
         return funnel_report_command(Path(args.config))
+    if args.command == "run-discovery":
+        from .discovery.runner import run_discovery_command
+
+        return run_discovery_command(Path(args.config), once=args.once)
     return 2
 
 

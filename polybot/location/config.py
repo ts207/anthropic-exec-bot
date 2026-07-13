@@ -11,6 +11,7 @@ import yaml
 # attributes, so sharing the dataclasses keeps that gate reusable without
 # modification.
 from polybot.core.config import ClassifierConfig, SafetyConfig, SourcesConfig  # noqa: F401
+from polybot.core.portfolio import PortfolioConfig  # noqa: F401
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,7 @@ class LocationBotConfig:
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     entry: EntryConfig = field(default_factory=EntryConfig)
     forecast: ForecastConfig = field(default_factory=ForecastConfig)
+    portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     time_decay: TimeDecayConfig = field(default_factory=TimeDecayConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
@@ -262,6 +264,7 @@ def load_location_config(path: Path) -> LocationBotConfig:
         classifier=ClassifierConfig(**_section(raw, "classifier")),
         entry=EntryConfig(**_section(raw, "entry")),
         forecast=ForecastConfig(**_section(raw, "forecast")),
+        portfolio=PortfolioConfig(**_section(raw, "portfolio")),
         execution=ExecutionConfig(
             dry_run=bool(execution_raw.get("dry_run", True)),
             sell=SellConfig(**_section(execution_raw, "sell")),

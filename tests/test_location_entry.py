@@ -712,3 +712,57 @@ def test_load_config_rejects_unsafe_entry_numbers(tmp_path, entry_block, message
     path = _yaml_config(tmp_path, held_location="", entry_block=entry_block)
     with pytest.raises(ValueError, match=message):
         load_location_config(path)
+
+
+# ---- shared portfolio ledger ----
+
+
+def test_entry_clamped_and_debited_by_portfolio_ledger(tmp_path) -> None:
+    from polybot.core.portfolio import AllocatorConfig, PortfolioAllocator, PortfolioConfig
+
+    ledger = tmp_path / "allocations.json"
+    # Tighter than both entry.usd_budget (100) and the global per-order
+    # guardrail, so the ledger is the binding constraint.
+    PortfolioAllocator(ledger, AllocatorConfig(per_order_usd=10.0)).write_caps()
+    config = _flat_config(
+        portfolio=PortfolioConfig(
+            ledger_path=str(ledger),
+            market_id="us-iran-talks-location",
+            event_slug="us-iran-talks-location",
+            correlation_group="iran|united_states",
+            deadline_iso="2026-09-30T23:59:00Z",
+        ),
+    )
+    executor = _executor(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40, yes_bid=0.38))
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    result = executor.execute(decision, article("Officials confirm the round will be held in Qatar."))
+    assert result == "ENTERED"
+    snapshot = PortfolioAllocator.from_ledger(ledger).snapshot()
+    assert snapshot["per_market"]["us-iran-talks-location"] == 10.0
+    assert snapshot["open_positions"] == ["us-iran-talks-location"]
+
+    exit_decision = LocationDecision("EXIT_YES_ONLY", "4B", "no_meeting_confirmed", factors=_signal(confirmed_location="no_meeting"))
+    assert executor.execute(exit_decision, article("No qualifying round will occur before the deadline.")) == "EXITED"
+    snapshot = PortfolioAllocator.from_ledger(ledger).snapshot()
+    assert snapshot["open_positions"] == []
+
+
+def test_entry_blocked_when_portfolio_exhausted(tmp_path) -> None:
+    from polybot.core.portfolio import AllocationRequest, AllocatorConfig, PortfolioAllocator, PortfolioConfig
+
+    ledger = tmp_path / "allocations.json"
+    allocator = PortfolioAllocator(ledger, AllocatorConfig(total_usd=50.0))
+    allocator.write_caps()
+    allocator.commit(AllocationRequest(market_id="other", event_slug="other", correlation_group="g", deadline_iso="2026-09-30T23:59:00Z", usd=50.0))
+    config = _flat_config(
+        portfolio=PortfolioConfig(
+            ledger_path=str(ledger),
+            market_id="us-iran-talks-location",
+            deadline_iso="2026-09-30T23:59:00Z",
+        ),
+    )
+    executor = _executor(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40, yes_bid=0.38))
+    decision = LocationDecision("ENTER_YES", "4B", "confirmed_location:qatar", target_outcome="qatar", factors=_signal())
+    result = executor.execute(decision, article("Officials confirm the round will be held in Qatar."))
+    assert result == "ENTRY_PORTFOLIO_BLOCKED"
+    assert executor.holdings.held_location() is None

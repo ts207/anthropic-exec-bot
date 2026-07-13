@@ -52,8 +52,18 @@ opportunity:
   max_spread: 0.15
   # Operator-supplied probability estimates (market_id -> outcome -> p).
   # Without an estimate an outcome is reported as no_probability_estimate,
-  # never traded. Forecast paper state can supply these once promoted.
+  # never traded. Fresh paper-forecast state (forecast_probability.json under
+  # <forecast_data_root>/<market-slug>[/dry_run]/) overrides these.
   probability_estimates: {}
+  forecast_data_root: "data/geopolitics"
+  forecast_max_age_hours: 24.0
+
+schedule:
+  # run-discovery loop pacing: discover -> grade -> plan-sources -> scan on
+  # this interval, alerting on newly LIVE_CONFIRMATION_ELIGIBLE markets and
+  # newly executable opportunities. Use `run-discovery --once` from cron or a
+  # systemd timer instead of the built-in loop if preferred.
+  interval_minutes: 60.0
 
 allocator:
   per_order_usd: 50.0
