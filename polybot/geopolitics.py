@@ -100,6 +100,12 @@ def main(argv: list[str] | None = None) -> int:
     run_discovery_parser = sub.add_parser("run-discovery")
     run_discovery_parser.add_argument("--config", required=True)
     run_discovery_parser.add_argument("--once", action="store_true")
+    run_fleet_parser = sub.add_parser("run-fleet")
+    run_fleet_parser.add_argument("--config", required=True)
+    run_fleet_parser.add_argument("--live", action="store_true")
+    run_fleet_parser.add_argument("--once", action="store_true")
+    set_fleet_mode_parser = sub.add_parser("set-fleet-mode")
+    set_fleet_mode_parser.add_argument("--mode", required=True, choices=["off", "alert_only", "dry_run", "live"])
 
     args = parser.parse_args(argv)
     if args.command == "inspect-iran":
@@ -218,6 +224,14 @@ def main(argv: list[str] | None = None) -> int:
         from .discovery.runner import run_discovery_command
 
         return run_discovery_command(Path(args.config), once=args.once)
+    if args.command == "run-fleet":
+        from .discovery.fleet import run_fleet_command
+
+        return run_fleet_command(Path(args.config), live=args.live, once=args.once)
+    if args.command == "set-fleet-mode":
+        from .discovery.fleet import set_fleet_mode_command
+
+        return set_fleet_mode_command(args.mode)
     return 2
 
 

@@ -65,6 +65,23 @@ schedule:
   # systemd timer instead of the built-in loop if preferred.
   interval_minutes: 60.0
 
+fleet:
+  # `run-fleet` = the whole-universe autopilot: runs the discovery cycle,
+  # emits/refreshes one executor config per LIVE_CONFIRMATION_ELIGIBLE market,
+  # arms each market's operator gate with position_mode, and supervises one
+  # bot subprocess per market. Defenders for held positions are never stopped.
+  # Master kill switch: `set-fleet-mode off` (shared operator global mode).
+  #
+  # Arming sequence for real money:
+  #   1. enabled: true, position_mode: alert_only -> monitoring soak
+  #   2. review logs/funnel/paper ledgers
+  #   3. position_mode: live, auto_ack: true, run with --live
+  enabled: false
+  max_bots: 10
+  position_mode: "alert_only"
+  auto_ack: false
+  generated_dir: "configs/geopolitics/generated"
+
 allocator:
   per_order_usd: 50.0
   per_market_usd: 100.0

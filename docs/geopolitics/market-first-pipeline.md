@@ -82,6 +82,27 @@ cost, and market selection. Four levers target them directly:
   (state.gov press releases, UN news, Al Jazeera) ahead of Google News
   queries, whose indexing lag is often 5-15 minutes.
 
+## Fleet mode: the whole-universe autopilot
+
+`run-fleet` is one supervisor for ALL geopolitical markets. Each cycle it:
+
+1. runs the full discovery cycle (discover → grade → plan-sources → scan);
+2. emits/refreshes an executor config per `LIVE_CONFIRMATION_ELIGIBLE` market
+   (liquidity-ranked, capped at `fleet.max_bots`), re-emitting only when the
+   rule hash or dry-run mode changed so the ack hash doesn't churn;
+3. arms each market's operator gate with `fleet.position_mode` and — with
+   `--live`, `position_mode: live`, and `auto_ack: true` — writes the config
+   ack, so the operator arms the fleet once instead of each market;
+4. supervises one bot subprocess per market (crashed bots restart next cycle);
+5. stops flat bots for demoted/closed markets — but a bot defending a HELD
+   position is never stopped by a grading change.
+
+All bots share `data/geopolitics/operator/`, so `set-fleet-mode off` is a
+single master kill switch that every executor obeys mid-cycle, and the shared
+portfolio ledger caps total exposure regardless of how many bots run.
+`services/geopolitics-fleet.service` deploys it (KillMode=control-group takes
+the supervised bots down with the fleet).
+
 ## Recurring operation
 
 `run-discovery` runs the full cycle (discover → grade → plan-sources → scan)

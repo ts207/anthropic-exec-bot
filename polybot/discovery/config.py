@@ -105,12 +105,40 @@ class ScheduleConfig:
 
 
 @dataclass(frozen=True)
+class FleetConfig:
+    """One supervisor process trading EVERY eligible geopolitical market.
+
+    The fleet runs the discovery cycle, emits/refreshes an executor config per
+    LIVE_CONFIRMATION_ELIGIBLE market, arms each market's operator gate with
+    `position_mode`, and supervises one bot subprocess per market. Bots for
+    markets that hold a position are never stopped (defense continues even
+    after a market is demoted); bots for flat demoted/closed markets are
+    stopped. The single master kill switch is the shared operator global mode
+    file (`set-fleet-mode off`).
+    """
+
+    enabled: bool = False
+    max_bots: int = 10
+    # Operator position mode written for every managed market: keep
+    # "alert_only" for a monitoring soak; "live" arms autonomous trading.
+    position_mode: str = "alert_only"
+    # Automatically acknowledge generated config hashes when arming live.
+    # Required for unattended trading across many markets -- the operator
+    # reviews and arms THE FLEET once instead of each market. The generated
+    # configs are deterministic renders of pipeline state the operator
+    # configured, and the master kill switch still stops everything.
+    auto_ack: bool = False
+    generated_dir: str = "configs/geopolitics/generated"
+
+
+@dataclass(frozen=True)
 class DiscoveryConfig:
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     opportunity: OpportunityConfig = field(default_factory=OpportunityConfig)
     allocator: AllocatorConfig = field(default_factory=AllocatorConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    fleet: FleetConfig = field(default_factory=FleetConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
     data_dir: Path = Path("data/discovery")
     logs_dir: Path = Path("logs")
@@ -126,6 +154,7 @@ def load_discovery_config(path: Path) -> DiscoveryConfig:
         opportunity=OpportunityConfig(**_section(raw, "opportunity")),
         allocator=AllocatorConfig(**_section(raw, "allocator")),
         schedule=ScheduleConfig(**_section(raw, "schedule")),
+        fleet=FleetConfig(**_section(raw, "fleet")),
         classifier=ClassifierConfig(**_section(raw, "classifier")),
         data_dir=Path(str(raw.get("data_dir", "data/discovery"))),
         logs_dir=Path(str(raw.get("logs_dir", "logs"))),
