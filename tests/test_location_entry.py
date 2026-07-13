@@ -722,8 +722,9 @@ def test_entry_clamped_and_debited_by_portfolio_ledger(tmp_path) -> None:
 
     ledger = tmp_path / "allocations.json"
     # Tighter than both entry.usd_budget (100) and the global per-order
-    # guardrail, so the ledger is the binding constraint.
-    PortfolioAllocator(ledger, AllocatorConfig(per_order_usd=10.0)).write_caps()
+    # guardrail (25), so the ledger is the binding constraint -- while staying
+    # above the small-fill thresholds that would classify PARTIALLY_ENTERED.
+    PortfolioAllocator(ledger, AllocatorConfig(per_order_usd=15.0)).write_caps()
     config = _flat_config(
         portfolio=PortfolioConfig(
             ledger_path=str(ledger),
@@ -738,7 +739,7 @@ def test_entry_clamped_and_debited_by_portfolio_ledger(tmp_path) -> None:
     result = executor.execute(decision, article("Officials confirm the round will be held in Qatar."))
     assert result == "ENTERED"
     snapshot = PortfolioAllocator.from_ledger(ledger).snapshot()
-    assert snapshot["per_market"]["us-iran-talks-location"] == 10.0
+    assert snapshot["per_market"]["us-iran-talks-location"] == 15.0
     assert snapshot["open_positions"] == ["us-iran-talks-location"]
 
     exit_decision = LocationDecision("EXIT_YES_ONLY", "4B", "no_meeting_confirmed", factors=_signal(confirmed_location="no_meeting"))
