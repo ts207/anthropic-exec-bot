@@ -427,32 +427,50 @@ class LocationProtectionBot:
             decay = time_decay_decision(self.config)
             if decay.action != "NO_ACTION" and self._decay_still_actionable(decay):
                 decisions.append(self._execute_if_allowed(decay, _synthetic_article(decay.reason)))
-        for url in self.config.sources.poll_urls:
-            for article in self._fetch_poll_articles(url):
+        # Sources are fetched CONCURRENTLY: sequential fetching made cycle
+        # wall-time the SUM of feed round-trips, dwarfing the poll interval.
+        # Classification/decisions stay serial and in stable order.
+        for kind, batch in self._fetch_all_sources():
+            for article in batch:
                 if not self.article_store.store(article):
                     continue
                 decisions.append(self.process_article(article))
-        for feed_url in self.config.sources.feed_urls:
+                if kind != "feed":
+                    continue
+                promoted = self._promote_feed_article(article)
+                if promoted is None or not self.article_store.store(promoted):
+                    continue
+                decisions.append(self.process_article(promoted))
+        return decisions
+
+    def _fetch_all_sources(self) -> list[tuple[str, list[Article]]]:
+        jobs: list[tuple[str, str]] = [("poll", url) for url in self.config.sources.poll_urls]
+        jobs += [("feed", url) for url in self.config.sources.feed_urls]
+        if not jobs:
+            return []
+
+        def fetch(job: tuple[str, str]) -> tuple[str, list[Article]]:
+            kind, url = job
+            if kind == "poll":
+                return kind, self._fetch_poll_articles(url)
             try:
-                articles = fetch_feed_articles(
-                    feed_url,
+                return kind, fetch_feed_articles(
+                    url,
                     SETTINGS.user_agent,
                     include_terms=self.config.sources.feed_include_terms,
                     exclude_terms=self.config.sources.feed_exclude_terms,
                     limit=self.config.sources.max_feed_entries_per_cycle,
                 )
             except Exception as exc:
-                log_event("location_feed_fetch_error", url=feed_url, error=str(exc))
-                continue
-            for article in articles:
-                if not self.article_store.store(article):
-                    continue
-                decisions.append(self.process_article(article))
-                promoted = self._promote_feed_article(article)
-                if promoted is None or not self.article_store.store(promoted):
-                    continue
-                decisions.append(self.process_article(promoted))
-        return decisions
+                log_event("location_feed_fetch_error", url=url, error=str(exc))
+                return kind, []
+
+        if len(jobs) == 1:
+            return [fetch(jobs[0])]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as pool:
+            return list(pool.map(fetch, jobs))
 
     def _decay_still_actionable(self, decay: LocationDecision) -> bool:
         """Suppress re-executing a time-decay decision every polling cycle.

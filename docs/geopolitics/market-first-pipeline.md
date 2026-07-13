@@ -81,6 +81,10 @@ cost, and market selection. Four levers target them directly:
 - **Direct publisher feeds**: source plans now lead with direct RSS endpoints
   (state.gov press releases, UN news, Al Jazeera) ahead of Google News
   queries, whose indexing lag is often 5-15 minutes.
+- **Fast ingestion**: all sources are fetched concurrently (cycle wall-time =
+  slowest feed, not the sum) with conditional GETs (ETag/If-Modified-Since),
+  so an unchanged feed costs a ~50ms 304 and second-scale polling is
+  affordable. Trade-grade confirm passes also run concurrently.
 
 ## Fleet mode: the whole-universe autopilot
 

@@ -5,6 +5,7 @@ import hashlib
 import html
 import json
 import re
+import threading
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -335,6 +336,13 @@ def extract_listing_article_urls(url: str, markup: str, *, limit: int = 10) -> l
     return urls
 
 
+# Conditional-GET state per feed URL (in-process). ETag/Last-Modified turn an
+# unchanged feed into a ~50ms 304 instead of a full download+parse, which is
+# what makes second-scale armed polling affordable for publishers and for us.
+_FEED_CONDITIONAL: dict[str, dict[str, str]] = {}
+_FEED_CONDITIONAL_LOCK = threading.Lock()
+
+
 def fetch_feed_articles(
     feed_url: str,
     user_agent: str = "polybot/0.1",
@@ -343,8 +351,28 @@ def fetch_feed_articles(
     exclude_terms: list[str] | None = None,
     limit: int = 20,
 ) -> list[Article]:
-    response = requests.get(feed_url, headers={"User-Agent": user_agent}, timeout=20)
+    headers = {"User-Agent": user_agent}
+    with _FEED_CONDITIONAL_LOCK:
+        cached = dict(_FEED_CONDITIONAL.get(feed_url, {}))
+    if cached.get("etag"):
+        headers["If-None-Match"] = cached["etag"]
+    if cached.get("last_modified"):
+        headers["If-Modified-Since"] = cached["last_modified"]
+    response = requests.get(feed_url, headers=headers, timeout=20)
+    if getattr(response, "status_code", 200) == 304:
+        return []
     response.raise_for_status()
+    response_headers = getattr(response, "headers", {}) or {}
+    validators = {}
+    if response_headers.get("ETag"):
+        validators["etag"] = response_headers["ETag"]
+    if response_headers.get("Last-Modified"):
+        validators["last_modified"] = response_headers["Last-Modified"]
+    with _FEED_CONDITIONAL_LOCK:
+        if validators:
+            _FEED_CONDITIONAL[feed_url] = validators
+        else:
+            _FEED_CONDITIONAL.pop(feed_url, None)
     if _looks_like_html(response.content):
         return []
     try:

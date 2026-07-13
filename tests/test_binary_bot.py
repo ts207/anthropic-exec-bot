@@ -580,3 +580,84 @@ def test_effective_poll_seconds_armed() -> None:
     assert effective_poll_seconds(slow, live_flag=True) == 30.0
     assert effective_poll_seconds(fast, live_flag=False) == 30.0
     assert effective_poll_seconds(fast, live_flag=True) == 5.0
+
+
+# ---- ingestion bottleneck fixes ----
+
+
+def test_feed_conditional_get_uses_validators_and_304(monkeypatch) -> None:
+    from polybot.core import source_fetcher
+
+    calls: list[dict] = []
+
+    class _FullResponse:
+        status_code = 200
+        headers = {"ETag": '"abc"', "Last-Modified": "Mon, 13 Jul 2026 00:00:00 GMT"}
+        content = (
+            b'<?xml version="1.0"?><rss><channel><item>'
+            b"<title>Iran talks scheduled</title>"
+            b"<link>https://reuters.com/x</link>"
+            b"<description>Senior talks scheduled.</description>"
+            b"</item></channel></rss>"
+        )
+
+        def raise_for_status(self):
+            return None
+
+    class _NotModified:
+        status_code = 304
+        headers = {}
+        content = b""
+
+        def raise_for_status(self):
+            raise AssertionError("raise_for_status must not run on 304")
+
+    responses = [_FullResponse(), _NotModified()]
+
+    def fake_get(url, headers=None, timeout=None):
+        calls.append(dict(headers or {}))
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(source_fetcher.requests, "get", fake_get)
+    monkeypatch.setattr(source_fetcher, "_FEED_CONDITIONAL", {})
+
+    first = source_fetcher.fetch_feed_articles("https://example.com/feed", include_terms=["iran"])
+    assert len(first) == 1
+    second = source_fetcher.fetch_feed_articles("https://example.com/feed", include_terms=["iran"])
+    assert second == []  # 304 -> nothing new, near-zero cost
+    assert calls[1]["If-None-Match"] == '"abc"'
+    assert calls[1]["If-Modified-Since"] == "Mon, 13 Jul 2026 00:00:00 GMT"
+
+
+def test_bot_fetches_sources_concurrently(tmp_path, monkeypatch) -> None:
+    import threading
+    import time as _time
+
+    config = _config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(
+            max_trade_article_age_hours=0.0,
+            feed_urls=["https://a.example/feed", "https://b.example/feed", "https://c.example/feed"],
+            promote_feed_to_article=False,
+        ),
+    )
+    bot = _bot(tmp_path, config, DryRunTradingAdapter())
+    concurrent = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    def slow_feed(url, user_agent, **kwargs):
+        with lock:
+            concurrent["now"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["now"])
+        _time.sleep(0.05)
+        with lock:
+            concurrent["now"] -= 1
+        return []
+
+    monkeypatch.setattr("polybot.binary.runner.fetch_feed_articles", slow_feed)
+    start = _time.monotonic()
+    bot.run_once()
+    elapsed = _time.monotonic() - start
+    assert concurrent["max"] >= 2  # overlapping fetches, not sequential
+    assert elapsed < 0.15  # ~one slow-feed latency, not three
