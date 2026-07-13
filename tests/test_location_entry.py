@@ -767,3 +767,62 @@ def test_entry_blocked_when_portfolio_exhausted(tmp_path) -> None:
     result = executor.execute(decision, article("Officials confirm the round will be held in Qatar."))
     assert result == "ENTRY_PORTFOLIO_BLOCKED"
     assert executor.holdings.held_location() is None
+
+
+# ---- screen tier ----
+
+
+def test_location_screen_no_action_skips_strong_model(tmp_path) -> None:
+    config = _flat_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(max_trade_article_age_hours=0.0),
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_ask=0.40))
+
+    class _Counting:
+        def __init__(self, signal):
+            self.signal = signal
+            self.calls = 0
+
+        def classify(self, article_arg, market_rule_text, held_location=None):
+            self.calls += 1
+            return self.signal
+
+    screen = _Counting(_signal(confirmed_location="none", qualifies_as_senior_round=False, round_status="unclear", evidence_strength="speculative"))
+    strong = _Counting(_signal())
+    bot.screen_classifier = screen
+    bot.classifier = strong
+    decision = bot.process_article(article("Background chatter about Qatar talks continues with no concrete developments."))
+    assert decision.action == "NO_ACTION"
+    assert decision.reason.startswith("screen:")
+    assert screen.calls == 1
+    assert strong.calls == 0
+
+
+def test_location_screen_trade_signal_escalates(tmp_path) -> None:
+    config = _flat_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(max_trade_article_age_hours=0.0),
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_ask=0.40, yes_bid=0.38))
+
+    class _Counting:
+        def __init__(self, signal):
+            self.signal = signal
+            self.calls = 0
+
+        def classify(self, article_arg, market_rule_text, held_location=None):
+            self.calls += 1
+            return self.signal
+
+    quote = "A new round will begin in Doha."
+    screen = _Counting(_signal(confirmed_location="qatar", quote_supporting_trigger=quote))
+    strong = _Counting(_signal(confirmed_location="qatar", quote_supporting_trigger=quote))
+    bot.screen_classifier = screen
+    bot.classifier = strong
+    decision = bot.process_article(article(f"{quote} Officials confirmed the talks round."))
+    assert screen.calls == 1
+    assert strong.calls >= 1
+    assert decision.action == "ENTER_YES"

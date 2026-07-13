@@ -499,3 +499,84 @@ market:
 """
     with pytest.raises(ValueError, match="resolution_rules"):
         load_binary_config(_yaml(tmp_path, body))
+
+
+# ---- profit levers: screen tier + armed polling ----
+
+
+class _CountingClassifier:
+    def __init__(self, signal):
+        self.signal = signal
+        self.calls = 0
+
+    def classify(self, article, market_rule_text, held_side=None):
+        self.calls += 1
+        return self.signal
+
+
+def test_screen_no_action_skips_strong_model(tmp_path) -> None:
+    config = _config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(max_trade_article_age_hours=0.0),
+    )
+    bot = _bot(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40))
+    noise = _signal(qualifies_under_rules=False, event_status="unclear", evidence_strength="speculative")
+    screen = _CountingClassifier(noise)
+    strong = _CountingClassifier(_signal())
+    bot.screen_classifier = screen
+    bot.classifier = strong
+    decision = bot.process_article(article("Unrelated diplomatic chatter about the region."))
+    assert decision.action == "NO_ACTION"
+    assert decision.reason.startswith("screen:")
+    assert screen.calls == 1
+    assert strong.calls == 0  # the expensive model never ran
+
+
+def test_screen_trade_signal_escalates_to_strong_model(tmp_path) -> None:
+    config = _config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(max_trade_article_age_hours=0.0),
+    )
+    bot = _bot(tmp_path, config, DryRunTradingAdapter(yes_shares=250.0, yes_ask=0.40))
+    screen = _CountingClassifier(_signal())  # qualifying scheduled -> escalate
+    strong = _CountingClassifier(_signal(event_status="underway", evidence_strength="confirmed_started", quote_supporting_trigger="The round has begun."))
+    bot.screen_classifier = screen
+    bot.classifier = strong
+    decision = bot.process_article(article("The round has begun. Officials confirmed the talks."))
+    assert screen.calls == 1
+    assert strong.calls == 1
+    assert decision.action == "ENTER_YES"
+    assert bot.holdings.held_location() == "yes"
+
+
+def test_screen_failure_escalates_instead_of_blocking(tmp_path) -> None:
+    config = _config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        sources=SourcesConfig(max_trade_article_age_hours=0.0),
+    )
+    bot = _bot(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40))
+
+    class _Broken:
+        def classify(self, article, market_rule_text, held_side=None):
+            raise RuntimeError("screen down")
+
+    strong = _CountingClassifier(_signal())
+    bot.screen_classifier = _Broken()
+    bot.classifier = strong
+    decision = bot.process_article(article("The round will begin next week. Officials confirmed the venue."))
+    assert strong.calls == 1
+    assert decision.action == "ENTER_YES"
+
+
+def test_effective_poll_seconds_armed() -> None:
+    from polybot.binary.runner import effective_poll_seconds
+    from polybot.core.config import SafetyConfig
+
+    slow = SafetyConfig(poll_seconds=30.0, armed_poll_seconds=0.0)
+    fast = SafetyConfig(poll_seconds=30.0, armed_poll_seconds=5.0)
+    assert effective_poll_seconds(slow, live_flag=True) == 30.0
+    assert effective_poll_seconds(fast, live_flag=False) == 30.0
+    assert effective_poll_seconds(fast, live_flag=True) == 5.0

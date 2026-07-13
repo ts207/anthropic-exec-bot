@@ -346,11 +346,20 @@ def run_location_command(config_path: Path, live_flag: bool) -> int:
                     bot.notifier.notify("Location protection polling cycle failed; continuing", error=str(exc))
                 except Exception as notify_exc:
                     log_event("location_notify_failed", error=str(notify_exc))
-            time.sleep(config.safety.poll_seconds)
+            time.sleep(effective_poll_seconds(config.safety, live_flag))
 
 
 def _live_adapter(*, tick_size: str = "0.01", neg_risk: bool = False) -> TradingAdapter:
     return live_adapter_from_env(tick_size=tick_size, neg_risk=neg_risk)
+
+
+def effective_poll_seconds(safety: Any, live_flag: bool) -> float:
+    """Live-armed bots poll at armed_poll_seconds when configured: the news
+    race is lost in the gap between publication and the next cycle."""
+    armed = getattr(safety, "armed_poll_seconds", 0.0) or 0.0
+    if live_flag and armed > 0:
+        return max(1.0, armed)
+    return safety.poll_seconds
 
 
 class LocationProtectionBot:
@@ -368,6 +377,19 @@ class LocationProtectionBot:
         self.article_store = ArticleStore(config.logs_dir / "location_articles.jsonl")
         self.notifier = TelegramNotifier()
         self.classifier = build_location_classifier(config)
+        # Cheap/fast screen tier: one pass on a smaller model decides whether
+        # the expensive trade-grade passes run at all. Most escalated articles
+        # are noise (does-not-break-thesis / technical / no signal); paying
+        # the strong model for them is the dominant classifier cost.
+        self.screen_classifier = None
+        if config.classifier.screen_model and config.classifier.provider != "rule_based":
+            from dataclasses import replace as _replace
+
+            from .classifier import LLMLocationClassifier
+
+            self.screen_classifier = LLMLocationClassifier(
+                _replace(config.classifier, model=config.classifier.screen_model), config
+            )
         self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
         self.executor = LocationExecutor(config, self.store, self.notifier, adapter)
         self.holdings = self.executor.holdings
@@ -490,6 +512,10 @@ class LocationProtectionBot:
             self._log_decision(article, decision)
             self._notify_classifier_budget_block_once(block_reason)
             return decision
+        if self.screen_classifier is not None:
+            screen_decision = self._screen_stage(article)
+            if screen_decision is not None:
+                return screen_decision
         try:
             passes = [self._classify_with_budget(article, index) for index in range(max(1, self.config.classifier.passes))]
         except Exception as exc:
@@ -927,12 +953,39 @@ class LocationProtectionBot:
             },
         )
 
-    def _classify_with_budget(self, article: Article, pass_index: int) -> Any:
+    def _screen_stage(self, article: Article) -> LocationDecision | None:
+        """One cheap-model pass. Returns the final decision when the screen
+        says NO_ACTION (the strong model never runs), or None to escalate to
+        the trade-grade passes. A screen failure escalates rather than blocks:
+        the screen tier may only save money, never miss a trade."""
+        try:
+            screen = self._classify_with_budget(article, 0, classifier=self.screen_classifier, stage="screen")
+        except Exception as exc:
+            log_event("location_screen_classifier_error", error=str(exc))
+            return None
+        held = self.holdings.held_location()
+        provisional = entry_decision(self.config, screen) if held is None else final_decision(self.config, screen, held=held)
+        if provisional.action != "NO_ACTION":
+            return None
+        # The forecast research layer still consumes the screen signal:
+        # trade-irrelevant evidence (speculative reports, denials) is exactly
+        # what moves anticipatory priors.
+        try:
+            self.forecast.process(article, [screen])
+        except Exception as exc:
+            log_event("location_forecast_screen_error", error=str(exc))
+        decision = LocationDecision("NO_ACTION", provisional.level, f"screen:{provisional.reason}", factors=screen)
+        self._log_decision(article, decision)
+        return decision
+
+    def _classify_with_budget(self, article: Article, pass_index: int, *, classifier: Any = None, stage: str = "confirm") -> Any:
+        active = classifier if classifier is not None else self.classifier
         context = self.config.event.resolution_rules
         input_chars = len(article.title) + len(article.raw_text) + len(context)
         telemetry = {
             "provider": self.config.classifier.provider,
-            "model": self.config.classifier.model,
+            "model": getattr(getattr(active, "config", None), "model", self.config.classifier.model),
+            "stage": stage,
             "pass_index": pass_index,
             "article_hash": article.hash,
             "source_kind": article.source_kind,
@@ -942,10 +995,10 @@ class LocationProtectionBot:
         }
         self.classifier_budget.record_attempt()
         log_event("location_classifier_attempt", **telemetry)
-        if hasattr(self.classifier, "last_usage"):
-            setattr(self.classifier, "last_usage", None)
-        factors = self.classifier.classify(article, context, held_location=self.holdings.held_location() or "")
-        usage = getattr(self.classifier, "last_usage", None)
+        if hasattr(active, "last_usage"):
+            setattr(active, "last_usage", None)
+        factors = active.classify(article, context, held_location=self.holdings.held_location() or "")
+        usage = getattr(active, "last_usage", None)
         if isinstance(usage, dict):
             telemetry["usage"] = usage
         log_event("location_classifier_result", **telemetry)

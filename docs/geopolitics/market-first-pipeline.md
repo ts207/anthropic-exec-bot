@@ -56,6 +56,32 @@ under the config's `data_dir` as atomic JSON records.
   (`alert_only`) — the standard inspect/preflight/ack/soak sequence from
   `autonomous-entry-hardening.md` still governs live arming.
 
+## Profit levers
+
+The confirmed-entry strategy's economics are dominated by latency, classifier
+cost, and market selection. Four levers target them directly:
+
+- **Small-size live tier**: thin markets are where confirmation edge persists
+  longest (nobody competes for $20 of edge). When liquidity is the ONLY failed
+  live gate, the market stays `LIVE_CONFIRMATION_ELIGIBLE` with
+  `recommended_max_order_usd = liquidity * small_live_liquidity_fraction`;
+  opportunity scans and emitted configs size orders to what the book can
+  absorb instead of demoting the market to paper.
+- **Screen classifier tier** (`classifier.screen_model`): every escalated
+  article is first classified once by a cheap fast model; the expensive
+  trade-grade model (with pass agreement) only runs when the screen sees
+  anything other than NO_ACTION. Most escalated articles are noise, so this
+  cuts the dominant classifier cost and answers faster on noise. A screen
+  failure escalates rather than blocks, and the location bot still feeds
+  screen signals to the paper forecast engine so priors keep updating.
+- **Armed fast polling** (`safety.armed_poll_seconds`): live bots poll at
+  seconds, not tens of seconds -- the race is lost in the gap between
+  publication and the next cycle. Emitted configs default to 5s live / 30s
+  dry-run.
+- **Direct publisher feeds**: source plans now lead with direct RSS endpoints
+  (state.gov press releases, UN news, Al Jazeera) ahead of Google News
+  queries, whose indexing lag is often 5-15 minutes.
+
 ## Recurring operation
 
 `run-discovery` runs the full cycle (discover → grade → plan-sources → scan)

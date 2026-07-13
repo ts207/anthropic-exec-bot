@@ -22,6 +22,12 @@ DEFAULT_ALERT_ONLY_DOMAINS = ["x.com", "twitter.com", "t.me", "irna.ir"]
 class ClassifierConfig:
     provider: str = "rule_based"
     model: str = "claude-sonnet-4-6"
+    # Optional cheap/fast screen tier: when set, every escalated article is
+    # first classified once with this model, and the expensive trade-grade
+    # model (`model`, `passes` times) only runs when the screen pass produces
+    # anything other than NO_ACTION. Cuts both cost (most escalated articles
+    # are noise) and latency (the screen model answers faster on noise).
+    screen_model: str = ""
     temperature: float = 0.0
     passes: int = 1
     require_pass_agreement: bool = False
@@ -48,6 +54,10 @@ class SafetyConfig:
     degraded_mode_alert: bool = True
     max_executions: int = 1
     poll_seconds: float = 30.0
+    # When live-armed, poll this fast instead (0 = use poll_seconds). Latency
+    # is the confirmed-entry strategy's dominant cost: the news race is lost
+    # in the gap between publication and the next polling cycle.
+    armed_poll_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

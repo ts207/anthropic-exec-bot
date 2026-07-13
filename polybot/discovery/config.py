@@ -66,6 +66,14 @@ class ScoringConfig:
     max_spread_live: float = 0.10
     max_days_to_deadline_live: float = 180.0
     max_markets_per_correlation_group: int = 2
+    # Small-size live tier: thin geopolitical markets are where a slow-ish
+    # confirmation bot actually gets paid -- professionals do not compete for
+    # $20 of edge, so mispricings persist for hours there. When liquidity is
+    # the ONLY failed live gate, keep the market live-eligible at a size the
+    # book can absorb instead of demoting it to paper.
+    small_live_enabled: bool = True
+    small_live_liquidity_fraction: float = 0.02  # max order = liquidity * this
+    small_live_min_order_usd: float = 5.0  # below this, paper only
 
 
 @dataclass(frozen=True)

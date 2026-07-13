@@ -46,6 +46,29 @@ ACTORS: dict[str, tuple[list[str], list[str]]] = {
 # mediator role worth watching even when not a direct party.
 MEDIATOR_ACTORS = ["qatar", "oman", "switzerland", "egypt", "turkey", "united_nations"]
 
+# Direct publisher RSS endpoints -- minutes faster than Google News indexing,
+# which is the dominant latency in the confirmed-entry race. Only feeds with
+# stable public URLs are listed; wires without public RSS still go through
+# Google News queries.
+DIRECT_ACTOR_FEEDS: dict[str, list[str]] = {
+    "united_states": ["https://www.state.gov/rss-feed/press-releases/feed/"],
+    "united_nations": ["https://news.un.org/feed/subscribe/en/news/all/rss.xml"],
+}
+
+GENERAL_FAST_FEEDS: list[str] = [
+    # Al Jazeera publishes to its own RSS immediately and covers Middle East
+    # diplomacy earlier than most; alert/hold-signal grade by default (domain
+    # policy still decides whether it may auto-trade).
+    "https://www.aljazeera.com/xml/rss/all.xml",
+]
+
+
+def direct_feeds(actors: list[str]) -> list[str]:
+    feeds: list[str] = []
+    for actor in actors:
+        feeds.extend(DIRECT_ACTOR_FEEDS.get(actor, []))
+    return feeds
+
 # Decisive-event vocabulary by broad market family; the fixture analyzer uses
 # these to seed escalate keywords when the rules match the family.
 EVENT_FAMILIES: dict[str, list[str]] = {

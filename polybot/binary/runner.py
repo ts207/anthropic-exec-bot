@@ -259,11 +259,20 @@ def run_binary_command(config_path: Path, live_flag: bool) -> int:
                 bot.notifier.notify("Binary rule bot polling cycle failed; continuing", error=str(exc))
             except Exception as notify_exc:
                 log_event("binary_notify_failed", error=str(notify_exc))
-        time.sleep(config.safety.poll_seconds)
+        time.sleep(effective_poll_seconds(config.safety, live_flag))
 
 
 def _live_adapter(*, tick_size: str = "0.01", neg_risk: bool = False) -> TradingAdapter:
     return live_adapter_from_env(tick_size=tick_size, neg_risk=neg_risk)
+
+
+def effective_poll_seconds(safety: Any, live_flag: bool) -> float:
+    """Live-armed bots poll at armed_poll_seconds when configured: the news
+    race is lost in the gap between publication and the next cycle."""
+    armed = getattr(safety, "armed_poll_seconds", 0.0) or 0.0
+    if live_flag and armed > 0:
+        return max(1.0, armed)
+    return safety.poll_seconds
 
 
 class BinaryRuleBot:
@@ -282,6 +291,16 @@ class BinaryRuleBot:
         self.article_store = ArticleStore(config.logs_dir / "binary_articles.jsonl")
         self.notifier = TelegramNotifier()
         self.classifier = build_binary_classifier(config)
+        # Cheap/fast screen tier (see the location runner for rationale).
+        self.screen_classifier = None
+        if config.classifier.screen_model and config.classifier.provider != "rule_based":
+            from dataclasses import replace as _replace
+
+            from .classifier import LLMBinaryClassifier
+
+            self.screen_classifier = LLMBinaryClassifier(
+                _replace(config.classifier, model=config.classifier.screen_model), config
+            )
         self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
         self.executor = BinaryExecutor(config, market, self.store, self.notifier, adapter)
         self.holdings = self.executor.holdings
@@ -368,6 +387,10 @@ class BinaryRuleBot:
             self._log_decision(article, decision)
             self._notify_classifier_budget_block_once(block_reason)
             return decision
+        if self.screen_classifier is not None:
+            screen_decision = self._screen_stage(article)
+            if screen_decision is not None:
+                return screen_decision
         try:
             passes = [self._classify_with_budget(article, index) for index in range(max(1, self.config.classifier.passes))]
         except Exception as exc:
@@ -483,12 +506,32 @@ class BinaryRuleBot:
             },
         )
 
-    def _classify_with_budget(self, article: Article, pass_index: int) -> Any:
+    def _screen_stage(self, article: Article) -> BinaryDecision | None:
+        """One cheap-model pass. Returns the final decision when the screen
+        says NO_ACTION (the strong model never runs), or None to escalate. A
+        screen failure escalates rather than blocks: the screen tier may only
+        save money, never miss a trade."""
+        try:
+            screen = self._classify_with_budget(article, 0, classifier=self.screen_classifier, stage="screen")
+        except Exception as exc:
+            log_event("binary_screen_classifier_error", error=str(exc))
+            return None
+        held = self.holdings.held_location()
+        provisional = entry_decision(self.config, screen) if held is None else held_decision(self.config, screen, held)
+        if provisional.action != "NO_ACTION":
+            return None
+        decision = BinaryDecision("NO_ACTION", provisional.level, f"screen:{provisional.reason}", screen)
+        self._log_decision(article, decision)
+        return decision
+
+    def _classify_with_budget(self, article: Article, pass_index: int, *, classifier: Any = None, stage: str = "confirm") -> Any:
+        active = classifier if classifier is not None else self.classifier
         context = self.config.market.resolution_rules
         input_chars = len(article.title) + len(article.raw_text) + len(context)
         telemetry = {
             "provider": self.config.classifier.provider,
-            "model": self.config.classifier.model,
+            "model": getattr(getattr(active, "config", None), "model", self.config.classifier.model),
+            "stage": stage,
             "pass_index": pass_index,
             "article_hash": article.hash,
             "source_kind": article.source_kind,
@@ -498,10 +541,10 @@ class BinaryRuleBot:
         }
         self.classifier_budget.record_attempt()
         log_event("binary_classifier_attempt", **telemetry)
-        if hasattr(self.classifier, "last_usage"):
-            setattr(self.classifier, "last_usage", None)
-        factors = self.classifier.classify(article, context, held_side=self.holdings.held_location() or "")
-        usage = getattr(self.classifier, "last_usage", None)
+        if hasattr(active, "last_usage"):
+            setattr(active, "last_usage", None)
+        factors = active.classify(article, context, held_side=self.holdings.held_location() or "")
+        usage = getattr(active, "last_usage", None)
         if isinstance(usage, dict):
             telemetry["usage"] = usage
         log_event("binary_classifier_result", **telemetry)

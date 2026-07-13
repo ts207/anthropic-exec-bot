@@ -161,12 +161,18 @@ def scan_opportunities(
 
             allocation_usd = 0.0
             if not blockers:
+                # Thin markets graded into the small-size live tier are sized
+                # to what their book can absorb, not the full per-order cap.
+                requested = allocator.config.per_order_usd
+                recommended = context.scores.get("recommended_max_order_usd")
+                if recommended:
+                    requested = min(requested, float(recommended))
                 request = AllocationRequest(
                     market_id=context.market_id,
                     event_slug=context.event_slug,
                     correlation_group=context.correlation_group or "uncategorized",
                     deadline_iso=context.deadline_iso,
-                    usd=allocator.config.per_order_usd,
+                    usd=requested,
                 )
                 allocation_usd, allocation_blockers = allocator.preview(request)
                 blockers.extend(allocation_blockers)

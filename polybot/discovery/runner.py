@@ -183,10 +183,14 @@ def emit_bot_config_command(config_path: Path, market_id: str, out: Path | None 
     if plan is None:
         raise SystemExit(f"market {market_id} has no source plan; run plan-sources first")
     out = out or Path("configs/geopolitics/generated") / f"{_safe(market_id)}.yaml"
+    entry_usd = allocator.config.per_order_usd
+    recommended = context.scores.get("recommended_max_order_usd")
+    if recommended:
+        entry_usd = min(entry_usd, float(recommended))
     path = emit_bot_config(
         context,
         plan,
-        entry_usd=allocator.config.per_order_usd,
+        entry_usd=entry_usd,
         out_path=out,
         ledger_path=str(allocator.state_path),
     )

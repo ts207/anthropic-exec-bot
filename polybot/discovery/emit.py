@@ -60,10 +60,18 @@ def _binary_config(context: MarketContext, plan: SourcePlan, entry_usd: float) -
             "expected_no_token_id": outcome.no_token_id,
         },
         "entry": {"enabled": True, "side": "YES", "usd_budget": entry_usd, "max_price": 0.90, "max_entries": 1},
-        "classifier": {"provider": "anthropic", "model": "claude-opus-4-8", "passes": 2, "require_pass_agreement": True},
+        "classifier": {
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+            # Cheap screen pass: the strong model only runs when this one sees
+            # anything other than NO_ACTION.
+            "screen_model": "claude-haiku-4-5-20251001",
+            "passes": 2,
+            "require_pass_agreement": True,
+        },
         "execution": {"dry_run": True, "sell": {"enabled": True, "min_price": 0.03}, "flip_buy": {"enabled": False}},
         "keywords": {"escalate_terms": plan.escalate_terms},
-        "safety": {"one_shot": True, "max_executions": 2, "poll_seconds": 30.0},
+        "safety": {"one_shot": True, "max_executions": 2, "poll_seconds": 30.0, "armed_poll_seconds": 5.0},
         "sources": _sources_section(plan),
         "data_dir": f"data/geopolitics/{_slug(context.market_id)}",
         "logs_dir": "logs",
@@ -100,9 +108,17 @@ def _location_config(context: MarketContext, plan: SourcePlan, entry_usd: float)
             "max_price": 0.90,
             "max_entries": 1,
         },
-        "classifier": {"provider": "anthropic", "model": "claude-opus-4-8", "passes": 2, "require_pass_agreement": True},
+        "classifier": {
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+            # Cheap screen pass: the strong model only runs when this one sees
+            # anything other than NO_ACTION.
+            "screen_model": "claude-haiku-4-5-20251001",
+            "passes": 2,
+            "require_pass_agreement": True,
+        },
         "execution": {"dry_run": True, "sell": {"enabled": True, "min_price": 0.03}, "buy_rotation": {"enabled": False}},
-        "safety": {"one_shot": True, "max_executions": 2, "poll_seconds": 30.0},
+        "safety": {"one_shot": True, "max_executions": 2, "poll_seconds": 30.0, "armed_poll_seconds": 5.0},
         "sources": {**_sources_section(plan), "feed_include_terms": plan.escalate_terms},
         "data_dir": f"data/geopolitics/{_slug(context.market_id)}",
         "logs_dir": "logs",

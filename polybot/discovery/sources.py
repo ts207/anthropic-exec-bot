@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .registry import WIRE_DOMAINS, google_news_rss, official_domains
+from .registry import GENERAL_FAST_FEEDS, WIRE_DOMAINS, direct_feeds, google_news_rss, official_domains
 from .types import MarketContext, SourcePlan
 
 
@@ -38,6 +38,11 @@ def build_source_plan(context: MarketContext) -> SourcePlan:
     # the hand-built Iran/Qatar configs).
     actor_terms = [actor.replace("_", " ") for actor in (analysis.parties or actors)][:4]
     keyword_terms = analysis.keywords[:6]
+    # Direct publisher feeds go FIRST: Google News indexing lag (often 5-15
+    # minutes) is the dominant latency in the confirmed-entry race.
+    fast_feeds = direct_feeds(actors) + GENERAL_FAST_FEEDS
+    for url in fast_feeds:
+        rationale.setdefault(url, []).append("direct publisher feed; minutes faster than news-aggregator indexing")
     queries: list[str] = []
     if actor_terms and keyword_terms:
         queries.append(" ".join(actor_terms[:2] + keyword_terms[:2]))
@@ -47,9 +52,10 @@ def build_source_plan(context: MarketContext) -> SourcePlan:
     for wire in ("reuters", "AP"):
         if actor_terms:
             queries.append(f"{wire} " + " ".join(actor_terms[:2] + keyword_terms[:1]))
-    feed_urls = [google_news_rss(q.strip()) for q in queries if q.strip()]
-    for url in feed_urls:
+    google_feeds = [google_news_rss(q.strip()) for q in queries if q.strip()]
+    for url in google_feeds:
         rationale.setdefault(url, []).append("google news discovery query from parties + decisive-event vocabulary")
+    feed_urls = fast_feeds + google_feeds
 
     auto_trade = sorted(set(WIRE_DOMAINS) | set(actor_domains) | ({resolution_domain} if resolution_domain else set()))
     escalate_terms = sorted(set(term.lower() for term in keyword_terms + actor_terms if term))

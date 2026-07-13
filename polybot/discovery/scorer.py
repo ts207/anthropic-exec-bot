@@ -98,6 +98,20 @@ def grade_market(
         live_blockers.append(f"correlation_group_limit:{group}")
 
     if live_blockers:
+        # Small-size live tier: when liquidity is the only failed live gate,
+        # trade the market at a size its book can absorb -- thin markets are
+        # where confirmation edge persists longest.
+        if scoring.small_live_enabled and all(b.startswith("liquidity_below_live_threshold") for b in live_blockers):
+            recommended = round(context.liquidity * scoring.small_live_liquidity_fraction, 2)
+            if recommended >= scoring.small_live_min_order_usd:
+                scores["recommended_max_order_usd"] = recommended
+                return _finalize(
+                    context,
+                    "LIVE_CONFIRMATION_ELIGIBLE",
+                    [f"small_size_live:recommended_max_order_usd={recommended}"] + live_blockers,
+                    scores,
+                    group,
+                )
         return _finalize(context, "PAPER_ELIGIBLE", live_blockers, scores, group)
     return _finalize(context, "LIVE_CONFIRMATION_ELIGIBLE", ["all_live_gates_passed"], scores, group)
 

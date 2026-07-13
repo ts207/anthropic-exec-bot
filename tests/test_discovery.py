@@ -169,15 +169,29 @@ def _analyzed_context(event: dict) -> MarketContext:
     return MarketContext.from_dict({**context.as_dict(), "rule_analysis": analysis.as_dict()})
 
 
-def test_scorer_live_eligible_and_paper_downgrades() -> None:
+def test_scorer_live_eligible_and_small_live_tier() -> None:
     scoring = ScoringConfig()
     live = grade_market(_analyzed_context(_binary_event()), scoring)
     assert live.state == "LIVE_CONFIRMATION_ELIGIBLE"
     assert live.correlation_group == "iran|united_states"
+    assert "recommended_max_order_usd" not in live.scores
 
+    # Thin book: liquidity is the only failed live gate, so the market stays
+    # live-eligible at a size the book can absorb (800 * 0.02 = 16 USD).
     thin = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), scoring)
-    assert thin.state == "PAPER_ELIGIBLE"
-    assert any(reason.startswith("liquidity_below_live_threshold") for reason in thin.state_reasons)
+    assert thin.state == "LIVE_CONFIRMATION_ELIGIBLE"
+    assert thin.scores["recommended_max_order_usd"] == 16.0
+    assert any(reason.startswith("small_size_live") for reason in thin.state_reasons)
+
+    # Too thin even for a minimum viable order (200 * 0.02 = 4 < 5): the
+    # small tier refuses, and the paper floor (500) demotes further.
+    tiny = grade_market(_analyzed_context(_binary_event(liquidity=200.0)), scoring)
+    assert tiny.state == "MONITOR_ONLY"
+
+    # Tier disabled: old behavior (paper downgrade) is preserved.
+    no_tier = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(small_live_enabled=False))
+    assert no_tier.state == "PAPER_ELIGIBLE"
+    assert any(reason.startswith("liquidity_below_live_threshold") for reason in no_tier.state_reasons)
 
 
 def test_scorer_hard_states() -> None:
@@ -613,3 +627,25 @@ opportunity:
     notified.clear()
     assert run_discovery_command(config_path, once=True, events_fetch=fetch, quotes=_FakeQuotes(), notifier=_Notifier()) == 0
     assert not [n for n in notified if "newly" in n[0]]  # no repeats on an unchanged universe
+
+
+# ---- profit levers: small-live sizing, direct feeds ----
+
+
+def test_scan_sizes_small_live_market_to_its_book(tmp_path) -> None:
+    context = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig())
+    assert context.scores["recommended_max_order_usd"] == 16.0
+    config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}})
+    results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
+    assert not results[0].blockers
+    assert results[0].allocation_usd == 16.0  # book-absorbable size, not the 50 per-order cap
+
+
+def test_source_plan_puts_direct_feeds_first() -> None:
+    plan = build_source_plan(_analyzed_context(_binary_event()))
+    # united_states is a deciding party -> its direct press feed leads, ahead
+    # of aggregator queries whose indexing lag dominates reaction time.
+    assert plan.feed_urls[0] == "https://www.state.gov/rss-feed/press-releases/feed/"
+    assert "https://www.aljazeera.com/xml/rss/all.xml" in plan.feed_urls
+    google = [u for u in plan.feed_urls if "news.google.com" in u]
+    assert google and plan.feed_urls.index(google[0]) > plan.feed_urls.index("https://www.aljazeera.com/xml/rss/all.xml")
