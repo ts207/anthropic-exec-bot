@@ -169,29 +169,44 @@ def _analyzed_context(event: dict) -> MarketContext:
     return MarketContext.from_dict({**context.as_dict(), "rule_analysis": analysis.as_dict()})
 
 
-def test_scorer_live_eligible_and_small_live_tier() -> None:
+def test_scorer_liquidity_sizes_orders_never_disqualifies() -> None:
     scoring = ScoringConfig()
     live = grade_market(_analyzed_context(_binary_event()), scoring)
     assert live.state == "LIVE_CONFIRMATION_ELIGIBLE"
     assert live.correlation_group == "iran|united_states"
-    assert "recommended_max_order_usd" not in live.scores
+    assert live.scores["recommended_max_order_usd"] == 180.0  # 9000 * 0.02
 
-    # Thin book: liquidity is the only failed live gate, so the market stays
-    # live-eligible at a size the book can absorb (800 * 0.02 = 16 USD).
+    # Thin book: fully live, sized to what the book can absorb.
     thin = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), scoring)
     assert thin.state == "LIVE_CONFIRMATION_ELIGIBLE"
     assert thin.scores["recommended_max_order_usd"] == 16.0
-    assert any(reason.startswith("small_size_live") for reason in thin.state_reasons)
 
-    # Too thin even for a minimum viable order (200 * 0.02 = 4 < 5): the
-    # small tier refuses, and the paper floor (500) demotes further.
+    # Ultra-thin: still live, floored at the minimum viable order.
     tiny = grade_market(_analyzed_context(_binary_event(liquidity=200.0)), scoring)
-    assert tiny.state == "MONITOR_ONLY"
+    assert tiny.state == "LIVE_CONFIRMATION_ELIGIBLE"
+    assert tiny.scores["recommended_max_order_usd"] == 5.0
 
-    # Tier disabled: old behavior (paper downgrade) is preserved.
-    no_tier = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(small_live_enabled=False))
-    assert no_tier.state == "PAPER_ELIGIBLE"
-    assert any(reason.startswith("liquidity_below_live_threshold") for reason in no_tier.state_reasons)
+    # Sizing disabled: still live (liquidity never gates by default), just no
+    # book-aware recommendation.
+    no_sizing = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(small_live_enabled=False))
+    assert no_sizing.state == "LIVE_CONFIRMATION_ELIGIBLE"
+    assert "recommended_max_order_usd" not in no_sizing.scores
+
+    # Operators who explicitly configure floors keep them: hard floor demotes
+    # to paper without the sizing bypass...
+    floored = grade_market(
+        _analyzed_context(_binary_event(liquidity=800.0)),
+        ScoringConfig(min_liquidity_live=5000.0, small_live_enabled=False),
+    )
+    assert floored.state == "PAPER_ELIGIBLE"
+    assert any(reason.startswith("liquidity_below_live_threshold") for reason in floored.state_reasons)
+    # ...and with sizing enabled the floor is bypassed at book-absorbable size.
+    bypassed = grade_market(
+        _analyzed_context(_binary_event(liquidity=800.0)),
+        ScoringConfig(min_liquidity_live=5000.0, small_live_enabled=True),
+    )
+    assert bypassed.state == "LIVE_CONFIRMATION_ELIGIBLE"
+    assert any(reason.startswith("small_size_live") for reason in bypassed.state_reasons)
 
 
 def test_scorer_hard_states() -> None:
@@ -383,23 +398,33 @@ logs_dir: {tmp_path / 'logs'}
 
 def test_full_pipeline(tmp_path, capsys) -> None:
     config_path = _pipeline_config(tmp_path)
-    events = [_grouped_event(), _binary_event(), _sports_event(), _binary_event(slug="thin", liquidity=100.0, volume=200.0)]
+    # The thin market is about different parties so the correlation-group cap
+    # (2 per group) doesn't demote the trio -- and being thin no longer
+    # disqualifies it.
+    events = [
+        _grouped_event(),
+        _binary_event(),
+        _sports_event(),
+        _binary_event(slug="thin", liquidity=100.0, volume=200.0, description=RULES.replace("United States and Iran", "Russia and Ukraine")),
+    ]
 
     def fetch(url: str, params: dict) -> list[dict]:
         return events if params.get("offset", 0) == 0 else []
 
     assert discover_markets_command(config_path, events_fetch=fetch) == 0
     summary = json.loads(capsys.readouterr().out)
-    assert summary["new_contexts"] == 2  # sports excluded, thin below floors
+    # Sports excluded; the thin market is KEPT -- liquidity never
+    # disqualifies, it only sizes orders.
+    assert summary["new_contexts"] == 3
     assert summary["rejected"]["excluded_keyword"] == 1
 
     assert grade_markets_command(config_path) == 0
     graded = json.loads(capsys.readouterr().out)
-    assert graded["states"]["LIVE_CONFIRMATION_ELIGIBLE"] == 2
+    assert graded["states"]["LIVE_CONFIRMATION_ELIGIBLE"] == 3
 
     assert plan_sources_command(config_path) == 0
     planned = json.loads(capsys.readouterr().out)
-    assert len(planned["planned"]) == 2
+    assert len(planned["planned"]) == 3
 
     store = DiscoveryStore(tmp_path / "data")
     binary_id = "0xiran-ceasefire-m"
@@ -416,7 +441,7 @@ opportunity:
     )
     assert scan_opportunities_command(config_path, quotes=_FakeQuotes()) == 0
     scan = json.loads(capsys.readouterr().out)
-    assert scan["scanned_outcomes"] == 3  # 2 grouped legs + 1 binary
+    assert scan["scanned_outcomes"] == 4  # 2 grouped legs + 2 binaries
     assert len(scan["executable"]) == 1
     assert scan["executable"][0]["market_id"] == binary_id
 
@@ -427,9 +452,9 @@ opportunity:
 
     assert funnel_report_command(config_path) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["funnel"]["all_markets"] == 2
-    assert report["funnel"]["understandable_markets"] == 2
-    assert report["funnel"]["live_confirmation_eligible"] == 2
+    assert report["funnel"]["all_markets"] == 3
+    assert report["funnel"]["understandable_markets"] == 3
+    assert report["funnel"]["live_confirmation_eligible"] == 3
     assert report["funnel"]["executable_opportunities"] == 1
 
 

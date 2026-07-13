@@ -68,15 +68,41 @@ class FleetManager:
     # -- planning --
 
     def desired_markets(self, contexts: list[MarketContext]) -> list[MarketContext]:
+        # Priority: scanned executable edge first, then THINNEST book first --
+        # thin markets are where a confirmation bot faces the least
+        # competition, so when slots are scarce they win, not the deep books
+        # the professionals already price in seconds.
+        edges = self._last_scan_edges()
         eligible = sorted(
             (c for c in contexts if c.state == "LIVE_CONFIRMATION_ELIGIBLE"),
-            key=lambda c: -c.liquidity,
+            key=lambda c: (-(edges.get(c.market_id, float("-inf"))), c.liquidity),
         )[: self.config.fleet.max_bots]
         desired = {c.market_id: c for c in eligible}
         for context in contexts:
             if context.market_id not in desired and self.is_holding(context.market_id):
                 desired[context.market_id] = context
         return list(desired.values())
+
+    def _last_scan_edges(self) -> dict[str, float]:
+        """Max executable (blocker-free) edge per market from the last
+        opportunity scan; markets without one rank below edge-bearing ones."""
+        path = self.config.data_dir / "opportunities.json"
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        edges: dict[str, float] = {}
+        items = raw.get("opportunities") if isinstance(raw, dict) else None
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict) or item.get("blockers") or item.get("tradable_edge") is None:
+                continue
+            market_id = str(item.get("market_id") or "")
+            edge = float(item["tradable_edge"])
+            if market_id and edge > edges.get(market_id, float("-inf")):
+                edges[market_id] = edge
+        return edges
 
     def is_holding(self, market_id: str) -> bool:
         base = Path(GEO_DATA_ROOT) / market_dir_slug(market_id)

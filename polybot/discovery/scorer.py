@@ -70,13 +70,20 @@ def grade_market(
         }
     )
 
+    # Book-aware sizing recommendation: liquidity sizes orders, it does not
+    # (by default) gate eligibility -- thin markets are the niche.
+    if scoring.small_live_enabled:
+        scores["recommended_max_order_usd"] = round(
+            max(scoring.small_live_min_order_usd, context.liquidity * scoring.small_live_liquidity_fraction), 2
+        )
+
     if analysis.discretionary:
         return _finalize(context, "MONITOR_ONLY", ["discretionary_rules"], scores, group)
     if analysis.rule_clarity < scoring.min_clarity_paper:
         return _finalize(context, "MONITOR_ONLY", [f"rule_clarity_below_paper_threshold:{analysis.rule_clarity}"], scores, group)
     if analysis.evidence_observability < scoring.min_observability_paper:
         return _finalize(context, "MONITOR_ONLY", [f"evidence_observability_below_paper_threshold:{analysis.evidence_observability}"], scores, group)
-    if context.liquidity < scoring.min_liquidity_paper:
+    if scoring.min_liquidity_paper > 0 and context.liquidity < scoring.min_liquidity_paper:
         return _finalize(context, "MONITOR_ONLY", [f"liquidity_below_paper_threshold:{context.liquidity:g}"], scores, group)
 
     live_blockers: list[str] = []
@@ -88,7 +95,7 @@ def grade_market(
         live_blockers.append(f"automation_suitability_below_live_threshold:{analysis.automation_suitability}")
     if analysis.resolution_risk > scoring.max_resolution_risk_live:
         live_blockers.append(f"resolution_risk_above_live_threshold:{analysis.resolution_risk}")
-    if context.liquidity < scoring.min_liquidity_live:
+    if scoring.min_liquidity_live > 0 and context.liquidity < scoring.min_liquidity_live:
         live_blockers.append(f"liquidity_below_live_threshold:{context.liquidity:g}")
     if spread is not None and spread > scoring.max_spread_live:
         live_blockers.append(f"spread_above_live_threshold:{spread}")
@@ -98,20 +105,18 @@ def grade_market(
         live_blockers.append(f"correlation_group_limit:{group}")
 
     if live_blockers:
-        # Small-size live tier: when liquidity is the only failed live gate,
-        # trade the market at a size its book can absorb -- thin markets are
-        # where confirmation edge persists longest.
+        # Back-compat bypass for operators who configured explicit liquidity
+        # floors: when liquidity is the only failed live gate, stay live at
+        # book-absorbable size instead of demoting to paper.
         if scoring.small_live_enabled and all(b.startswith("liquidity_below_live_threshold") for b in live_blockers):
-            recommended = round(context.liquidity * scoring.small_live_liquidity_fraction, 2)
-            if recommended >= scoring.small_live_min_order_usd:
-                scores["recommended_max_order_usd"] = recommended
-                return _finalize(
-                    context,
-                    "LIVE_CONFIRMATION_ELIGIBLE",
-                    [f"small_size_live:recommended_max_order_usd={recommended}"] + live_blockers,
-                    scores,
-                    group,
-                )
+            recommended = scores.get("recommended_max_order_usd", scoring.small_live_min_order_usd)
+            return _finalize(
+                context,
+                "LIVE_CONFIRMATION_ELIGIBLE",
+                [f"small_size_live:recommended_max_order_usd={recommended}"] + live_blockers,
+                scores,
+                group,
+            )
         return _finalize(context, "PAPER_ELIGIBLE", live_blockers, scores, group)
     return _finalize(context, "LIVE_CONFIRMATION_ELIGIBLE", ["all_live_gates_passed"], scores, group)
 

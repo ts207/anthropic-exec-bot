@@ -166,3 +166,31 @@ def test_set_fleet_mode_writes_master_switch(tmp_path, monkeypatch, capsys) -> N
     assert set_fleet_mode_command("off") == 0
     raw = json.loads((geo / "operator" / "global_mode.json").read_text(encoding="utf-8"))
     assert raw["mode"] == "off"
+
+
+def test_fleet_prefers_edge_then_thinnest_books(tmp_path, monkeypatch) -> None:
+    _patch_roots(monkeypatch, tmp_path)
+    config = DiscoveryConfig(
+        fleet=FleetConfig(enabled=True, max_bots=1, generated_dir=str(tmp_path / "generated")),
+        data_dir=tmp_path / "data",
+        logs_dir=tmp_path / "logs",
+    )
+    store = DiscoveryStore(config.data_dir)
+    scoring = ScoringConfig()
+    deep = grade_market(_analyzed_context(_binary_event(slug="deep", liquidity=50000.0)), scoring)
+    thin = grade_market(_analyzed_context(_binary_event(slug="thin", liquidity=300.0)), scoring)
+    manager = FleetManager(config, store, live=False, per_order_usd=50.0, ledger_path=str(config.data_dir / "allocations.json"))
+
+    # No scan data: the THINNEST book wins the scarce slot (least competition),
+    # not the deep book professionals already price in seconds.
+    desired = manager.desired_markets([deep, thin])
+    assert [c.market_id for c in desired] == [thin.market_id]
+
+    # A scanned executable edge outranks thinness.
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    (config.data_dir / "opportunities.json").write_text(
+        json.dumps({"opportunities": [{"market_id": deep.market_id, "outcome": "yes", "tradable_edge": 0.12, "blockers": []}]}),
+        encoding="utf-8",
+    )
+    desired = manager.desired_markets([deep, thin])
+    assert [c.market_id for c in desired] == [deep.market_id]

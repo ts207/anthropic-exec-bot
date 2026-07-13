@@ -42,8 +42,11 @@ class UniverseConfig:
 
     max_events: int = 300
     page_size: int = 100
-    min_liquidity: float = 500.0
-    min_volume: float = 1000.0
+    # Liquidity/volume floors DEFAULT OFF: thin markets are the niche where a
+    # confirmation bot out-waits bigger players, so liquidity must size orders,
+    # never disqualify markets. Set floors only to skip literal dust.
+    min_liquidity: float = 0.0
+    min_volume: float = 0.0
     max_days_to_deadline: float = 365.0
     include_keywords: list[str] = field(default_factory=_default_include_keywords)
     exclude_keywords: list[str] = field(default_factory=_default_exclude_keywords)
@@ -61,19 +64,23 @@ class ScoringConfig:
     min_observability_paper: float = 0.5
     min_automation_live: float = 0.7
     max_resolution_risk_live: float = 0.35
-    min_liquidity_live: float = 5000.0
-    min_liquidity_paper: float = 500.0
+    # Liquidity gates DEFAULT OFF (0 = disabled): liquidity sizes orders via
+    # the recommendation below, it never blocks eligibility. Thin markets are
+    # where confirmation edge persists longest -- professionals do not compete
+    # for $20 of edge. Set thresholds >0 only if you explicitly want floors.
+    min_liquidity_live: float = 0.0
+    min_liquidity_paper: float = 0.0
     max_spread_live: float = 0.10
     max_days_to_deadline_live: float = 180.0
     max_markets_per_correlation_group: int = 2
-    # Small-size live tier: thin geopolitical markets are where a slow-ish
-    # confirmation bot actually gets paid -- professionals do not compete for
-    # $20 of edge, so mispricings persist for hours there. When liquidity is
-    # the ONLY failed live gate, keep the market live-eligible at a size the
-    # book can absorb instead of demoting it to paper.
+    # Book-aware order sizing: every graded market gets
+    # recommended_max_order_usd = max(min_order, liquidity * fraction); the
+    # opportunity scan, config emission, and fleet all size to it (capped by
+    # the allocator per-order limit). Deep books hit the per-order cap; thin
+    # books trade at what they can absorb, floored at a minimum viable order.
     small_live_enabled: bool = True
-    small_live_liquidity_fraction: float = 0.02  # max order = liquidity * this
-    small_live_min_order_usd: float = 5.0  # below this, paper only
+    small_live_liquidity_fraction: float = 0.02
+    small_live_min_order_usd: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -118,7 +125,8 @@ class FleetConfig:
     """
 
     enabled: bool = False
-    max_bots: int = 10
+    # Screen-tier classification keeps per-bot cost low enough to run wide.
+    max_bots: int = 25
     # Operator position mode written for every managed market: keep
     # "alert_only" for a monitoring soak; "live" arms autonomous trading.
     position_mode: str = "alert_only"

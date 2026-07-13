@@ -23,8 +23,11 @@
 
 universe:
   max_events: 300
-  min_liquidity: 500.0
-  min_volume: 1000.0
+  # Liquidity/volume floors are OFF: thin markets are the niche where a
+  # confirmation bot out-waits bigger players. Liquidity sizes orders (see
+  # scoring.small_live_*), it never disqualifies a market.
+  min_liquidity: 0.0
+  min_volume: 0.0
   max_days_to_deadline: 365.0
   # include/exclude keyword and tag lists default to a broad geopolitical
   # vocabulary; override here to narrow the universe.
@@ -37,8 +40,13 @@ scoring:
   min_observability_paper: 0.5
   min_automation_live: 0.7
   max_resolution_risk_live: 0.35
-  min_liquidity_live: 5000.0
-  min_liquidity_paper: 500.0
+  # Liquidity gates disabled (0): every clean-rules market is live-eligible,
+  # sized by recommended_max_order_usd = max(small_live_min_order_usd,
+  # liquidity * small_live_liquidity_fraction), capped by the per-order limit.
+  min_liquidity_live: 0.0
+  min_liquidity_paper: 0.0
+  small_live_liquidity_fraction: 0.02
+  small_live_min_order_usd: 5.0
   max_spread_live: 0.10
   max_days_to_deadline_live: 180.0
   max_markets_per_correlation_group: 2
