@@ -168,7 +168,7 @@ def test_set_fleet_mode_writes_master_switch(tmp_path, monkeypatch, capsys) -> N
     assert raw["mode"] == "off"
 
 
-def test_fleet_prefers_edge_then_thinnest_books(tmp_path, monkeypatch) -> None:
+def test_fleet_ranks_by_edge_without_liquidity_bias(tmp_path, monkeypatch) -> None:
     _patch_roots(monkeypatch, tmp_path)
     config = DiscoveryConfig(
         fleet=FleetConfig(enabled=True, max_bots=1, generated_dir=str(tmp_path / "generated")),
@@ -181,10 +181,10 @@ def test_fleet_prefers_edge_then_thinnest_books(tmp_path, monkeypatch) -> None:
     thin = grade_market(_analyzed_context(_binary_event(slug="thin", liquidity=300.0)), scoring)
     manager = FleetManager(config, store, live=False, per_order_usd=50.0, ledger_path=str(config.data_dir / "allocations.json"))
 
-    # No scan data: the THINNEST book wins the scarce slot (least competition),
-    # not the deep book professionals already price in seconds.
+    # No scan data: NO liquidity bias in either direction -- selection is
+    # deterministic by market_id, not by book depth.
     desired = manager.desired_markets([deep, thin])
-    assert [c.market_id for c in desired] == [thin.market_id]
+    assert [c.market_id for c in desired] == [min(deep.market_id, thin.market_id)]
 
     # A scanned executable edge outranks thinness.
     config.data_dir.mkdir(parents=True, exist_ok=True)

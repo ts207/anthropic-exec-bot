@@ -76,7 +76,7 @@ cost, and market selection. Four levers target them directly:
   screen signals to the paper forecast engine so priors keep updating.
 - **Armed fast polling** (`safety.armed_poll_seconds`): live bots poll at
   seconds, not tens of seconds -- the race is lost in the gap between
-  publication and the next cycle. Emitted configs default to 5s live / 30s
+  publication and the next cycle. Emitted configs default to 2s live / 30s
   dry-run.
 - **Direct publisher feeds**: source plans now lead with direct RSS endpoints
   (state.gov press releases, UN news, Al Jazeera) ahead of Google News
@@ -88,8 +88,9 @@ cost, and market selection. Four levers target them directly:
 
 1. runs the full discovery cycle (discover → grade → plan-sources → scan);
 2. emits/refreshes an executor config per `LIVE_CONFIRMATION_ELIGIBLE` market
-   (liquidity-ranked, capped at `fleet.max_bots`), re-emitting only when the
-   rule hash or dry-run mode changed so the ack hash doesn't churn;
+   (edge-ranked, no liquidity bias; `fleet.max_bots <= 0` = uncapped),
+   re-emitting only when the rule hash or dry-run mode changed so the ack
+   hash doesn't churn;
 3. arms each market's operator gate with `fleet.position_mode` and — with
    `--live`, `position_mode: live`, and `auto_ack: true` — writes the config
    ack, so the operator arms the fleet once instead of each market;

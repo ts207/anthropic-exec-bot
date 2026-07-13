@@ -85,7 +85,8 @@ fleet:
   #   2. review logs/funnel/paper ledgers
   #   3. position_mode: live, auto_ack: true, run with --live
   enabled: false
-  max_bots: 10
+  # <= 0 means UNCAPPED: one bot per eligible market, deep or thin.
+  max_bots: 0
   position_mode: "alert_only"
   auto_ack: false
   generated_dir: "configs/geopolitics/generated"

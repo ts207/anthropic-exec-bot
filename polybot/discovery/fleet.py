@@ -68,15 +68,17 @@ class FleetManager:
     # -- planning --
 
     def desired_markets(self, contexts: list[MarketContext]) -> list[MarketContext]:
-        # Priority: scanned executable edge first, then THINNEST book first --
-        # thin markets are where a confirmation bot faces the least
-        # competition, so when slots are scarce they win, not the deep books
-        # the professionals already price in seconds.
+        # No liquidity bias in EITHER direction: the fleet covers every
+        # eligible market it has slots for. Scanned executable edge breaks
+        # ties when slots are scarce; market_id keeps the rest deterministic.
+        # max_bots <= 0 means uncapped.
         edges = self._last_scan_edges()
         eligible = sorted(
             (c for c in contexts if c.state == "LIVE_CONFIRMATION_ELIGIBLE"),
-            key=lambda c: (-(edges.get(c.market_id, float("-inf"))), c.liquidity),
-        )[: self.config.fleet.max_bots]
+            key=lambda c: (-(edges.get(c.market_id, float("-inf"))), c.market_id),
+        )
+        if self.config.fleet.max_bots > 0:
+            eligible = eligible[: self.config.fleet.max_bots]
         desired = {c.market_id: c for c in eligible}
         for context in contexts:
             if context.market_id not in desired and self.is_holding(context.market_id):

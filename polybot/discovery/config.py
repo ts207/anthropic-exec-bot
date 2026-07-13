@@ -125,8 +125,9 @@ class FleetConfig:
     """
 
     enabled: bool = False
+    # Concurrent bot cap; <= 0 means UNCAPPED (cover every eligible market).
     # Screen-tier classification keeps per-bot cost low enough to run wide.
-    max_bots: int = 25
+    max_bots: int = 0
     # Operator position mode written for every managed market: keep
     # "alert_only" for a monitoring soak; "live" arms autonomous trading.
     position_mode: str = "alert_only"

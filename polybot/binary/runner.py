@@ -302,6 +302,11 @@ class BinaryRuleBot:
                 _replace(config.classifier, model=config.classifier.screen_model), config
             )
         self.classifier_budget = ClassifierBudgetStore(self.store.data_dir)
+        # Confirm passes run concurrently; the budget store does
+        # read-modify-write on a JSON file and needs serializing.
+        import threading
+
+        self._budget_lock = threading.Lock()
         self.executor = BinaryExecutor(config, market, self.store, self.notifier, adapter)
         self.holdings = self.executor.holdings
         self.operator_gate = operator_gate
@@ -392,7 +397,7 @@ class BinaryRuleBot:
             if screen_decision is not None:
                 return screen_decision
         try:
-            passes = [self._classify_with_budget(article, index) for index in range(max(1, self.config.classifier.passes))]
+            passes = self._run_confirm_passes(article)
         except Exception as exc:
             self.classifier_budget.record_error()
             decision = BinaryDecision("ALERT_ONLY", "3", f"classifier_error:{exc}")
@@ -524,6 +529,18 @@ class BinaryRuleBot:
         self._log_decision(article, decision)
         return decision
 
+    def _run_confirm_passes(self, article: Article) -> list[Any]:
+        """Trade-grade passes run CONCURRENTLY: on a confirmation race, N
+        sequential strong-model calls would multiply reaction time by N."""
+        count = max(1, self.config.classifier.passes)
+        if count == 1:
+            return [self._classify_with_budget(article, 0)]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            futures = [pool.submit(self._classify_with_budget, article, index) for index in range(count)]
+            return [future.result() for future in futures]
+
     def _classify_with_budget(self, article: Article, pass_index: int, *, classifier: Any = None, stage: str = "confirm") -> Any:
         active = classifier if classifier is not None else self.classifier
         context = self.config.market.resolution_rules
@@ -539,7 +556,8 @@ class BinaryRuleBot:
             "input_char_count": input_chars,
             "estimated_input_tokens": max(1, input_chars // 4),
         }
-        self.classifier_budget.record_attempt()
+        with self._budget_lock:
+            self.classifier_budget.record_attempt()
         log_event("binary_classifier_attempt", **telemetry)
         if hasattr(active, "last_usage"):
             setattr(active, "last_usage", None)
