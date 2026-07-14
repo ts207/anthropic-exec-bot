@@ -203,6 +203,49 @@ def test_fleet_ranks_by_edge_without_liquidity_bias(tmp_path, monkeypatch) -> No
     assert [c.market_id for c in desired] == [deep.market_id]
 
 
+def test_fleet_status_reports_positions_ledger_and_scan(tmp_path, monkeypatch, capsys) -> None:
+    from datetime import datetime, timezone
+
+    from polybot.core.holdings import _atomic_json_write
+    from polybot.discovery.runner import fleet_status_command
+    from polybot.discovery.types import market_dir_slug
+
+    geo = _patch_roots(monkeypatch, tmp_path)
+    config_path = _fleet_yaml(tmp_path)
+    store = DiscoveryStore(tmp_path / "data")
+    market = grade_market(_analyzed_context(_binary_event()), ScoringConfig(allow_fixture_analysis_live=True))
+    store.save_context(market)
+
+    slug = market_dir_slug(market.market_id)
+    _atomic_json_write(geo / slug / "dry_run" / "holdings.json", {"held_location": "yes", "source": "entry"})
+    _atomic_json_write(geo / slug / "heartbeat.json", {"at": datetime.now(timezone.utc).isoformat()})
+    _atomic_json_write(geo / "operator" / "global_mode.json", {"mode": "alert_only"})
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "data" / "opportunities.json").write_text(
+        json.dumps(
+            {
+                "opportunities": [
+                    {"market_id": market.market_id, "outcome": "yes", "side": "YES", "tradable_edge": 0.12, "blockers": []}
+                ],
+                "group_arbitrage": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert fleet_status_command(config_path) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["global_mode"]["mode"] == "alert_only"
+    assert status["holding_count"] == 1
+    row = status["markets"][0]
+    assert row["market_id"] == market.market_id and row["holding"] is True
+    assert row["heartbeat_age_seconds"] is not None and row["heartbeat_age_seconds"] < 60
+    assert status["scan"]["executable"][0]["edge"] == 0.12
+    # Fresh ledger: full drawdown headroom available.
+    assert status["ledger"]["realized_net"] == 0.0
+    assert status["ledger"]["drawdown_headroom"] == status["ledger"]["max_drawdown_usd"]
+
+
 def test_fleet_emits_no_side_config_when_no_edge_is_best(tmp_path, monkeypatch) -> None:
     _patch_roots(monkeypatch, tmp_path)
     config = DiscoveryConfig(

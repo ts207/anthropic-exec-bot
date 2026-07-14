@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -251,6 +252,99 @@ def calibration_report_command(config_path: Path) -> int:
     config = load_discovery_config(config_path)
     report = CalibrationLog(config.data_dir).report(min_resolved=config.opportunity.min_resolved_for_calibration)
     print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+def fleet_status_command(config_path: Path) -> int:
+    """One consolidated view of everything an operator needs at 3am: global
+    mode, positions and their heartbeats, ledger utilization and drawdown
+    headroom, pending corroborations, calibration status, and the last scan's
+    executable edges. Reads state files only -- no network, no side effects
+    beyond the standard config load."""
+    from .calibration import CalibrationLog
+    from .fleet import FleetManager, fleet_operator_dir
+
+    config, store, allocator = _load(config_path)
+    manager = FleetManager(config, store, live=False, per_order_usd=allocator.config.per_order_usd, ledger_path=str(allocator.state_path))
+
+    snapshot = allocator.snapshot()
+    realized = float(snapshot.get("realized_net", 0.0))
+    drawdown_limit = allocator.config.max_drawdown_usd
+    ledger = {
+        "realized_net": realized,
+        "max_drawdown_usd": drawdown_limit,
+        "drawdown_headroom": round(drawdown_limit + realized, 2) if drawdown_limit > 0 else None,
+        "open_positions": snapshot.get("open_positions", []),
+        "total_spent": snapshot.get("total", 0.0),
+        "total_cap": allocator.config.total_usd,
+        "per_region": snapshot.get("per_region", {}),
+    }
+
+    global_mode_path = fleet_operator_dir() / "global_mode.json"
+    global_mode: dict[str, Any] = {"mode": "unset"}
+    if global_mode_path.exists():
+        try:
+            raw = json.loads(global_mode_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                global_mode = raw
+        except (OSError, json.JSONDecodeError):
+            global_mode = {"mode": "unreadable"}
+
+    contexts = store.all_contexts()
+    markets: list[dict[str, Any]] = []
+    for context in contexts:
+        holding = manager.is_holding(context.market_id)
+        if context.state not in TRADEABLE_STATES and not holding:
+            continue
+        heartbeat_age = manager._heartbeat_age_seconds(context.market_id)
+        markets.append(
+            {
+                "market_id": context.market_id,
+                "state": context.state,
+                "question": context.question[:100],
+                "deadline": context.deadline_iso,
+                "holding": holding,
+                "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_age is not None else None,
+            }
+        )
+
+    fleet_state: dict[str, Any] = {}
+    fleet_state_path = config.data_dir / "fleet_state.json"
+    if fleet_state_path.exists():
+        try:
+            raw = json.loads(fleet_state_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                fleet_state = raw
+        except (OSError, json.JSONDecodeError):
+            fleet_state = {"error": "unreadable"}
+
+    scan = _last_scan(config)
+    executable = [o for o in scan if not o.get("blockers")]
+    calibration = CalibrationLog(config.data_dir)
+
+    status = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "global_mode": global_mode,
+        "ledger": ledger,
+        "fleet": {
+            "running": fleet_state.get("running", []),
+            "desired": fleet_state.get("desired", []),
+            "last_sync": fleet_state.get("updated_at"),
+            "live": fleet_state.get("live"),
+        },
+        "markets": sorted(markets, key=lambda m: (not m["holding"], m["market_id"])),
+        "holding_count": sum(1 for m in markets if m["holding"]),
+        "scan": {
+            "scanned_outcomes": len(scan),
+            "executable": [
+                {"market_id": o.get("market_id"), "outcome": o.get("outcome"), "side": o.get("side"), "edge": o.get("tradable_edge")}
+                for o in executable[:10]
+            ],
+            "group_arbitrage": _last_scan_arbitrage(config),
+        },
+        "calibration": {"forecast_calibrated": calibration.forecast_calibrated()},
+    }
+    print(json.dumps(status, indent=2, sort_keys=True))
     return 0
 
 

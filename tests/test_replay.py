@@ -98,3 +98,86 @@ def test_replay_runs_full_decision_pipeline_in_isolation(tmp_path, capsys) -> No
     summary = json.loads(capsys.readouterr().out)
     assert summary["actions"].get("ENTER_YES") == 1
     assert summary["final_held"] == "yes"
+
+
+# ---- eval harness ----
+
+
+def _case_line(name: str, text: str, expectation: dict, held: str = "") -> str:
+    case = {"name": name, "article": {"url": f"https://reuters.com/{name}", "raw_text": text}, **expectation}
+    if held:
+        case["held"] = held
+    return json.dumps(case)
+
+
+def test_eval_classifier_passes_and_isolates_cases(tmp_path, capsys) -> None:
+    from polybot.evalset import eval_classifier_command
+
+    config_path = _binary_yaml(tmp_path)
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text(
+        "\n".join(
+            [
+                "# comment lines are ignored",
+                _case_line("unrelated_must_not_trade", "Unrelated sports story about the cup final.", {"forbid_trade": True}),
+                _case_line(
+                    "confirmed_should_enter",
+                    "US and Iran senior talks scheduled: the round will be held in Doha next week.",
+                    {"expect_action": "ENTER_YES"},
+                ),
+                # Runs AFTER the entering case: a fresh bot per case means this
+                # flat-entry case must still enter (no held state bleed-over).
+                _case_line(
+                    "still_flat_for_next_case",
+                    "US and Iran senior talks scheduled: the round will be held in Doha next week.",
+                    {"expect_action_in": ["ENTER_YES"]},
+                ),
+                _case_line(
+                    "held_yes_cancellation_must_exit",
+                    "Officials say the talks are cancelled and the round will not happen.",
+                    {"expect_action": "EXIT_HELD"},
+                    held="yes",
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert eval_classifier_command(config_path, cases_path) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["cases"] == 4 and report["failed"] == 0
+
+
+def test_eval_classifier_fails_ci_on_regression(tmp_path, capsys) -> None:
+    from polybot.evalset import eval_classifier_command
+
+    config_path = _binary_yaml(tmp_path)
+    cases_path = tmp_path / "cases.jsonl"
+    # The fixture classifier WILL enter on this text; expecting no-trade makes
+    # the case fail -- which must surface as a nonzero exit code.
+    cases_path.write_text(
+        _case_line("regression", "US and Iran senior talks scheduled: the round will be held in Doha next week.", {"forbid_trade": True}),
+        encoding="utf-8",
+    )
+    assert eval_classifier_command(config_path, cases_path) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["failed"] == 1
+    assert report["results"][0]["ok"] is False
+
+
+def test_eval_case_file_validates_loudly(tmp_path) -> None:
+    import pytest
+
+    from polybot.evalset import load_eval_cases
+
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text(json.dumps({"name": "no-expectation", "article": {"url": "u", "raw_text": "t"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no expectation"):
+        load_eval_cases(bad)
+
+
+def test_shipped_adversarial_corpus_parses() -> None:
+    from polybot.evalset import load_eval_cases
+
+    cases = load_eval_cases(Path("configs/geopolitics/eval-cases/binary-adversarial.jsonl"))
+    assert len(cases) >= 8
+    assert all("article" in case for case in cases)

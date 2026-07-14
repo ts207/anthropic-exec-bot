@@ -219,6 +219,24 @@ another reason for C2 heartbeats and Telegram degradation alerts. Accepted.
     archived articles run through the full decision pipeline in an isolated
     dry-run sandbox, so prompt/threshold changes are validated in minutes.
 
+**P5 — operations:**
+26. ✅ IMPLEMENTED — `fleet-status`: one consolidated view (global mode,
+    positions + heartbeat ages, ledger utilization + drawdown headroom,
+    last scan's executable edges + group arbs, calibration status). Reads
+    state files only.
+27. ✅ IMPLEMENTED — Adversarial eval harness (`eval-classifier`) with a
+    shipped labeled corpus (`configs/geopolitics/eval-cases/`): each case
+    runs a fresh isolated bot through the full pipeline and asserts the
+    decision (must-not-trade / must-enter / must-exit); nonzero exit on any
+    regression, so prompt/model changes fail preflight instead of failing
+    live. Closes the A2/A3 eval-set gap; keep adding every real misfire as
+    a case.
+28. ✅ IMPLEMENTED — Deployment hardening (`deploy/`, docs/geopolitics/
+    deployment.md): systemd unit with restart-always (safe by construction:
+    gate + locks + journals make restarts resume, never re-fire), secrets
+    via /etc/polybot/env, hourly `data/` snapshots with retention — the
+    ledger/journals/calibration history cannot be recovered from the chain.
+
 **Standing rule:** raise the notional guardrails only after the funnel and
 calibration reports show realized positive edge across multiple resolved,
 uncorrelated events — never on a good week.

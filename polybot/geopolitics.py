@@ -113,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--config", required=True)
     replay_parser.add_argument("--articles", required=True)
     replay_parser.add_argument("--limit", type=int, default=0)
+    fleet_status_parser = sub.add_parser("fleet-status")
+    fleet_status_parser.add_argument("--config", required=True)
+    eval_classifier_parser = sub.add_parser("eval-classifier")
+    eval_classifier_parser.add_argument("--config", required=True)
+    eval_classifier_parser.add_argument("--cases", required=True)
     run_fleet_parser = sub.add_parser("run-fleet")
     run_fleet_parser.add_argument("--config", required=True)
     run_fleet_parser.add_argument("--live", action="store_true")
@@ -253,6 +258,14 @@ def main(argv: list[str] | None = None) -> int:
         from .replay import replay_articles_command
 
         return replay_articles_command(Path(args.config), Path(args.articles), limit=args.limit)
+    if args.command == "fleet-status":
+        from .discovery.runner import fleet_status_command
+
+        return fleet_status_command(Path(args.config))
+    if args.command == "eval-classifier":
+        from .evalset import eval_classifier_command
+
+        return eval_classifier_command(Path(args.config), Path(args.cases))
     if args.command == "run-fleet":
         from .discovery.fleet import run_fleet_command
 
