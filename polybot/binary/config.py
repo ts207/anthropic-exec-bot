@@ -62,6 +62,16 @@ class EntryConfig:
     side: str = "YES"
     usd_budget: float = 100.0
     max_price: float = 0.90
+    # Balances at or below this are dust for wallet reconciliation.
+    reconcile_min_shares: float = 0.01
+    # Entries above this notional require a second independent source to have
+    # confirmed the same thesis within the window before buying (0 = off).
+    second_source_above_usd: float = 0.0
+    second_source_window_minutes: float = 60.0
+    # Post-entry corroboration: if no second independent source confirms the
+    # thesis within this many minutes of entry, alert (or trim). 0 = off.
+    corroboration_minutes: float = 0.0
+    corroboration_action: str = "alert"  # alert | trim
     # Lifetime cap on entry executions for this position config.
     max_entries: int = 1
 
@@ -79,6 +89,9 @@ class SellConfig:
     retry_partial_once: bool = True
     retry_delay_seconds: float = 2.0
     trim_fraction: float = 0.25
+    # Staged defense exits: < 1.0 sells this fraction first, requotes after
+    # retry_delay_seconds, then sells the remainder -- softer on thin books.
+    max_fraction_per_order: float = 1.0
 
 
 @dataclass(frozen=True)

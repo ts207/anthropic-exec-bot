@@ -100,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
     run_discovery_parser = sub.add_parser("run-discovery")
     run_discovery_parser.add_argument("--config", required=True)
     run_discovery_parser.add_argument("--once", action="store_true")
+    reconcile_ledger_parser = sub.add_parser("reconcile-ledger")
+    reconcile_ledger_parser.add_argument("--config", required=True)
     run_fleet_parser = sub.add_parser("run-fleet")
     run_fleet_parser.add_argument("--config", required=True)
     run_fleet_parser.add_argument("--live", action="store_true")
@@ -224,6 +226,10 @@ def main(argv: list[str] | None = None) -> int:
         from .discovery.runner import run_discovery_command
 
         return run_discovery_command(Path(args.config), once=args.once)
+    if args.command == "reconcile-ledger":
+        from .discovery.runner import reconcile_ledger_command
+
+        return reconcile_ledger_command(Path(args.config))
     if args.command == "run-fleet":
         from .discovery.fleet import run_fleet_command
 

@@ -81,6 +81,12 @@ class ScoringConfig:
     small_live_enabled: bool = True
     small_live_liquidity_fraction: float = 0.02
     small_live_min_order_usd: float = 5.0
+    # The offline fixture rule analyzer may never produce live-eligible
+    # markets (tests opt in explicitly).
+    allow_fixture_analysis_live: bool = False
+    # Per-market resolution-risk scaling: effective buffer =
+    # opportunity.resolution_risk_buffer + analyzer_resolution_risk * this.
+    resolution_risk_scale: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,9 @@ class OpportunityConfig:
     # <root>/<market-slug>[/dry_run]/ and the scan reads it from there.
     forecast_data_root: str = "data/geopolitics"
     forecast_max_age_hours: float = 24.0
+    # Effective resolution-risk buffer = resolution_risk_buffer +
+    # analyzer_resolution_risk * resolution_risk_scale (per market).
+    resolution_risk_scale: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -138,6 +147,12 @@ class FleetConfig:
     # configured, and the master kill switch still stops everything.
     auto_ack: bool = False
     generated_dir: str = "configs/geopolitics/generated"
+    # A running bot whose heartbeat is older than this is considered hung and
+    # gets terminated + restarted on the next cycle.
+    heartbeat_stale_seconds: float = 300.0
+    # Crash-loop guard: markets restarted more than this many times per hour
+    # stop being respawned and raise a fleet alarm instead.
+    max_restarts_per_hour: int = 3
 
 
 @dataclass(frozen=True)

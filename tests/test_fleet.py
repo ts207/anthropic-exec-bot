@@ -59,6 +59,8 @@ def _fleet_yaml(tmp_path: Path, *, position_mode: str = "alert_only", auto_ack: 
         f"""
 classifier:
   provider: rule_based
+scoring:
+  allow_fixture_analysis_live: true
 fleet:
   enabled: true
   max_bots: 5
@@ -108,6 +110,11 @@ def test_fleet_once_spawns_a_bot_per_eligible_market(tmp_path, monkeypatch) -> N
 
 
 def test_fleet_live_auto_ack_arms_and_passes_live_flag(tmp_path, monkeypatch) -> None:
+    # The pre-spawn gate check requires the live env (telegram + anthropic)
+    # to be configured, same as the bot's own startup preflight.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     geo = _patch_roots(monkeypatch, tmp_path)
     config_path = _fleet_yaml(tmp_path, position_mode="live", auto_ack=True)
     spawner = _Spawner()
@@ -133,7 +140,7 @@ def test_fleet_keeps_defender_for_held_market_and_stops_flat_demoted(tmp_path, m
         logs_dir=tmp_path / "logs",
     )
     store = DiscoveryStore(config.data_dir)
-    scoring = ScoringConfig()
+    scoring = ScoringConfig(allow_fixture_analysis_live=True)
     held_market = grade_market(_analyzed_context(_binary_event(slug="held")), scoring)
     flat_market = grade_market(_analyzed_context(_binary_event(slug="flat")), scoring)
     for context in (held_market, flat_market):
@@ -151,8 +158,8 @@ def test_fleet_keeps_defender_for_held_market_and_stops_flat_demoted(tmp_path, m
     holdings = Path(str(geo)) / market_dir_slug(held_market.market_id) / "dry_run" / "holdings.json"
     holdings.parent.mkdir(parents=True, exist_ok=True)
     holdings.write_text(json.dumps({"held_location": "yes", "source": "entry"}), encoding="utf-8")
-    demoted_held = grade_market(held_market, ScoringConfig(min_liquidity_live=10**9, small_live_enabled=False))
-    demoted_flat = grade_market(flat_market, ScoringConfig(min_liquidity_live=10**9, small_live_enabled=False))
+    demoted_held = grade_market(held_market, ScoringConfig(allow_fixture_analysis_live=True, min_liquidity_live=10**9, small_live_enabled=False))
+    demoted_flat = grade_market(flat_market, ScoringConfig(allow_fixture_analysis_live=True, min_liquidity_live=10**9, small_live_enabled=False))
     assert demoted_held.state == "PAPER_ELIGIBLE" and demoted_flat.state == "PAPER_ELIGIBLE"
 
     summary = manager.sync([demoted_held, demoted_flat])
@@ -176,7 +183,7 @@ def test_fleet_ranks_by_edge_without_liquidity_bias(tmp_path, monkeypatch) -> No
         logs_dir=tmp_path / "logs",
     )
     store = DiscoveryStore(config.data_dir)
-    scoring = ScoringConfig()
+    scoring = ScoringConfig(allow_fixture_analysis_live=True)
     deep = grade_market(_analyzed_context(_binary_event(slug="deep", liquidity=50000.0)), scoring)
     thin = grade_market(_analyzed_context(_binary_event(slug="thin", liquidity=300.0)), scoring)
     manager = FleetManager(config, store, live=False, per_order_usd=50.0, ledger_path=str(config.data_dir / "allocations.json"))

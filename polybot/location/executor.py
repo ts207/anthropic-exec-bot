@@ -160,6 +160,7 @@ class LocationExecutor:
         if not found:
             if local is not None:
                 self.holdings.clear_held(source="wallet_reconciliation", previous_local=local, balances=balances)
+                self._portfolio_settle(None)
                 self._portfolio_release()
             return {"held_location": None, "balances": balances, "no_balances": no_balances, "open_orders": open_orders, "changed": local is not None}
         outcome, position = found[0]
@@ -276,12 +277,17 @@ class LocationExecutor:
         # process dies after the exchange accepts the order, a restart must not
         # forget that the mutation was attempted.
         self._record_protection_execution(journal.execution_id)
-        sell_result = self.adapter.sell_yes_fak(held.yes_token_id, target_shares, self.config.execution.sell.min_price)
+        # Staged exit: sell only a fraction first when configured (< 1.0);
+        # the remainder goes out after retry_delay against a fresh book --
+        # softer on thin books than one full-size FAK sweep.
+        stage_fraction = min(1.0, max(0.1, self.config.execution.sell.max_fraction_per_order))
+        first_order_shares = target_shares if stage_fraction >= 1.0 else max(0.0, target_shares * stage_fraction)
+        sell_result = self.adapter.sell_yes_fak(held.yes_token_id, first_order_shares, self.config.execution.sell.min_price)
         sell_fill = self.adapter.verify_fill(sell_result, held.yes_token_id)
         journal = self.journal.update(journal, "sell_reconciled", sell_result=sell_result, filled_shares=sell_fill.filled_shares)
         total_sold = sell_fill.filled_shares
 
-        if total_sold < target_shares and self.config.execution.sell.retry_partial_once:
+        if total_sold < target_shares and (self.config.execution.sell.retry_partial_once or stage_fraction < 1.0):
             self.store.write(
                 "YES_PARTIAL",
                 outcome=held.name,
@@ -327,6 +333,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.notifier.notify("Trimmed held-outcome YES exposure", outcome=held.label, total_sold=total_sold)
+            self._portfolio_reduce_basis(total_sold * sale_price)
             self.journal.update(journal, "completed", result="TRIMMED", total_sold=total_sold)
             return "TRIMMED"
 
@@ -345,6 +352,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold)
+            self._portfolio_settle(total_sold * sale_price)
             self._portfolio_release()
             self.notifier.notify("Exited held-outcome YES exposure (sell-only)", outcome=held.label, total_sold=total_sold)
             self.journal.update(journal, "completed", result="EXITED", total_sold=total_sold)
@@ -367,6 +375,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason="rotation_target_missing")
+            self._portfolio_settle(total_sold * sale_price)
             self._portfolio_release()
             self.notifier.notify("Rotation target missing from config; exited without buying", total_sold=total_sold)
             self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_missing")
@@ -416,6 +425,32 @@ class LocationExecutor:
             self.store.write("ENTRY_PORTFOLIO_BLOCKED", reason=reason, target_outcome=target.name, usd_budget=usd_budget)
             log_event("location_entry_skip", reason=f"portfolio:{reason}", usd_budget=usd_budget)
             return "ENTRY_PORTFOLIO_BLOCKED"
+
+        # Large entries need a SECOND independent domain inside the freshness
+        # window before any capital moves: one wrong wire story costs an
+        # alert, not the stake.
+        if entry.second_source_above_usd > 0 and usd_budget >= entry.second_source_above_usd:
+            from polybot.core.confirmations import SecondSourceGate
+
+            gate = SecondSourceGate(self.store.data_dir, entry.second_source_window_minutes)
+            if not gate.confirm(target.name, article.domain):
+                self.store.write(
+                    "ENTRY_AWAITING_SECOND_SOURCE",
+                    target_outcome=target.name,
+                    first_domain=article.domain,
+                    usd_budget=usd_budget,
+                    window_minutes=entry.second_source_window_minutes,
+                    article=article.__dict__,
+                )
+                self.notifier.notify(
+                    "Large entry deferred; awaiting second independent source",
+                    target=target.label,
+                    first_domain=article.domain,
+                    usd_budget=usd_budget,
+                    window_minutes=entry.second_source_window_minutes,
+                )
+                log_event("location_entry_awaiting_second_source", target=target.name, domain=article.domain, usd_budget=usd_budget)
+                return "ENTRY_AWAITING_SECOND_SOURCE"
 
         journal = self.journal.start("ENTER_YES", decision=_decision_dict(decision), article=article.__dict__)
         self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
@@ -490,6 +525,7 @@ class LocationExecutor:
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
         journal = self.journal.update(journal, "buy_reconciled", buy_result=buy_result, filled_shares=buy_fill.filled_shares)
         if buy_fill.filled_shares <= 0:
+            self._portfolio_settle(None)
             self._portfolio_release()
             self.store.write(
                 "ENTRY_UNFILLED",
@@ -635,6 +671,14 @@ class LocationExecutor:
         if self.portfolio is not None:
             self.portfolio.release()
 
+    def _portfolio_settle(self, proceeds_usd: float | None) -> None:
+        if self.portfolio is not None:
+            self.portfolio.settle(proceeds_usd)
+
+    def _portfolio_reduce_basis(self, proceeds_usd: float) -> None:
+        if self.portfolio is not None and proceeds_usd > 0:
+            self.portfolio.reduce_basis(proceeds_usd)
+
     def _buy_rotation_leg(
         self,
         decision: LocationDecision,
@@ -673,6 +717,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason="rotation_target_above_cap_or_unavailable")
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify(
                 "Sold held YES. Rotation buy skipped (target price above cap or unavailable).",
@@ -703,6 +748,7 @@ class LocationExecutor:
                 total_sold=total_sold,
                 reason="rotation_target_spread_too_wide",
             )
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.journal.update(journal, "completed", result="EXITED", reason="rotation_target_spread_too_wide")
             return "EXITED"
@@ -748,6 +794,7 @@ class LocationExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_outcome=held.name, total_sold=total_sold, reason=block_reason)
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify(
                 "Sold held YES. Rotation buy skipped (confirmed sale proceeds too small to fund a real order).",
@@ -792,11 +839,13 @@ class LocationExecutor:
             # The held YES was fully sold before the buy failed, so the live
             # book position is flat even though the state is FLIP_INCOMPLETE.
             self.holdings.clear_held(source="rotation_incomplete", from_outcome=held.name, total_sold=total_sold, intended_target=target.name)
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify("Sold held YES but rotation buy did not fill. Manual intervention required.", total_sold=total_sold, target=target.label)
             self.journal.update(journal, "failed", result="FLIP_INCOMPLETE", reason="rotation_buy_unfilled")
             return "FLIP_INCOMPLETE"
 
+        self._portfolio_settle(confirmed_proceeds)
         self.store.write(
             "ROTATED",
             from_outcome=held.name,

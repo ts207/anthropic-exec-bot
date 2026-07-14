@@ -56,6 +56,7 @@ class FleetManager:
         per_order_usd: float,
         ledger_path: str,
         spawner: Callable[[list[str], Path], Any] | None = None,
+        notifier: Any = None,
     ):
         self.config = config
         self.store = store
@@ -64,6 +65,9 @@ class FleetManager:
         self.ledger_path = ledger_path
         self.spawner = spawner or _default_spawner
         self.processes: dict[str, Any] = {}
+        self.notifier = notifier
+        self._restarts: dict[str, list[float]] = {}
+        self._drawdown_halted = False
 
     # -- planning --
 
@@ -122,6 +126,9 @@ class FleetManager:
     # -- reconciliation --
 
     def sync(self, contexts: list[MarketContext]) -> dict[str, Any]:
+        self._reconcile_ledger()
+        self._drawdown_check()
+        self._terminate_hung_bots()
         desired = self.desired_markets(contexts)
         desired_ids = {c.market_id for c in desired}
         summary: dict[str, Any] = {"desired": sorted(desired_ids), "started": [], "stopped": [], "armed": [], "errors": {}}
@@ -146,6 +153,92 @@ class FleetManager:
                 log_event("fleet_market_error", market_id=context.market_id, error=str(exc))
         summary["running"] = sorted(m for m, p in self.processes.items() if p.poll() is None)
         return summary
+
+    def _reconcile_ledger(self) -> None:
+        try:
+            from polybot.core.portfolio import PortfolioAllocator
+
+            allocator = PortfolioAllocator.from_ledger(Path(self.ledger_path))
+            allocator.reconcile(is_open=self.is_holding)
+        except (ValueError, OSError) as exc:
+            log_event("fleet_ledger_reconcile_skipped", error=str(exc))
+
+    def _drawdown_check(self) -> None:
+        """Portfolio kill switch: cumulative realized trading losses beyond
+        max_drawdown_usd flip the shared operator mode to alert_only -- every
+        bot stops trading mid-cycle while continuing to watch and alert."""
+        if self._drawdown_halted:
+            return
+        try:
+            from polybot.core.portfolio import PortfolioAllocator
+
+            allocator = PortfolioAllocator.from_ledger(Path(self.ledger_path))
+            realized = allocator.realized_net()
+            limit = allocator.config.max_drawdown_usd
+        except (ValueError, OSError):
+            return
+        if limit > 0 and realized <= -limit:
+            self._drawdown_halted = True
+            path = Path(GEO_DATA_ROOT) / "operator" / "global_mode.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_json_write(path, {"mode": "alert_only", "reason": "max_drawdown", "realized_net": realized, "updated_at": datetime.now(timezone.utc).isoformat()})
+            log_event("fleet_drawdown_halt", realized_net=realized, limit=limit)
+            if self.notifier is not None:
+                self.notifier.notify("FLEET HALTED: realized drawdown limit reached", realized_net=realized, limit=limit)
+
+    def _terminate_hung_bots(self) -> None:
+        stale_after = self.config.fleet.heartbeat_stale_seconds
+        if stale_after <= 0:
+            return
+        for market_id, process in list(self.processes.items()):
+            if process.poll() is not None:
+                continue
+            age = self._heartbeat_age_seconds(market_id)
+            if age is not None and age > stale_after:
+                process.terminate()
+                log_event("fleet_bot_hung_terminated", market_id=market_id, heartbeat_age_seconds=round(age, 1))
+                if self.notifier is not None:
+                    self.notifier.notify("Fleet: hung bot terminated for restart", market_id=market_id, heartbeat_age_seconds=round(age, 1))
+
+    def _heartbeat_age_seconds(self, market_id: str) -> float | None:
+        base = Path(GEO_DATA_ROOT) / market_dir_slug(market_id)
+        for candidate in (base / "dry_run" / "heartbeat.json", base / "heartbeat.json"):
+            if not candidate.exists():
+                continue
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+                stamp = datetime.fromisoformat(str(raw.get("at")).replace("Z", "+00:00"))
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - stamp).total_seconds()
+        return None
+
+    def _restart_allowed(self, market_id: str) -> bool:
+        import time as _time
+
+        window_start = _time.monotonic() - 3600.0
+        history = [t for t in self._restarts.get(market_id, []) if t >= window_start]
+        self._restarts[market_id] = history
+        return len(history) < self.config.fleet.max_restarts_per_hour
+
+    def _record_restart(self, market_id: str) -> None:
+        import time as _time
+
+        self._restarts.setdefault(market_id, []).append(_time.monotonic())
+
+    def _pre_spawn_check(self, config_path: Path, loaded: Any) -> None:
+        """Offline gate check before spawning with --live: a generated config
+        whose mode/ack/dry-run state cannot pass the operator gate should be a
+        visible fleet error, not a bot crash-loop."""
+        if not self.live:
+            return
+        gate = OperatorGate(config_path, loaded)
+        status = gate.status(live_requested=True)
+        hard = [b for b in status.blockers if b != "operator_mode_alert_only"]
+        if hard:
+            raise ValueError(f"pre-spawn gate check failed: {','.join(hard)}")
 
     def _ensure_config(self, context: MarketContext) -> Path:
         plan = self.store.load_source_plan(context.market_id)
@@ -192,6 +285,10 @@ class FleetManager:
             return False
         if process is not None:
             log_event("fleet_bot_exited", market_id=context.market_id, returncode=process.poll())
+            if not self._restart_allowed(context.market_id):
+                raise ValueError("restart limit reached; investigate crash loop before respawning")
+            self._record_restart(context.market_id)
+        self._pre_spawn_check(config_path, self._load_executor_config(config_path))
         command = self._command(context, config_path)
         log_path = self.config.logs_dir / f"fleet_{market_dir_slug(context.market_id)}.out"
         self.processes[context.market_id] = self.spawner(command, log_path)
@@ -256,6 +353,7 @@ def run_fleet_command(
         per_order_usd=allocator.config.per_order_usd,
         ledger_path=str(allocator.state_path),
         spawner=spawner,
+        notifier=notifier,
     )
     try:
         while True:

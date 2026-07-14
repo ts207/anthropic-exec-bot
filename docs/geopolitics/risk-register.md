@@ -155,24 +155,24 @@ another reason for C2 heartbeats and Telegram degradation alerts. Accepted.
 ## The plan, prioritized
 
 **P0 — before any live arming (small, high-value):**
-1. Screen tier gates entries only; holding bots always run full confirm passes (A1).
-2. Port wallet reconciliation + execution journal + process lock to the binary executor (C1).
-3. Realized-P&L tracking in the shared ledger + automatic fleet halt on `max_drawdown_usd` (B5).
-4. Scorer: fixture-analyzed markets can never be live-eligible (A4).
+1. ✅ IMPLEMENTED — Screen tier gates entries only; holding bots always run full confirm passes (A1).
+2. ✅ IMPLEMENTED — Wallet reconciliation + execution journal + process lock in the binary executor (C1).
+3. ✅ IMPLEMENTED — Realized-P&L tracking in the shared ledger (`settle`/`reduce_basis` at every flat transition) + automatic fleet halt on `max_drawdown_usd` (B5).
+4. ✅ IMPLEMENTED — Scorer: fixture-analyzed markets can never be live-eligible unless `scoring.allow_fixture_analysis_live` is explicitly set (A4).
 
 **P1 — during the alert-only soak:**
-5. Bot heartbeats + fleet hang detection with restart backoff (C2).
-6. `reconcile-ledger`: release unfilled reservations, roll buckets (C3).
-7. Fleet pre-spawn preflight; refuse to spawn blocked configs (C4).
-8. Per-domain feed backoff on 429/403 (C5).
-9. Untrusted-article fencing in prompts + adversarial cases in a CI eval set (A2/A3).
-10. Resolution-risk buffer scaled by the analyzer's per-market score (B2).
+5. ✅ IMPLEMENTED — Bot heartbeats (`heartbeat.json` per cycle) + fleet hang detection with `max_restarts_per_hour` backoff (C2).
+6. ✅ IMPLEMENTED — `reconcile-ledger` command: frees dead position slots, rolls daily buckets (C3).
+7. ✅ IMPLEMENTED — Fleet pre-spawn operator-gate check; refuses to spawn blocked configs (C4).
+8. ✅ IMPLEMENTED — Per-domain feed backoff on 429/403 (exponential, capped at 1h) (C5).
+9. ◐ PARTIAL — Untrusted-article fencing in prompts is in (`<<<ARTICLE ... ARTICLE>>>`); the CI adversarial eval set remains open (A2/A3).
+10. ✅ IMPLEMENTED — Resolution-risk buffer scaled by the analyzer's per-market score (`resolution_risk_scale`) (B2).
 
 **P2 — after first live weeks, informed by data:**
-11. Post-entry corroboration check with config-gated trim (B1).
-12. Exit-aware sizing and staged defense exits (B3).
-13. Region/conflict-family second correlation dimension (B4).
-14. Second-source confirmation requirement above a size threshold (A2).
+11. ✅ IMPLEMENTED — Post-entry corroboration check (`entry.corroboration_minutes` / `corroboration_action: alert|trim`): a second independent domain must reinforce the thesis within the window or the operator is alerted / the position trimmed (B1).
+12. ✅ IMPLEMENTED — Book-aware sizing (`recommended_max_order_usd`) and staged defense exits (`sell.max_fraction_per_order`) (B3).
+13. ✅ IMPLEMENTED — Region second correlation dimension (`per_region_usd` ledger cap; region derived from deciding actors) (B4).
+14. ✅ IMPLEMENTED — Second-source confirmation above `entry.second_source_above_usd`: the first trigger defers to `ENTRY_AWAITING_SECOND_SOURCE` until an independent domain confirms within `second_source_window_minutes` (A2).
 
 **Standing rule:** raise the notional guardrails only after the funnel and
 calibration reports show realized positive edge across multiple resolved,

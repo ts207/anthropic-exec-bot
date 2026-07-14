@@ -104,6 +104,11 @@ def grade_market(
     if group_counts.get(group, 0) >= scoring.max_markets_per_correlation_group:
         live_blockers.append(f"correlation_group_limit:{group}")
 
+    if analysis.model == "fixture" and not scoring.allow_fixture_analysis_live:
+        # The offline heuristic analyzer is a test fixture, not a rule reader:
+        # a config mistake must not let fixture-graded markets trade live.
+        return _finalize(context, "PAPER_ELIGIBLE", ["fixture_analysis_not_live_eligible"] + live_blockers, scores, group)
+
     if live_blockers:
         # Back-compat bypass for operators who configured explicit liquidity
         # floors: when liquidity is the only failed live gate, stay live at

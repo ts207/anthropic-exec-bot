@@ -82,6 +82,37 @@ EVENT_FAMILIES: dict[str, list[str]] = {
 }
 
 
+# Broad region buckets for the portfolio's second correlation dimension:
+# different party sets in one theater still move together on contagion.
+ACTOR_REGIONS: dict[str, str] = {
+    "united_states": "north_america",
+    "iran": "middle_east", "israel": "middle_east", "qatar": "middle_east",
+    "oman": "middle_east", "saudi_arabia": "middle_east", "uae": "middle_east",
+    "egypt": "middle_east", "gaza": "middle_east", "lebanon": "middle_east",
+    "syria": "middle_east", "yemen": "middle_east", "iraq": "middle_east",
+    "turkey": "middle_east",
+    "russia": "eastern_europe", "ukraine": "eastern_europe",
+    "china": "east_asia", "taiwan": "east_asia", "north_korea": "east_asia", "south_korea": "east_asia",
+    "pakistan": "south_asia", "india": "south_asia", "afghanistan": "south_asia",
+    "united_kingdom": "western_europe", "france": "western_europe",
+    "germany": "western_europe", "switzerland": "western_europe", "european_union": "western_europe",
+    "venezuela": "south_america",
+}
+
+
+def region_of(actors: list[str]) -> str:
+    """Majority region of the deciding actors (global institutions and the US
+    are weighted last so 'us + iran' lands in middle_east, not a tie)."""
+    from collections import Counter
+
+    weighted = [ACTOR_REGIONS[a] for a in actors if a in ACTOR_REGIONS and a not in ("united_states", "united_nations", "nato")]
+    if not weighted:
+        weighted = [ACTOR_REGIONS[a] for a in actors if a in ACTOR_REGIONS]
+    if not weighted:
+        return "global"
+    return Counter(weighted).most_common(1)[0][0]
+
+
 def detect_actors(text: str) -> list[str]:
     lowered = text.lower()
     found = [actor for actor, (aliases, _domains) in ACTORS.items() if any(alias in lowered for alias in aliases)]

@@ -250,6 +250,13 @@ def run_binary_command(config_path: Path, live_flag: bool) -> int:
         if _hard_live_startup_blockers(preflight):
             raise SystemExit("live preflight blocked execution; fix blockers or use ack/set-mode commands")
     bot = BinaryRuleBot(config=config, market=verification, adapter=adapter, operator_gate=gate, live_requested=live_flag)
+    from polybot.core.runtime import ProcessLock
+
+    with ProcessLock(bot.store.data_dir / "process.lock"):
+        return _run_loop(bot, config, live_flag)
+
+
+def _run_loop(bot: "BinaryRuleBot", config: BinaryBotConfig, live_flag: bool) -> int:
     while True:
         try:
             bot.run_once()
@@ -313,9 +320,15 @@ class BinaryRuleBot:
         self.live_requested = live_requested
 
     def run_once(self) -> list[BinaryDecision]:
+        self._write_heartbeat()
         if self.operator_gate is not None and self.operator_gate.current_mode() == "off":
             log_event("binary_operator_off_cycle_skip")
             return []
+        if self.live_requested and not self.config.execution.dry_run:
+            reconciliation = self.executor.reconcile_live_holding()
+            if reconciliation.get("changed"):
+                log_event("binary_wallet_reconciled", **reconciliation)
+        self._check_corroboration_deadline()
         decisions: list[BinaryDecision] = []
         held = self.holdings.held_location()
         decay = time_decay_decision(self.config, held)
@@ -406,7 +419,9 @@ class BinaryRuleBot:
             self._log_decision(article, decision)
             self._notify_classifier_budget_block_once(block_reason)
             return decision
-        if self.screen_classifier is not None:
+        # Screen tier gates the strong model ONLY WHILE FLAT (see the location
+        # runner): defense must never depend on the weakest model.
+        if self.screen_classifier is not None and self.holdings.held_location() is None:
             screen_decision = self._screen_stage(article)
             if screen_decision is not None:
                 return screen_decision
@@ -429,6 +444,7 @@ class BinaryRuleBot:
         decision = self._enforce_source_policy(article, decision)
         decision = self._enforce_execution_policy(decision)
         self._log_decision(article, decision)
+        self._corroboration_on_decision(decision, article)
         if decision.action == "ALERT_ONLY":
             self.notifier.notify("Binary rule bot alert only; no trade", level=decision.level, reason=decision.reason, url=article.url)
         return self._execute_if_allowed(decision, article)
@@ -508,8 +524,67 @@ class BinaryRuleBot:
                 blocked = BinaryDecision("ALERT_ONLY", "3", f"operator_block:{gate_result.reason}", decision.factors)
                 self._log_decision(article, blocked)
                 return blocked
-        self.executor.execute(decision, article)
+        result = self.executor.execute(decision, article)
+        self._maybe_start_corroboration(result, article)
         return decision
+
+    def _corroboration_tracker(self) -> Any:
+        from polybot.core.confirmations import CorroborationTracker
+
+        return CorroborationTracker(self.store.data_dir)
+
+    def _maybe_start_corroboration(self, result: Any, article: Article) -> None:
+        """Arm the corroboration clock the moment an autonomous entry fills."""
+        if self.config.entry.corroboration_minutes <= 0:
+            return
+        if result not in {"ENTERED", "PARTIALLY_ENTERED"}:
+            return
+        self._corroboration_tracker().start(
+            entry_domain=article.domain,
+            minutes=self.config.entry.corroboration_minutes,
+            action=self.config.entry.corroboration_action,
+        )
+        log_event("binary_corroboration_started", entry_domain=article.domain, minutes=self.config.entry.corroboration_minutes)
+
+    def _corroboration_on_decision(self, decision: BinaryDecision, article: Article) -> None:
+        """A held-thesis reinforcement from a DIFFERENT domain satisfies the
+        post-entry corroboration requirement."""
+        if self.config.entry.corroboration_minutes <= 0:
+            return
+        if decision.reason not in {"held_yes_thesis_reinforced", "held_no_thesis_reinforced"}:
+            return
+        if self._corroboration_tracker().satisfy(article.domain):
+            log_event("binary_corroboration_satisfied", domain=article.domain)
+
+    def _check_corroboration_deadline(self) -> None:
+        if self.config.entry.corroboration_minutes <= 0:
+            return
+        tracker = self._corroboration_tracker()
+        record = tracker.overdue()
+        if record is None:
+            return
+        held = self.holdings.held_location()
+        if held is None:
+            # Position already gone (exit or reconciliation); nothing to defend.
+            tracker.mark_escalated()
+            return
+        action = str(record.get("action") or "alert")
+        self.notifier.notify(
+            "Entry NOT corroborated by a second source within the window",
+            entry_domain=record.get("entry_domain"),
+            deadline=record.get("deadline"),
+            configured_action=action,
+        )
+        log_event("binary_corroboration_overdue", entry_domain=record.get("entry_domain"), action=action)
+        if action == "trim":
+            decision = BinaryDecision("TRIM_HELD", "TIME", "corroboration_window_expired_trim")
+            self._execute_if_allowed(decision, _synthetic_article(decision.reason))
+        tracker.mark_escalated()
+
+    def _write_heartbeat(self) -> None:
+        from polybot.core.holdings import _atomic_json_write
+
+        _atomic_json_write(self.store.data_dir / "heartbeat.json", {"at": datetime.now(timezone.utc).isoformat()})
 
     def _log_decision(self, article: Article, decision: BinaryDecision) -> None:
         append_jsonl(

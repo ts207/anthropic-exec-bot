@@ -273,6 +273,7 @@ def _normalize_fetch_url(url: str) -> str:
 
 
 def fetch_article(url: str, user_agent: str = "polybot/0.1") -> Article:
+    _check_backoff(url)
     url = _normalize_fetch_url(url)
     response = requests.get(url, headers={"User-Agent": user_agent}, timeout=20)
     response.raise_for_status()
@@ -342,6 +343,50 @@ def extract_listing_article_urls(url: str, markup: str, *, limit: int = 10) -> l
 _FEED_CONDITIONAL: dict[str, dict[str, str]] = {}
 _FEED_CONDITIONAL_LOCK = threading.Lock()
 
+# Per-domain throttle state: on 429/403 the domain is backed off with
+# exponential delay (60s * 2^n, capped at 1h) so second-scale polling cannot
+# escalate into a ban. Checked before any fetch to that domain.
+_DOMAIN_BACKOFF: dict[str, dict[str, float]] = {}
+_DOMAIN_BACKOFF_LOCK = threading.Lock()
+
+
+class DomainBackoff(RuntimeError):
+    pass
+
+
+def _backoff_domain_of(url: str) -> str:
+    return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _check_backoff(url: str) -> None:
+    import time as _time
+
+    domain = _backoff_domain_of(url)
+    with _DOMAIN_BACKOFF_LOCK:
+        entry = _DOMAIN_BACKOFF.get(domain)
+        if entry and entry.get("until", 0.0) > _time.monotonic():
+            raise DomainBackoff(f"domain {domain} backed off after HTTP {int(entry.get('status', 0))}")
+
+
+def _register_throttle(url: str, status_code: int) -> None:
+    import time as _time
+
+    if status_code not in (403, 429):
+        return
+    domain = _backoff_domain_of(url)
+    with _DOMAIN_BACKOFF_LOCK:
+        entry = _DOMAIN_BACKOFF.setdefault(domain, {"failures": 0.0})
+        entry["failures"] = entry.get("failures", 0.0) + 1
+        delay = min(3600.0, 60.0 * (2 ** (entry["failures"] - 1)))
+        entry["until"] = _time.monotonic() + delay
+        entry["status"] = float(status_code)
+
+
+def _clear_throttle(url: str) -> None:
+    domain = _backoff_domain_of(url)
+    with _DOMAIN_BACKOFF_LOCK:
+        _DOMAIN_BACKOFF.pop(domain, None)
+
 
 def fetch_feed_articles(
     feed_url: str,
@@ -351,6 +396,7 @@ def fetch_feed_articles(
     exclude_terms: list[str] | None = None,
     limit: int = 20,
 ) -> list[Article]:
+    _check_backoff(feed_url)
     headers = {"User-Agent": user_agent}
     with _FEED_CONDITIONAL_LOCK:
         cached = dict(_FEED_CONDITIONAL.get(feed_url, {}))
@@ -359,8 +405,13 @@ def fetch_feed_articles(
     if cached.get("last_modified"):
         headers["If-Modified-Since"] = cached["last_modified"]
     response = requests.get(feed_url, headers=headers, timeout=20)
-    if getattr(response, "status_code", 200) == 304:
+    status = getattr(response, "status_code", 200)
+    if status == 304:
         return []
+    if status in (403, 429):
+        _register_throttle(feed_url, status)
+    else:
+        _clear_throttle(feed_url)
     response.raise_for_status()
     response_headers = getattr(response, "headers", {}) or {}
     validators = {}

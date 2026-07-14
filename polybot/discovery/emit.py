@@ -36,11 +36,14 @@ def emit_bot_config(context: MarketContext, plan: SourcePlan, *, entry_usd: floa
         payload = _binary_config(context, plan, entry_usd)
     payload["execution"]["dry_run"] = dry_run
     if ledger_path:
+        from .registry import region_of
+
         payload["portfolio"] = {
             "ledger_path": ledger_path,
             "market_id": context.market_id,
             "event_slug": context.event_slug,
             "correlation_group": context.correlation_group or "uncategorized",
+            "region": region_of(context.rule_analysis.parties) if context.rule_analysis else "global",
             "deadline_iso": context.deadline_iso,
         }
     out_path.parent.mkdir(parents=True, exist_ok=True)

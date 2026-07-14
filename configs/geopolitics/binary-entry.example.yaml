@@ -47,6 +47,15 @@ entry:
   usd_budget: 100.0
   max_price: 0.90
   max_entries: 1
+  # Entries at/above this notional wait for a SECOND independent domain to
+  # confirm inside the window (state ENTRY_AWAITING_SECOND_SOURCE). 0 = off.
+  second_source_above_usd: 0.0
+  second_source_window_minutes: 60.0
+  # After an entry, a different domain must reinforce the thesis within this
+  # window or you get alerted ("alert") / the position is trimmed ("trim").
+  # 0 = off.
+  corroboration_minutes: 0.0
+  corroboration_action: "alert"
 
 position:
   expected_yes_token_id: ""   # optional pins, verified against Gamma
@@ -69,6 +78,9 @@ execution:
   sell:
     enabled: true
     min_price: 0.03
+    # Staged exits: <1.0 splits a defense sell into a first order of this
+    # fraction plus the remainder after a requote delay (thin-book slippage).
+    max_fraction_per_order: 1.0
   flip_buy:
     enabled: false   # arm to buy the opposite side after a news-triggered exit
     max_price: 0.95

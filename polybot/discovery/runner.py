@@ -198,6 +198,22 @@ def emit_bot_config_command(config_path: Path, market_id: str, out: Path | None 
     return 0
 
 
+def reconcile_ledger_command(config_path: Path) -> int:
+    """Ledger hygiene: prune stale daily buckets and free position slots for
+    markets whose holdings files show flat."""
+    _, _, allocator = _load(config_path)
+    from .fleet import FleetManager  # is_holding path logic lives there
+
+    from .config import load_discovery_config
+
+    config = load_discovery_config(config_path)
+    store = DiscoveryStore(config.data_dir)
+    manager = FleetManager(config, store, live=False, per_order_usd=allocator.config.per_order_usd, ledger_path=str(allocator.state_path))
+    state = allocator.reconcile(is_open=manager.is_holding)
+    print(json.dumps({"open_positions": state.get("open_positions", []), "realized_net": state.get("realized_net", 0.0)}, indent=2, sort_keys=True))
+    return 0
+
+
 def funnel_report_command(config_path: Path) -> int:
     """Measure the whole opportunity funnel instead of one hand-picked market:
     all -> understandable -> observable -> eligible -> mispriced ->

@@ -410,6 +410,7 @@ class LocationProtectionBot:
         self._listing_text_cache_path = self.store.data_dir / "listing_article_text_cache.json"
 
     def run_once(self) -> list[LocationDecision]:
+        self._write_heartbeat()
         if self.operator_gate is not None and self.operator_gate.current_mode() == "off":
             log_event("location_operator_off_cycle_skip")
             return []
@@ -417,6 +418,7 @@ class LocationProtectionBot:
             reconciliation = self.executor.reconcile_live_holding()
             if reconciliation.get("changed"):
                 log_event("location_wallet_reconciled", **reconciliation)
+        self._check_corroboration_deadline()
         mark_report = self.forecast.mark_cycle()
         self._notify_forecast_exits(mark_report.get("exits", []))
         self._process_monitoring()
@@ -535,7 +537,11 @@ class LocationProtectionBot:
             self._log_decision(article, decision)
             self._notify_classifier_budget_block_once(block_reason)
             return decision
-        if self.screen_classifier is not None:
+        # The cheap screen tier gates the strong model ONLY WHILE FLAT: missing
+        # an entry costs an opportunity, but a screen false-negative on a
+        # foreclosure while HOLDING would suppress the exit that protects the
+        # stake. Defense never depends on the weakest model.
+        if self.screen_classifier is not None and self.holdings.held_location() is None:
             screen_decision = self._screen_stage(article)
             if screen_decision is not None:
                 return screen_decision
@@ -571,6 +577,7 @@ class LocationProtectionBot:
         decision = self._enforce_source_policy(article, decision)
         decision = self._enforce_execution_policy(decision)
         self._log_decision(article, decision)
+        self._corroboration_on_decision(decision, article)
         if decision.action == "ALERT_ONLY":
             self.notifier.notify("Location protection alert only; no trade", level=decision.level, reason=decision.reason, url=article.url)
         return self._execute_if_allowed(decision, article)
@@ -697,8 +704,61 @@ class LocationProtectionBot:
                 blocked = LocationDecision("ALERT_ONLY", "3", f"operator_block:{gate_result.reason}", decision.target_outcome, decision.factors)
                 self._log_decision(article, blocked)
                 return blocked
-        self.executor.execute(decision, article)
+        result = self.executor.execute(decision, article)
+        self._maybe_start_corroboration(result, article)
         return decision
+
+    def _corroboration_tracker(self) -> Any:
+        from polybot.core.confirmations import CorroborationTracker
+
+        return CorroborationTracker(self.store.data_dir)
+
+    def _maybe_start_corroboration(self, result: Any, article: Article) -> None:
+        """Arm the corroboration clock the moment an autonomous entry fills."""
+        if self.config.entry.corroboration_minutes <= 0:
+            return
+        if result not in {"ENTERED", "PARTIALLY_ENTERED"}:
+            return
+        self._corroboration_tracker().start(
+            entry_domain=article.domain,
+            minutes=self.config.entry.corroboration_minutes,
+            action=self.config.entry.corroboration_action,
+        )
+        log_event("location_corroboration_started", entry_domain=article.domain, minutes=self.config.entry.corroboration_minutes)
+
+    def _corroboration_on_decision(self, decision: LocationDecision, article: Article) -> None:
+        """A held-location reinforcement from a DIFFERENT domain satisfies the
+        post-entry corroboration requirement."""
+        if self.config.entry.corroboration_minutes <= 0:
+            return
+        if decision.reason != "held_location_reinforced":
+            return
+        if self._corroboration_tracker().satisfy(article.domain):
+            log_event("location_corroboration_satisfied", domain=article.domain)
+
+    def _check_corroboration_deadline(self) -> None:
+        if self.config.entry.corroboration_minutes <= 0:
+            return
+        tracker = self._corroboration_tracker()
+        record = tracker.overdue()
+        if record is None:
+            return
+        if self.holdings.held_location() is None:
+            # Position already gone (exit or reconciliation); nothing to defend.
+            tracker.mark_escalated()
+            return
+        action = str(record.get("action") or "alert")
+        self.notifier.notify(
+            "Entry NOT corroborated by a second source within the window",
+            entry_domain=record.get("entry_domain"),
+            deadline=record.get("deadline"),
+            configured_action=action,
+        )
+        log_event("location_corroboration_overdue", entry_domain=record.get("entry_domain"), action=action)
+        if action == "trim":
+            decision = LocationDecision("TRIM_YES", "TIME", "corroboration_window_expired_trim")
+            self._execute_if_allowed(decision, _synthetic_article(decision.reason))
+        tracker.mark_escalated()
 
     def _fetch_poll_articles(self, url: str) -> list[Article]:
         if _is_listing_url(url):
@@ -960,6 +1020,11 @@ class LocationProtectionBot:
         path = self._monitoring_state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+    def _write_heartbeat(self) -> None:
+        from polybot.core.holdings import _atomic_json_write
+
+        _atomic_json_write(self.store.data_dir / "heartbeat.json", {"at": datetime.now(timezone.utc).isoformat()})
 
     def _log_decision(self, article: Article, decision: LocationDecision) -> None:
         append_jsonl(

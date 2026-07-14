@@ -155,7 +155,12 @@ def scan_opportunities(
                     blockers.append("spread_unknown")
                 elif spread > config.max_spread:
                     blockers.append(f"spread_above_limit:{spread}")
-            edge = tradable_edge(probability, ask, config) if ask is not None else None
+            risk_extra = 0.0
+            if context.rule_analysis is not None:
+                # Per-market resolution risk widens the buffer beyond the flat
+                # base: ambiguous wording must clear a higher bar.
+                risk_extra = round(context.rule_analysis.resolution_risk * getattr(config, "resolution_risk_scale", 0.0), 4)
+            edge = round(tradable_edge(probability, ask, config) - risk_extra, 4) if ask is not None else None
             if edge is not None and edge < config.min_edge:
                 blockers.append(f"edge_below_minimum:{edge}")
 
@@ -167,12 +172,16 @@ def scan_opportunities(
                 recommended = context.scores.get("recommended_max_order_usd")
                 if recommended:
                     requested = min(requested, float(recommended))
+                from .registry import region_of
+
+                region = region_of(context.rule_analysis.parties) if context.rule_analysis else "global"
                 request = AllocationRequest(
                     market_id=context.market_id,
                     event_slug=context.event_slug,
                     correlation_group=context.correlation_group or "uncategorized",
                     deadline_iso=context.deadline_iso,
                     usd=requested,
+                    region=region,
                 )
                 allocation_usd, allocation_blockers = allocator.preview(request)
                 blockers.extend(allocation_blockers)

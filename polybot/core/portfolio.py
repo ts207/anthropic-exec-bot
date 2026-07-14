@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from polybot.log import log_event
 
@@ -23,6 +23,12 @@ class AllocatorConfig:
     total_usd: float = 1000.0
     max_open_positions: int = 5
     max_per_deadline_week_usd: float = 400.0
+    # Second correlation dimension: regional contagion moves different party
+    # sets together, so exposure is also capped per theater.
+    per_region_usd: float = 300.0
+    # Fleet-level kill switch: when cumulative realized trading losses reach
+    # this, the fleet writes the shared operator mode to alert_only and pages.
+    max_drawdown_usd: float = 150.0
 
 
 @dataclass(frozen=True)
@@ -32,6 +38,7 @@ class AllocationRequest:
     correlation_group: str
     deadline_iso: str
     usd: float
+    region: str = "global"
 
 
 class PortfolioAllocator:
@@ -87,6 +94,7 @@ class PortfolioAllocator:
         bound("per_market_limit", self.config.per_market_usd, _get(state, "per_market", request.market_id))
         bound("per_event_limit", self.config.per_event_usd, _get(state, "per_event", request.event_slug))
         bound("correlation_group_limit", self.config.per_group_usd, _get(state, "per_group", request.correlation_group))
+        bound("region_limit", self.config.per_region_usd, _get(state, "per_region", request.region))
         bound("daily_limit", self.config.daily_usd, _get(state, "per_day", _today()))
         bound("total_limit", self.config.total_usd, float(state.get("total", 0.0)))
         bound("deadline_week_limit", self.config.max_per_deadline_week_usd, _get(state, "per_deadline_week", _week(request.deadline_iso)))
@@ -113,9 +121,11 @@ class PortfolioAllocator:
         _add(state, "per_market", request.market_id, request.usd)
         _add(state, "per_event", request.event_slug, request.usd)
         _add(state, "per_group", request.correlation_group, request.usd)
+        _add(state, "per_region", request.region, request.usd)
         _add(state, "per_day", _today(), request.usd)
         _add(state, "per_deadline_week", _week(request.deadline_iso), request.usd)
         state["total"] = round(float(state.get("total", 0.0)) + request.usd, 2)
+        _add(state, "cost_basis", request.market_id, request.usd)
         open_positions = set(state.get("open_positions", []))
         open_positions.add(request.market_id)
         state["open_positions"] = sorted(open_positions)
@@ -131,6 +141,59 @@ class PortfolioAllocator:
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._save(state)
         return state
+
+    def reduce_basis(self, market_id: str, proceeds_usd: float) -> dict[str, Any]:
+        """Partial exit (trim): proceeds reduce the open cost basis; realized
+        P&L is only recognized when the position fully closes."""
+        state = self._load()
+        basis = _get(state, "cost_basis", market_id)
+        state.setdefault("cost_basis", {})[market_id] = round(max(0.0, basis - proceeds_usd), 2)
+        self._save(state)
+        return state
+
+    def settle(self, market_id: str, proceeds_usd: float | None) -> float:
+        """Full close of the position's trading leg: realized = proceeds -
+        remaining cost basis. proceeds None (e.g. wallet reconciled to flat
+        with no fill data) drops the basis without recognizing P&L."""
+        state = self._load()
+        basis = _get(state, "cost_basis", market_id)
+        state.setdefault("cost_basis", {}).pop(market_id, None)
+        realized = 0.0
+        if proceeds_usd is not None:
+            realized = round(proceeds_usd - basis, 2)
+            state["realized_net"] = round(float(state.get("realized_net", 0.0)) + realized, 2)
+            _add(state, "realized_by_day", _today(), realized)
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._save(state)
+        return realized
+
+    def reconcile(self, *, is_open: Callable[[str], bool] | None = None, keep_days: int = 14) -> dict[str, Any]:
+        """Ledger hygiene for long runs: prune stale daily/deadline-week
+        buckets (only today's bucket bounds the daily cap; old ones are dead
+        weight) and drop open-position slots whose market no longer holds
+        anything according to `is_open`."""
+        state = self._load()
+        cutoff = (datetime.now(timezone.utc).date() - timedelta(days=keep_days)).isoformat()
+        for bucket in ("per_day", "realized_by_day"):
+            values = state.get(bucket)
+            if isinstance(values, dict):
+                state[bucket] = {k: v for k, v in values.items() if str(k) >= cutoff}
+        if is_open is not None:
+            open_positions = [m for m in state.get("open_positions", []) if is_open(m)]
+            dropped = sorted(set(state.get("open_positions", [])) - set(open_positions))
+            state["open_positions"] = sorted(open_positions)
+            for market_id in dropped:
+                # Slot freed with no fill data: drop the basis without P&L.
+                state.setdefault("cost_basis", {}).pop(market_id, None)
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._save(state)
+        return state
+
+    def realized_net(self) -> float:
+        try:
+            return float(self._load().get("realized_net", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
 
     def snapshot(self) -> dict[str, Any]:
         return self._load()
@@ -164,6 +227,7 @@ class PortfolioConfig:
     market_id: str = ""
     event_slug: str = ""
     correlation_group: str = ""
+    region: str = "global"
     deadline_iso: str = ""
 
 
@@ -188,6 +252,7 @@ class PortfolioLink:
             correlation_group=self.config.correlation_group or "uncategorized",
             deadline_iso=self.config.deadline_iso,
             usd=usd,
+            region=self.config.region or "global",
         )
 
     def allowed(self, requested_usd: float) -> tuple[float, list[str]]:
@@ -213,6 +278,22 @@ class PortfolioLink:
             allocator.release_position(self.config.market_id)
         except (ValueError, OSError) as exc:
             log_event("portfolio_release_failed", ledger=self.config.ledger_path, error=str(exc))
+
+    def settle(self, proceeds_usd: float | None) -> None:
+        """Recognize realized P&L for a full close (None drops basis only)."""
+        try:
+            allocator = PortfolioAllocator.from_ledger(Path(self.config.ledger_path))
+            realized = allocator.settle(self.config.market_id, proceeds_usd)
+            log_event("portfolio_settled", market_id=self.config.market_id, realized=realized)
+        except (ValueError, OSError) as exc:
+            log_event("portfolio_settle_failed", ledger=self.config.ledger_path, error=str(exc))
+
+    def reduce_basis(self, proceeds_usd: float) -> None:
+        try:
+            allocator = PortfolioAllocator.from_ledger(Path(self.config.ledger_path))
+            allocator.reduce_basis(self.config.market_id, proceeds_usd)
+        except (ValueError, OSError) as exc:
+            log_event("portfolio_reduce_basis_failed", ledger=self.config.ledger_path, error=str(exc))
 
 
 def _get(state: dict[str, Any], bucket: str, key: str) -> float:

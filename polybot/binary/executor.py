@@ -9,10 +9,11 @@ from typing import Any
 from polybot.config import SETTINGS
 from polybot.log import log_event
 
-from polybot.core.execution import Fill, TradingAdapter
+from polybot.core.execution import Fill, LivePosition, TradingAdapter
 from polybot.core.holdings import HoldingsStore
 from polybot.core.notifier import Notifier
 from polybot.core.portfolio import PortfolioLink
+from polybot.core.runtime import ExecutionJournal, ReconciliationError
 from polybot.core.storage import StateStore
 from polybot.core.types import Article
 
@@ -41,10 +42,52 @@ class BinaryExecutor:
         self.notifier = notifier
         self.adapter = adapter
         self.holdings = HoldingsStore(self.store.data_dir, default_held=config.market.held_side.lower() or None)
+        self.journal = ExecutionJournal(self.store.data_dir)
         self.portfolio = PortfolioLink.from_config(config.portfolio)
 
     def held_side(self) -> str | None:
         return self.holdings.held_location()
+
+    def reconcile_live_holding(self) -> dict[str, Any]:
+        """Make the wallet authoritative (mirror of the location executor).
+
+        Adopts exactly one meaningful balance side; ambiguous states (both
+        sides funded, resting orders) fail closed instead of guessing which
+        side the strategy should defend.
+        """
+        threshold = self.config.entry.reconcile_min_shares
+        position: LivePosition = self.adapter.query_live_position(self.market.yes_token_id, self.market.no_token_id)
+        orders = self.adapter.open_orders_for_market(self.market.condition_id)
+        if orders:
+            raise ReconciliationError(
+                "unexpected resting orders exist on the market; cancel or adopt them before autonomous execution"
+            )
+        yes_held = position.yes_shares > threshold
+        no_held = position.no_shares > threshold
+        if yes_held and no_held:
+            raise ReconciliationError(
+                f"both sides funded (yes={position.yes_shares:g}, no={position.no_shares:g}); manual reconciliation required"
+            )
+        local = self.holdings.held_location()
+        wallet_side = "yes" if yes_held else ("no" if no_held else None)
+        changed = local != wallet_side
+        if changed:
+            if wallet_side is None:
+                self.holdings.clear_held(source="wallet_reconciliation", previous_local=local)
+            else:
+                self.holdings.set_held(
+                    wallet_side,
+                    source="wallet_reconciliation",
+                    previous_local=local,
+                    yes_shares=position.yes_shares,
+                    no_shares=position.no_shares,
+                )
+        return {
+            "held_side": wallet_side,
+            "yes_shares": position.yes_shares,
+            "no_shares": position.no_shares,
+            "changed": changed,
+        }
 
     def _portfolio_allowed(self, requested: float) -> tuple[float, list[str]]:
         """Clamp by the shared cross-market ledger (discovery pipeline
@@ -61,6 +104,14 @@ class BinaryExecutor:
     def _portfolio_release(self) -> None:
         if self.portfolio is not None:
             self.portfolio.release()
+
+    def _portfolio_settle(self, proceeds_usd: float | None) -> None:
+        if self.portfolio is not None:
+            self.portfolio.settle(proceeds_usd)
+
+    def _portfolio_reduce_basis(self, proceeds_usd: float) -> None:
+        if self.portfolio is not None and proceeds_usd > 0:
+            self.portfolio.reduce_basis(proceeds_usd)
 
     def entry_count(self) -> int:
         path = self._entry_count_path()
@@ -138,7 +189,8 @@ class BinaryExecutor:
             return floor_state
 
         held_token = self.market.yes_token_id if held == "yes" else self.market.no_token_id
-        self.store.write("TRIGGER_DETECTED", decision=_decision_dict(decision), article=article.__dict__)
+        journal = self.journal.start(decision.action, decision=_decision_dict(decision), article=article.__dict__)
+        self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", side=held)
@@ -179,11 +231,15 @@ class BinaryExecutor:
             sell_min_price=self.config.execution.sell.min_price,
             cancel_result=cancel_result,
         )
-        sell_result = self._sell_side(held, target_shares)
+        # Staged exit (see location executor): fraction first, remainder
+        # after a requote delay.
+        stage_fraction = min(1.0, max(0.1, self.config.execution.sell.max_fraction_per_order))
+        first_order_shares = target_shares if stage_fraction >= 1.0 else max(0.0, target_shares * stage_fraction)
+        sell_result = self._sell_side(held, first_order_shares)
         sell_fill = self.adapter.verify_fill(sell_result, held_token)
         total_sold = sell_fill.filled_shares
 
-        if total_sold < target_shares and self.config.execution.sell.retry_partial_once:
+        if total_sold < target_shares and (self.config.execution.sell.retry_partial_once or stage_fraction < 1.0):
             self.store.write(
                 "HELD_PARTIAL",
                 side=held,
@@ -206,6 +262,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.notifier.notify("Held side partially sold. Manual intervention required.", side=held, total_sold=total_sold)
+            self.journal.update(journal, "failed", result="EXIT_INCOMPLETE", total_sold=total_sold)
             return "EXIT_INCOMPLETE"
 
         sale_price = self._estimate_sale_price(sell_fill, held, pre_trade_yes_bid, pre_trade_yes_ask)
@@ -221,7 +278,9 @@ class BinaryExecutor:
                 confirmed_proceeds=confirmed_proceeds,
                 article=article.__dict__,
             )
+            self._portfolio_reduce_basis(confirmed_proceeds)
             self.notifier.notify("Trimmed held exposure", side=held, total_sold=total_sold)
+            self.journal.update(journal, "completed", result="TRIMMED", total_sold=total_sold)
             return "TRIMMED"
 
         # News-triggered exits may optionally flip into the opposite side;
@@ -239,13 +298,17 @@ class BinaryExecutor:
             article=article.__dict__,
         )
         self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold)
+        self._portfolio_settle(confirmed_proceeds)
         self._portfolio_release()
         self.notifier.notify("Exited held exposure (sell-only)", side=held, total_sold=total_sold)
+        self.journal.update(journal, "completed", result="EXITED", total_sold=total_sold, confirmed_proceeds=confirmed_proceeds)
         return "EXITED"
 
     def _execute_entry(self, decision: BinaryDecision, article: Article) -> str:
         entry = self.config.entry
         side = "yes" if decision.action == "ENTER_YES" else "no"
+        if not self.config.execution.dry_run:
+            self.reconcile_live_holding()
         held = self.held_side()
         if held is not None:
             log_event("binary_entry_skip", reason="already_holding", held=held, side=side)
@@ -279,8 +342,35 @@ class BinaryExecutor:
             log_event("binary_entry_skip", reason=f"portfolio:{reason}", usd_budget=usd_budget)
             return "ENTRY_PORTFOLIO_BLOCKED"
 
+        # Large entries need a SECOND independent domain inside the freshness
+        # window before any capital moves: one wrong wire story costs an
+        # alert, not the stake.
+        if entry.second_source_above_usd > 0 and usd_budget >= entry.second_source_above_usd:
+            from polybot.core.confirmations import SecondSourceGate
+
+            gate = SecondSourceGate(self.store.data_dir, entry.second_source_window_minutes)
+            if not gate.confirm(side, article.domain):
+                self.store.write(
+                    "ENTRY_AWAITING_SECOND_SOURCE",
+                    side=side,
+                    first_domain=article.domain,
+                    usd_budget=usd_budget,
+                    window_minutes=entry.second_source_window_minutes,
+                    article=article.__dict__,
+                )
+                self.notifier.notify(
+                    "Large entry deferred; awaiting second independent source",
+                    side=side,
+                    first_domain=article.domain,
+                    usd_budget=usd_budget,
+                    window_minutes=entry.second_source_window_minutes,
+                )
+                log_event("binary_entry_awaiting_second_source", side=side, domain=article.domain, usd_budget=usd_budget)
+                return "ENTRY_AWAITING_SECOND_SOURCE"
+
         token = self.market.yes_token_id if side == "yes" else self.market.no_token_id
-        self.store.write("TRIGGER_DETECTED", decision=_decision_dict(decision), article=article.__dict__)
+        journal = self.journal.start(decision.action, decision=_decision_dict(decision), article=article.__dict__)
+        self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", side=side)
@@ -301,6 +391,7 @@ class BinaryExecutor:
             )
             if previous != "ENTRY_PRICE_ABOVE_CAP":
                 self.notifier.notify("Entry skipped; ask above price cap or unavailable", side=side, best_ask=ask, cap=cap)
+            self.journal.update(journal, "blocked", reason="entry_price_above_cap", best_ask=ask)
             return "ENTRY_PRICE_ABOVE_CAP"
 
         self.store.write(
@@ -325,6 +416,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.notifier.notify("Entry buy did not fill; still flat", side=side, usd_budget=usd_budget)
+            self.journal.update(journal, "unfilled", side=side)
             return "ENTRY_UNFILLED"
 
         total_entries = self._record_entry_execution()
@@ -351,6 +443,7 @@ class BinaryExecutor:
             usd_budget=usd_budget,
             best_ask=ask,
         )
+        self.journal.update(journal, "completed", result="ENTERED", held_side=side, filled_shares=buy_fill.filled_shares)
         return "ENTERED"
 
     def _flip_buy_leg(
@@ -380,6 +473,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold, reason="flip_target_above_cap_or_unavailable")
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify("Sold held side. Flip buy skipped (price above cap or unavailable).", flip_side=opposite, flip_best_ask=ask, cap=cap)
             return "EXITED"
@@ -405,6 +499,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold, reason="flip_portfolio_blocked")
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify("Sold held side. Flip buy skipped (portfolio limits).", flip_side=opposite, blockers=",".join(portfolio_blockers))
             return "EXITED"
@@ -420,6 +515,7 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="exit", from_side=held, total_sold=total_sold, reason="insufficient_sale_proceeds_for_flip_buy")
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify("Sold held side. Flip buy skipped (proceeds too small).", flip_side=opposite, confirmed_proceeds=confirmed_proceeds)
             return "EXITED"
@@ -449,10 +545,12 @@ class BinaryExecutor:
                 article=article.__dict__,
             )
             self.holdings.clear_held(source="flip_incomplete", from_side=held, total_sold=total_sold, intended_side=opposite)
+            self._portfolio_settle(confirmed_proceeds)
             self._portfolio_release()
             self.notifier.notify("Sold held side but flip buy did not fill. Manual intervention required.", total_sold=total_sold, flip_side=opposite)
             return "FLIP_INCOMPLETE"
 
+        self._portfolio_settle(confirmed_proceeds)
         self.store.write(
             "FLIPPED",
             from_side=held,

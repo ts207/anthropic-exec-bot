@@ -61,6 +61,15 @@ entry:
   min_fill_fraction: 0.25
   reconcile_min_shares: 0.01
   max_entries: 1
+  # Entries at/above this notional wait for a SECOND independent domain to
+  # confirm inside the window (state ENTRY_AWAITING_SECOND_SOURCE). 0 = off.
+  second_source_above_usd: 0.0
+  second_source_window_minutes: 60.0
+  # After an entry, a different domain must reinforce the thesis within this
+  # window or you get alerted ("alert") / the position is trimmed ("trim").
+  # 0 = off.
+  corroboration_minutes: 0.0
+  corroboration_action: "alert"
 
 # Anticipatory evidence is research-only. It updates deterministic categorical
 # probabilities and simulates entries/exits; no forecast code can submit an
@@ -104,6 +113,9 @@ execution:
   sell:
     enabled: true
     min_price: 0.03
+    # Staged exits: <1.0 splits a defense sell into a first order of this
+    # fraction plus the remainder after a requote delay (thin-book slippage).
+    max_fraction_per_order: 1.0
   buy_rotation:
     enabled: true
     max_price: 0.95

@@ -170,7 +170,7 @@ def _analyzed_context(event: dict) -> MarketContext:
 
 
 def test_scorer_liquidity_sizes_orders_never_disqualifies() -> None:
-    scoring = ScoringConfig()
+    scoring = ScoringConfig(allow_fixture_analysis_live=True)
     live = grade_market(_analyzed_context(_binary_event()), scoring)
     assert live.state == "LIVE_CONFIRMATION_ELIGIBLE"
     assert live.correlation_group == "iran|united_states"
@@ -188,7 +188,7 @@ def test_scorer_liquidity_sizes_orders_never_disqualifies() -> None:
 
     # Sizing disabled: still live (liquidity never gates by default), just no
     # book-aware recommendation.
-    no_sizing = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(small_live_enabled=False))
+    no_sizing = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(allow_fixture_analysis_live=True, small_live_enabled=False))
     assert no_sizing.state == "LIVE_CONFIRMATION_ELIGIBLE"
     assert "recommended_max_order_usd" not in no_sizing.scores
 
@@ -196,21 +196,21 @@ def test_scorer_liquidity_sizes_orders_never_disqualifies() -> None:
     # to paper without the sizing bypass...
     floored = grade_market(
         _analyzed_context(_binary_event(liquidity=800.0)),
-        ScoringConfig(min_liquidity_live=5000.0, small_live_enabled=False),
+        ScoringConfig(allow_fixture_analysis_live=True, min_liquidity_live=5000.0, small_live_enabled=False),
     )
     assert floored.state == "PAPER_ELIGIBLE"
     assert any(reason.startswith("liquidity_below_live_threshold") for reason in floored.state_reasons)
     # ...and with sizing enabled the floor is bypassed at book-absorbable size.
     bypassed = grade_market(
         _analyzed_context(_binary_event(liquidity=800.0)),
-        ScoringConfig(min_liquidity_live=5000.0, small_live_enabled=True),
+        ScoringConfig(allow_fixture_analysis_live=True, min_liquidity_live=5000.0, small_live_enabled=True),
     )
     assert bypassed.state == "LIVE_CONFIRMATION_ELIGIBLE"
     assert any(reason.startswith("small_size_live") for reason in bypassed.state_reasons)
 
 
 def test_scorer_hard_states() -> None:
-    scoring = ScoringConfig()
+    scoring = ScoringConfig(allow_fixture_analysis_live=True)
     closed = grade_market(_analyzed_context(_binary_event(closed=True)), scoring)
     assert closed.state == "CLOSED"
 
@@ -315,7 +315,7 @@ def test_tradable_edge_accounting() -> None:
 
 
 def _graded(event: dict) -> MarketContext:
-    return grade_market(_analyzed_context(event), ScoringConfig())
+    return grade_market(_analyzed_context(event), ScoringConfig(allow_fixture_analysis_live=True))
 
 
 def test_scan_finds_executable_opportunity(tmp_path) -> None:
@@ -325,7 +325,10 @@ def test_scan_finds_executable_opportunity(tmp_path) -> None:
     assert len(results) == 1
     opp = results[0]
     assert not opp.blockers
-    assert opp.tradable_edge == pytest.approx(0.14)
+    # Base edge 0.14 minus the per-market resolution-risk scaling
+    # (analyzer risk * resolution_risk_scale).
+    expected = round(0.14 - round(context.rule_analysis.resolution_risk * 0.05, 4), 4)
+    assert opp.tradable_edge == pytest.approx(expected)
     assert opp.allocation_usd == 50.0
 
 
@@ -388,6 +391,8 @@ def _pipeline_config(tmp_path: Path) -> Path:
         f"""
 classifier:
   provider: rule_based
+scoring:
+  allow_fixture_analysis_live: true
 data_dir: {tmp_path / 'data'}
 logs_dir: {tmp_path / 'logs'}
 """,
@@ -658,7 +663,7 @@ opportunity:
 
 
 def test_scan_sizes_small_live_market_to_its_book(tmp_path) -> None:
-    context = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig())
+    context = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(allow_fixture_analysis_live=True))
     assert context.scores["recommended_max_order_usd"] == 16.0
     config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}})
     results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
