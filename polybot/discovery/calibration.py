@@ -34,6 +34,10 @@ class CalibrationLog:
         for item in opportunities:
             if item.probability_source == "none" or item.executable_price is None:
                 continue
+            # NO rows are the complement of the YES estimate; scoring both
+            # would double-count every probability.
+            if item.side != "YES":
+                continue
             append_jsonl(
                 self.estimates_path,
                 {
@@ -168,4 +172,107 @@ def _brier(pairs: list[tuple[float, float]]) -> float | None:
     return round(sum((p - outcome) ** 2 for p, outcome in pairs) / len(pairs), 4)
 
 
-__all__ = ["CalibrationLog"]
+def capture_resolutions(store: Any, calibration: CalibrationLog, *, markets_fetch: Any = None) -> dict[str, Any]:
+    """Automatic resolution capture: for every tracked market past its
+    deadline (or flagged closed), ask Gamma how each outcome finally priced
+    and feed the calibration log -- calibration data accrues with zero
+    operator discipline required. Fully-resolved contexts are marked CLOSED."""
+    from dataclasses import replace
+
+    markets_fetch = markets_fetch or _http_market_fetch
+    existing = calibration._resolutions()
+    now = datetime.now(timezone.utc)
+    recorded: list[dict[str, Any]] = []
+    closed_markets: list[str] = []
+    for context in store.all_contexts():
+        if context.state == "CLOSED":
+            continue
+        deadline = _parse_deadline(context.deadline_iso)
+        if not context.closed and (deadline is None or now <= deadline):
+            continue
+        all_resolved = True
+        for outcome in context.outcomes:
+            key = f"{context.market_id}::{outcome.name}"
+            if key in existing:
+                continue
+            try:
+                market = markets_fetch(outcome.condition_id)
+            except Exception:
+                all_resolved = False
+                continue
+            resolved_yes = _resolved_yes(market)
+            if resolved_yes is None:
+                # Deadline passed but Gamma hasn't finalized (resolution can
+                # lag the deadline by days); try again next cycle.
+                all_resolved = False
+                continue
+            calibration.record_resolution(context.market_id, outcome.name, resolved_yes)
+            recorded.append({"market_id": context.market_id, "outcome": outcome.name, "resolved_yes": resolved_yes})
+        if all_resolved:
+            store.save_context(replace(context, state="CLOSED", state_reasons=["resolved"], updated_at=now.isoformat()))
+            closed_markets.append(context.market_id)
+    return {"recorded": recorded, "closed_markets": closed_markets}
+
+
+def _resolved_yes(market: Any) -> bool | None:
+    """Final YES price from a Gamma market dict (~1 or ~0 once resolved).
+    None when the market is not closed or prices are unparseable."""
+    if not isinstance(market, dict) or not market.get("closed"):
+        return None
+    prices = market.get("outcomePrices")
+    outcomes = market.get("outcomes")
+    if isinstance(prices, str):
+        try:
+            prices = json.loads(prices)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(outcomes, str):
+        try:
+            outcomes = json.loads(outcomes)
+        except json.JSONDecodeError:
+            outcomes = None
+    if not isinstance(prices, list) or not prices:
+        return None
+    yes_index = 0
+    if isinstance(outcomes, list):
+        for index, name in enumerate(outcomes):
+            if str(name).strip().lower() == "yes":
+                yes_index = index
+                break
+    try:
+        return float(prices[yes_index]) > 0.5
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _parse_deadline(text: str) -> datetime | None:
+    cleaned = (text or "").strip().replace("Z", "+00:00")
+    if not cleaned:
+        return None
+    try:
+        stamp = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
+def _http_market_fetch(condition_id: str) -> dict[str, Any] | None:
+    import requests
+
+    from polybot.config import SETTINGS
+
+    response = requests.get(
+        f"{SETTINGS.gamma_host.rstrip('/')}/markets",
+        params={"condition_ids": condition_id},
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return data[0]
+    return None
+
+
+__all__ = ["CalibrationLog", "capture_resolutions"]

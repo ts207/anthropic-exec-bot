@@ -11,7 +11,7 @@ from polybot.discovery.config import AllocatorConfig, DiscoveryConfig, Opportuni
 from polybot.discovery.context import FixtureRuleAnalyzer
 from polybot.discovery.emit import emit_bot_config
 from polybot.discovery.gamma_universe import context_from_event, is_geopolitical_candidate, merge_refresh
-from polybot.discovery.opportunity import scan_opportunities, tradable_edge
+from polybot.discovery.opportunity import scan_group_arbitrage, scan_opportunities, tradable_edge
 from polybot.discovery.runner import (
     discover_markets_command,
     emit_bot_config_command,
@@ -324,8 +324,9 @@ def test_scan_finds_executable_opportunity(tmp_path) -> None:
     # edge accounting; anchoring itself is covered in test_calibration.py.
     config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}}, model_weight=1.0, disagreement_buffer_scale=0.0)
     results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
-    assert len(results) == 1
-    opp = results[0]
+    # One YES row and one NO row per estimated outcome; here YES carries the edge.
+    assert [r.side for r in sorted(results, key=lambda r: r.side)] == ["NO", "YES"]
+    opp = next(r for r in results if r.side == "YES")
     assert not opp.blockers
     # Base edge 0.14 minus the per-market resolution-risk scaling
     # (analyzer risk * resolution_risk_scale).
@@ -450,9 +451,11 @@ opportunity:
     )
     assert scan_opportunities_command(config_path, quotes=_FakeQuotes()) == 0
     scan = json.loads(capsys.readouterr().out)
-    assert scan["scanned_outcomes"] == 4  # 2 grouped legs + 2 binaries
+    # 3 outcomes without estimates + YES and NO rows for the estimated binary.
+    assert scan["scanned_outcomes"] == 5
     assert len(scan["executable"]) == 1
     assert scan["executable"][0]["market_id"] == binary_id
+    assert scan["executable"][0]["side"] == "YES"
 
     out_path = tmp_path / "generated" / "binary.yaml"
     assert emit_bot_config_command(config_path, binary_id, out=out_path) == 0
@@ -675,6 +678,76 @@ def test_scan_sizes_small_live_market_to_its_book(tmp_path) -> None:
     results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
     assert not results[0].blockers
     assert results[0].allocation_usd == 16.0  # book-absorbable size, not the 50 per-order cap
+
+
+def test_scan_prices_no_side_of_overpriced_market(tmp_path) -> None:
+    context = _graded(_binary_event())
+    # Model says 20%, market asks 80c: the edge is on the NO side
+    # (executable NO ask = 1 - yes_bid = 0.22 against a 0.80 NO probability).
+    config = OpportunityConfig(
+        probability_estimates={context.market_id: {"yes": 0.20}},
+        model_weight=1.0,
+        disagreement_buffer_scale=0.0,
+    )
+    results = scan_opportunities([context], config, _FakeQuotes(ask=0.80, bid=0.78), _allocator(tmp_path))
+    no_row = next(r for r in results if r.side == "NO")
+    assert not no_row.blockers
+    assert no_row.estimated_probability == pytest.approx(0.80)
+    assert no_row.executable_price == pytest.approx(0.22)
+    yes_row = next(r for r in results if r.side == "YES")
+    assert any(b.startswith("edge_below_minimum") for b in yes_row.blockers)
+
+
+def test_scan_no_side_can_be_disabled(tmp_path) -> None:
+    context = _graded(_binary_event())
+    config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}}, scan_no_side=False)
+    results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
+    assert [r.side for r in results] == ["YES"]
+
+
+class _MapQuotes:
+    """Per-token quotes for grouped-market tests."""
+
+    def __init__(self, books: dict[str, tuple[float | None, float | None]]):
+        self.books = books  # token_id -> (ask, bid)
+
+    def yes_best_ask(self, token_id: str) -> float | None:
+        return self.books.get(token_id, (None, None))[0]
+
+    def yes_best_bid(self, token_id: str) -> float | None:
+        return self.books.get(token_id, (None, None))[1]
+
+
+def test_group_arbitrage_detects_overround(tmp_path) -> None:
+    context = _graded(_grouped_event())
+    books = {o.yes_token_id: (0.62, 0.60) for o in context.outcomes}
+    arbs = scan_group_arbitrage([context], OpportunityConfig(), _MapQuotes(books))
+    # Bids sum to 1.20: buying NO on every leg locks in 0.20 minus per-leg slippage.
+    assert len(arbs) == 1
+    arb = arbs[0]
+    assert arb["type"] == "short_all_overround"
+    assert arb["sum_yes_bids"] == pytest.approx(1.20)
+    assert arb["edge_after_slippage"] == pytest.approx(0.18)
+
+
+def test_group_arbitrage_detects_underround(tmp_path) -> None:
+    context = _graded(_grouped_event())
+    books = {o.yes_token_id: (0.40, 0.35) for o in context.outcomes}
+    arbs = scan_group_arbitrage([context], OpportunityConfig(), _MapQuotes(books))
+    # Asks sum to 0.80: buying YES on every leg locks in 0.20 minus slippage.
+    assert len(arbs) == 1
+    assert arbs[0]["type"] == "long_all_underround"
+    assert arbs[0]["edge_after_slippage"] == pytest.approx(0.18)
+
+
+def test_group_arbitrage_requires_full_quotes_and_consistent_books(tmp_path) -> None:
+    context = _graded(_grouped_event())
+    # Missing quote on one leg: no arb call.
+    partial = {context.outcomes[0].yes_token_id: (0.62, 0.60), context.outcomes[1].yes_token_id: (None, None)}
+    assert scan_group_arbitrage([context], OpportunityConfig(), _MapQuotes(partial)) == []
+    # Consistent books (sum ~ 1): nothing to report.
+    fair = {o.yes_token_id: (0.51, 0.49) for o in context.outcomes}
+    assert scan_group_arbitrage([context], OpportunityConfig(), _MapQuotes(fair)) == []
 
 
 def test_source_plan_puts_direct_feeds_first() -> None:

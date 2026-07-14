@@ -52,6 +52,10 @@ class PositionConfig:
     held_yes_shares: float = 0.0
     max_yes_shares_to_sell: float = 100000.0
     max_rotation_usd_to_buy: float = 1000.0
+    # Sell the whole position when the held outcome's YES bid reaches this
+    # price: once the thesis is priced in, the last few cents are not worth
+    # carrying full resolution risk. 0 disables.
+    take_profit_price: float = 0.0
 
 
 @dataclass(frozen=True)

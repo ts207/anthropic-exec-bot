@@ -200,6 +200,25 @@ another reason for C2 heartbeats and Telegram degradation alerts. Accepted.
     empirically from the resolution log once enough markets resolve (of all
     `confirmed_scheduled` triggers, what fraction actually resolved YES?).
 
+**P4 — profit expansion + iteration speed:**
+21. ✅ IMPLEMENTED — NO-side scanning: every outcome is priced on both sides
+    (executable NO ask = 1 − YES bid); overpriced markets are edge too. The
+    fleet emits NO-entry configs when the NO edge is best
+    (`opportunity.scan_no_side`).
+22. ✅ IMPLEMENTED — Neg-risk group-sum arbitrage: grouped events whose YES
+    bids sum above 1 (buy NO on every leg) or asks sum below 1 (buy YES on
+    every leg) are reported and alerted — the market arguing with itself,
+    no forecast involved (`opportunity.min_group_arb_edge`).
+23. ✅ IMPLEMENTED — Take-profit exits (`position.take_profit_price` in both
+    executors): sell into strength through the normal gated path once the
+    held side's bid reaches the target, shedding resolution/UMA risk.
+24. ✅ IMPLEMENTED — Automatic resolution capture: each discovery cycle asks
+    Gamma how deadline-passed markets finally priced, feeds the calibration
+    log with zero operator discipline, and closes resolved contexts.
+25. ✅ IMPLEMENTED — Replay harness (`replay --config ... --articles ...`):
+    archived articles run through the full decision pipeline in an isolated
+    dry-run sandbox, so prompt/threshold changes are validated in minutes.
+
 **Standing rule:** raise the notional guardrails only after the funnel and
 calibration reports show realized positive edge across multiple resolved,
 uncorrelated events — never on a good week.

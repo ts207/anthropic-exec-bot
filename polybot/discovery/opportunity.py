@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from .allocator import AllocationRequest, PortfolioAllocator
 from .config import OpportunityConfig
@@ -175,19 +175,9 @@ def scan_opportunities(
                 )
                 continue
             probability, source = estimate
-            ask = quotes.yes_best_ask(outcome.yes_token_id)
-            bid = quotes.yes_best_bid(outcome.yes_token_id)
-            blockers: list[str] = []
-            spread = round(ask - bid, 4) if ask is not None and bid is not None else None
-            if ask is None:
-                blockers.append("quote_unavailable")
-            else:
-                if ask > config.max_entry_price:
-                    blockers.append(f"price_above_cap:{ask}")
-                if spread is None:
-                    blockers.append("spread_unknown")
-                elif spread > config.max_spread:
-                    blockers.append(f"spread_above_limit:{spread}")
+            yes_ask = quotes.yes_best_ask(outcome.yes_token_id)
+            yes_bid = quotes.yes_best_bid(outcome.yes_token_id)
+            spread = round(yes_ask - yes_bid, 4) if yes_ask is not None and yes_bid is not None else None
 
             # Deadline decay for operator estimates flagged as event-arrival
             # probabilities ({"yes": 0.6, "_decay": true, "_as_of": "..."}).
@@ -199,78 +189,153 @@ def scan_opportunities(
                         probability = round(probability * factor, 4)
                         source = "config_estimate_decayed"
 
-            # Forecast-engine probabilities can't move allocatable money until
-            # the calibration report proves they beat the market's own Brier.
-            if source == "forecast_state" and config.require_calibrated_forecast and not forecast_calibrated:
-                blockers.append("forecast_probability_uncalibrated")
+            # An overpriced market is edge too: the NO side is priced with the
+            # same buffers (executable NO ask = 1 - YES bid on a binary book).
+            sides: list[tuple[str, float, float | None, float | None]] = [("YES", probability, yes_ask, yes_bid)]
+            if config.scan_no_side:
+                no_ask = round(1.0 - yes_bid, 4) if yes_bid is not None else None
+                no_bid = round(1.0 - yes_ask, 4) if yes_ask is not None else None
+                sides.append(("NO", round(1.0 - probability, 4), no_ask, no_bid))
 
-            # Market-anchored blending + disagreement-scaled uncertainty: the
-            # mid is the benchmark estimator until calibration data says
-            # otherwise, and a large standing disagreement with the crowd
-            # raises the edge bar instead of exciting the allocator.
-            mid = round((ask + bid) / 2, 4) if ask is not None and bid is not None else None
-            pricing_probability = probability
-            disagreement_penalty = 0.0
-            if mid is not None:
-                if 0.0 <= config.model_weight < 1.0:
-                    pricing_probability = round(config.model_weight * probability + (1.0 - config.model_weight) * mid, 4)
-                disagreement_penalty = round(abs(probability - mid) * max(0.0, config.disagreement_buffer_scale), 4)
+            for side, side_probability, ask, bid in sides:
+                blockers: list[str] = []
+                if ask is None:
+                    blockers.append("quote_unavailable")
+                else:
+                    if ask > config.max_entry_price:
+                        blockers.append(f"price_above_cap:{ask}")
+                    if spread is None:
+                        blockers.append("spread_unknown")
+                    elif spread > config.max_spread:
+                        blockers.append(f"spread_above_limit:{spread}")
 
-            risk_extra = 0.0
-            if context.rule_analysis is not None:
-                # Per-market resolution risk widens the buffer beyond the flat
-                # base: ambiguous wording must clear a higher bar.
-                risk_extra = round(context.rule_analysis.resolution_risk * getattr(config, "resolution_risk_scale", 0.0), 4)
-            edge = (
-                round(tradable_edge(pricing_probability, ask, config) - risk_extra - disagreement_penalty, 4)
-                if ask is not None
-                else None
-            )
-            if edge is not None and edge < config.min_edge:
-                blockers.append(f"edge_below_minimum:{edge}")
+                # Forecast-engine probabilities can't move allocatable money
+                # until the calibration report proves they beat the market's
+                # own Brier.
+                if source == "forecast_state" and config.require_calibrated_forecast and not forecast_calibrated:
+                    blockers.append("forecast_probability_uncalibrated")
 
-            allocation_usd = 0.0
-            if not blockers:
-                # Thin markets graded into the small-size live tier are sized
-                # to what their book can absorb, not the full per-order cap.
-                requested = allocator.config.per_order_usd
-                recommended = context.scores.get("recommended_max_order_usd")
-                if recommended:
-                    requested = min(requested, float(recommended))
-                from .registry import region_of
+                # Market-anchored blending + disagreement-scaled uncertainty:
+                # the mid is the benchmark estimator until calibration data
+                # says otherwise, and a large standing disagreement with the
+                # crowd raises the edge bar instead of exciting the allocator.
+                mid = round((ask + bid) / 2, 4) if ask is not None and bid is not None else None
+                pricing_probability = side_probability
+                disagreement_penalty = 0.0
+                if mid is not None:
+                    if 0.0 <= config.model_weight < 1.0:
+                        pricing_probability = round(config.model_weight * side_probability + (1.0 - config.model_weight) * mid, 4)
+                    disagreement_penalty = round(abs(side_probability - mid) * max(0.0, config.disagreement_buffer_scale), 4)
 
-                region = region_of(context.rule_analysis.parties) if context.rule_analysis else "global"
-                request = AllocationRequest(
-                    market_id=context.market_id,
-                    event_slug=context.event_slug,
-                    correlation_group=context.correlation_group or "uncategorized",
-                    deadline_iso=context.deadline_iso,
-                    usd=requested,
-                    region=region,
+                risk_extra = 0.0
+                if context.rule_analysis is not None:
+                    # Per-market resolution risk widens the buffer beyond the
+                    # flat base: ambiguous wording must clear a higher bar.
+                    risk_extra = round(context.rule_analysis.resolution_risk * getattr(config, "resolution_risk_scale", 0.0), 4)
+                edge = (
+                    round(tradable_edge(pricing_probability, ask, config) - risk_extra - disagreement_penalty, 4)
+                    if ask is not None
+                    else None
                 )
-                allocation_usd, allocation_blockers = allocator.preview(request)
-                blockers.extend(allocation_blockers)
+                if edge is not None and edge < config.min_edge:
+                    blockers.append(f"edge_below_minimum:{edge}")
 
-            results.append(
-                Opportunity(
-                    market_id=context.market_id,
-                    outcome=outcome.name,
-                    side="YES",
-                    estimated_probability=probability,
-                    probability_source=source,
-                    executable_price=ask,
-                    spread=spread,
-                    tradable_edge=edge,
-                    blockers=blockers,
-                    allocation_usd=allocation_usd if not blockers else 0.0,
-                    detail={
-                        "state": context.state,
-                        "correlation_group": context.correlation_group,
-                        "market_mid": mid,
-                        "blended_probability": pricing_probability,
-                        "disagreement_penalty": disagreement_penalty,
-                    },
+                allocation_usd = 0.0
+                if not blockers:
+                    # Thin markets graded into the small-size live tier are
+                    # sized to what their book can absorb, not the per-order cap.
+                    requested = allocator.config.per_order_usd
+                    recommended = context.scores.get("recommended_max_order_usd")
+                    if recommended:
+                        requested = min(requested, float(recommended))
+                    from .registry import region_of
+
+                    region = region_of(context.rule_analysis.parties) if context.rule_analysis else "global"
+                    request = AllocationRequest(
+                        market_id=context.market_id,
+                        event_slug=context.event_slug,
+                        correlation_group=context.correlation_group or "uncategorized",
+                        deadline_iso=context.deadline_iso,
+                        usd=requested,
+                        region=region,
+                    )
+                    allocation_usd, allocation_blockers = allocator.preview(request)
+                    blockers.extend(allocation_blockers)
+
+                results.append(
+                    Opportunity(
+                        market_id=context.market_id,
+                        outcome=outcome.name,
+                        side=side,
+                        estimated_probability=side_probability,
+                        probability_source=source,
+                        executable_price=ask,
+                        spread=spread,
+                        tradable_edge=edge,
+                        blockers=blockers,
+                        allocation_usd=allocation_usd if not blockers else 0.0,
+                        detail={
+                            "state": context.state,
+                            "correlation_group": context.correlation_group,
+                            "market_mid": mid,
+                            "blended_probability": pricing_probability,
+                            "disagreement_penalty": disagreement_penalty,
+                        },
+                    )
                 )
-            )
     results.sort(key=lambda item: (item.tradable_edge is None, -(item.tradable_edge or 0.0)))
     return results
+
+
+def scan_group_arbitrage(
+    contexts: list[MarketContext],
+    config: OpportunityConfig,
+    quotes: QuoteProviderProtocol,
+) -> list[dict[str, Any]]:
+    """Neg-risk internal consistency: exactly one leg of a grouped event
+    resolves YES, so YES prices must sum to ~1. Bids summing above 1 mean
+    buying NO on every leg locks in (sum_bids - 1); asks summing below 1 mean
+    buying YES on every leg locks in (1 - sum_asks). No forecast involved --
+    the market is arguing with itself."""
+    arbs: list[dict[str, Any]] = []
+    for context in contexts:
+        if context.kind != "grouped" or context.state not in TRADEABLE_STATES:
+            continue
+        open_outcomes = [o for o in context.outcomes if o.accepting_orders and not o.closed]
+        if len(open_outcomes) < 2 or len(open_outcomes) != len(context.outcomes):
+            # A partially closed group no longer guarantees exactly-one-YES
+            # across the open legs; skip rather than misprice.
+            continue
+        bids = [quotes.yes_best_bid(o.yes_token_id) for o in open_outcomes]
+        asks = [quotes.yes_best_ask(o.yes_token_id) for o in open_outcomes]
+        if any(b is None for b in bids) or any(a is None for a in asks):
+            continue
+        slippage = round(config.slippage_buffer * len(open_outcomes), 4)
+        sum_bids = round(sum(bids), 4)
+        sum_asks = round(sum(asks), 4)
+        overround = round(sum_bids - 1.0 - slippage, 4)
+        underround = round(1.0 - sum_asks - slippage, 4)
+        if overround >= config.min_group_arb_edge:
+            arbs.append(
+                {
+                    "market_id": context.market_id,
+                    "type": "short_all_overround",
+                    "action": "buy NO on every leg",
+                    "sum_yes_bids": sum_bids,
+                    "edge_after_slippage": overround,
+                    "legs": [{"outcome": o.name, "yes_bid": b} for o, b in zip(open_outcomes, bids)],
+                }
+            )
+        if underround >= config.min_group_arb_edge:
+            arbs.append(
+                {
+                    "market_id": context.market_id,
+                    "type": "long_all_underround",
+                    "action": "buy YES on every leg",
+                    "sum_yes_asks": sum_asks,
+                    "edge_after_slippage": underround,
+                    "legs": [{"outcome": o.name, "yes_ask": a} for o, a in zip(open_outcomes, asks)],
+                }
+            )
+    arbs.sort(key=lambda item: -item["edge_after_slippage"])
+    return arbs

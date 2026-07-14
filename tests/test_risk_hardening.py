@@ -422,6 +422,103 @@ def test_binary_reconciliation_fails_closed_on_resting_orders(tmp_path) -> None:
         executor.reconcile_live_holding()
 
 
+# ---- take-profit exits ----
+
+
+def test_binary_take_profit_exits_at_target(tmp_path) -> None:
+    from polybot.binary.config import PositionConfig as BinaryPositionConfig
+
+    config = _binary_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        market=MarketConfig(slug="test-slug", deadline_date="2026-09-30", held_side="YES", resolution_rules="test rules"),
+        position=BinaryPositionConfig(max_shares_to_sell=1000.0, max_flip_usd_to_buy=500.0, take_profit_price=0.90),
+    )
+    bot = _binary_bot(tmp_path, config, DryRunTradingAdapter(yes_shares=400.0, yes_bid=0.95))
+    decision = bot._check_take_profit()
+    assert decision is not None and decision.action == "EXIT_HELD"
+    assert decision.reason.startswith("take_profit_target_reached")
+    current = bot.store.current()
+    assert current is not None and current.state == "EXITED"
+    assert bot.holdings.held_location() is None
+    # Terminal now; a second cycle stays quiet.
+    assert bot._check_take_profit() is None
+
+
+def test_binary_take_profit_holds_below_target(tmp_path) -> None:
+    from polybot.binary.config import PositionConfig as BinaryPositionConfig
+
+    config = _binary_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        market=MarketConfig(slug="test-slug", deadline_date="2026-09-30", held_side="YES", resolution_rules="test rules"),
+        position=BinaryPositionConfig(take_profit_price=0.90),
+    )
+    bot = _binary_bot(tmp_path, config, DryRunTradingAdapter(yes_shares=400.0, yes_bid=0.85))
+    assert bot._check_take_profit() is None
+    assert bot.holdings.held_location() == "yes"
+
+
+def test_binary_take_profit_on_held_no_uses_complement_bid(tmp_path) -> None:
+    from polybot.binary.config import PositionConfig as BinaryPositionConfig
+
+    config = _binary_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        market=MarketConfig(slug="test-slug", deadline_date="2026-09-30", held_side="NO", resolution_rules="test rules"),
+        position=BinaryPositionConfig(max_shares_to_sell=1000.0, take_profit_price=0.90),
+    )
+    # NO bid = 1 - YES ask = 0.96 >= 0.90 target.
+    bot = _binary_bot(tmp_path, config, DryRunTradingAdapter(no_shares=400.0, yes_ask=0.04))
+    decision = bot._check_take_profit()
+    assert decision is not None and decision.action == "EXIT_HELD"
+    assert bot.holdings.held_location() is None
+
+
+def test_location_take_profit_exits_at_target(tmp_path) -> None:
+    from polybot.location.config import EventConfig, PositionConfig as LocationPositionConfig
+    from polybot.location.runner import LocationProtectionBot
+
+    config = _flat_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        event=EventConfig(
+            slug="test-slug",
+            question="Where will the next diplomatic US-Iran meeting be by September 30, 2026?",
+            deadline_date="2026-09-30",
+            held_location="qatar",
+            resolution_rules="test rules",
+        ),
+        position=LocationPositionConfig(max_yes_shares_to_sell=1000.0, max_rotation_usd_to_buy=500.0, take_profit_price=0.90),
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=400.0, yes_bid=0.95))
+    decision = bot._check_take_profit()
+    assert decision is not None and decision.action == "EXIT_YES_ONLY"
+    current = bot.store.current()
+    assert current is not None and current.state == "EXITED"
+    assert bot.holdings.held_location() is None
+
+
+def test_location_take_profit_disabled_by_default(tmp_path) -> None:
+    from polybot.location.config import EventConfig
+    from polybot.location.runner import LocationProtectionBot
+
+    config = _flat_config(
+        data_dir=tmp_path / "state",
+        logs_dir=tmp_path / "logs",
+        event=EventConfig(
+            slug="test-slug",
+            question="Where will the next diplomatic US-Iran meeting be by September 30, 2026?",
+            deadline_date="2026-09-30",
+            held_location="qatar",
+            resolution_rules="test rules",
+        ),
+    )
+    bot = LocationProtectionBot(config=config, adapter=DryRunTradingAdapter(yes_shares=400.0, yes_bid=0.99))
+    assert bot._check_take_profit() is None
+    assert bot.holdings.held_location() == "qatar"
+
+
 # ---- screen tier never gates defense (P0) ----
 
 

@@ -46,6 +46,10 @@ class PositionConfig:
     expected_no_token_id: str = ""
     max_shares_to_sell: float = 100000.0
     max_flip_usd_to_buy: float = 500.0
+    # Sell the whole position when the held side's bid reaches this price:
+    # once the thesis is priced in, the last few cents are not worth carrying
+    # full resolution risk. 0 disables.
+    take_profit_price: float = 0.0
 
 
 @dataclass(frozen=True)

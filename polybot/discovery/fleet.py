@@ -92,6 +92,15 @@ class FleetManager:
     def _last_scan_edges(self) -> dict[str, float]:
         """Max executable (blocker-free) edge per market from the last
         opportunity scan; markets without one rank below edge-bearing ones."""
+        return {market_id: edge for market_id, (edge, _side) in self._last_scan_best().items()}
+
+    def best_entry_side(self, market_id: str) -> str:
+        """Side of the best executable edge for this market ('YES' when the
+        scan has no opinion): an overpriced market gets a NO-entry bot."""
+        best = self._last_scan_best().get(market_id)
+        return best[1] if best else "YES"
+
+    def _last_scan_best(self) -> dict[str, tuple[float, str]]:
         path = self.config.data_dir / "opportunities.json"
         if not path.exists():
             return {}
@@ -99,16 +108,17 @@ class FleetManager:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        edges: dict[str, float] = {}
+        best: dict[str, tuple[float, str]] = {}
         items = raw.get("opportunities") if isinstance(raw, dict) else None
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict) or item.get("blockers") or item.get("tradable_edge") is None:
                 continue
             market_id = str(item.get("market_id") or "")
             edge = float(item["tradable_edge"])
-            if market_id and edge > edges.get(market_id, float("-inf")):
-                edges[market_id] = edge
-        return edges
+            side = str(item.get("side") or "YES")
+            if market_id and edge > best.get(market_id, (float("-inf"), ""))[0]:
+                best[market_id] = (edge, side)
+        return best
 
     def is_holding(self, market_id: str) -> bool:
         base = Path(GEO_DATA_ROOT) / market_dir_slug(market_id)
@@ -245,13 +255,16 @@ class FleetManager:
         if plan is None:
             raise ValueError("no source plan; plan-sources stage has not covered this market yet")
         out = Path(self.config.fleet.generated_dir) / f"{market_dir_slug(context.market_id)}.yaml"
-        # Re-emit only when missing, the pinned rule hash changed, or the
-        # dry-run mode no longer matches the fleet's: rewriting an unchanged
-        # config would needlessly churn the operator ack hash.
+        entry_side = self.best_entry_side(context.market_id) if context.kind != "grouped" else "YES"
+        # Re-emit only when missing, the pinned rule hash changed, the entry
+        # side flipped, or the dry-run mode no longer matches the fleet's:
+        # rewriting an unchanged config would needlessly churn the ack hash.
         expected_mode = f"dry_run: {'false' if self.live else 'true'}"
         if out.exists():
             text = out.read_text(encoding="utf-8")
-            if context.rule_text_sha256 in text and expected_mode in text:
+            # yaml quotes 'NO' (bare NO is a YAML boolean), so match both forms.
+            side_ok = context.kind == "grouped" or f"side: {entry_side}" in text or f"side: '{entry_side}'" in text
+            if context.rule_text_sha256 in text and expected_mode in text and side_ok:
                 return out
         return emit_bot_config(
             context,
@@ -260,6 +273,7 @@ class FleetManager:
             out_path=out,
             ledger_path=self.ledger_path,
             dry_run=not self.live,
+            entry_side=entry_side,
         )
 
     def _entry_usd(self, context: MarketContext) -> float:
@@ -330,6 +344,7 @@ def run_fleet_command(
     analyzer=None,
     notifier=None,
     spawner=None,
+    markets_fetch=None,
 ) -> int:
     """One supervisor for the whole geopolitical universe: run the discovery
     cycle, then reconcile the bot fleet against its output, forever.
@@ -358,7 +373,7 @@ def run_fleet_command(
     try:
         while True:
             try:
-                _run_discovery_cycle(config_path, config, events_fetch=events_fetch, quotes=quotes, analyzer=analyzer, notifier=notifier)
+                _run_discovery_cycle(config_path, config, events_fetch=events_fetch, quotes=quotes, analyzer=analyzer, notifier=notifier, markets_fetch=markets_fetch)
             except Exception as exc:
                 log_event("fleet_discovery_cycle_error", error=str(exc))
             try:

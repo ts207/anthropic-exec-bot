@@ -20,7 +20,16 @@ _HEADER = (
 )
 
 
-def emit_bot_config(context: MarketContext, plan: SourcePlan, *, entry_usd: float, out_path: Path, ledger_path: str = "", dry_run: bool = True) -> Path:
+def emit_bot_config(
+    context: MarketContext,
+    plan: SourcePlan,
+    *,
+    entry_usd: float,
+    out_path: Path,
+    ledger_path: str = "",
+    dry_run: bool = True,
+    entry_side: str = "YES",
+) -> Path:
     """Render a ready-to-review executor config for this market: the existing
     entry/defense/exit engines are the final execution component, so the
     pipeline's output is their input format. When `ledger_path` is given, the
@@ -30,10 +39,14 @@ def emit_bot_config(context: MarketContext, plan: SourcePlan, *, entry_usd: floa
         raise ValueError(f"market {context.market_id} has no rule analysis; refusing to emit an executor config")
     if plan.rule_text_sha256 != context.rule_text_sha256:
         raise ValueError(f"source plan for {context.market_id} was built for a different rule-text version; rebuild it")
+    if entry_side not in {"YES", "NO"}:
+        raise ValueError(f"invalid entry_side {entry_side!r}")
     if context.kind == "grouped":
+        # Location legs are YES-side instruments; a NO view on a leg is a YES
+        # view on its siblings and belongs to the group-arbitrage report.
         payload = _location_config(context, plan, entry_usd)
     else:
-        payload = _binary_config(context, plan, entry_usd)
+        payload = _binary_config(context, plan, entry_usd, entry_side)
     payload["execution"]["dry_run"] = dry_run
     if ledger_path:
         from .registry import region_of
@@ -51,7 +64,7 @@ def emit_bot_config(context: MarketContext, plan: SourcePlan, *, entry_usd: floa
     return out_path
 
 
-def _binary_config(context: MarketContext, plan: SourcePlan, entry_usd: float) -> dict[str, Any]:
+def _binary_config(context: MarketContext, plan: SourcePlan, entry_usd: float, entry_side: str = "YES") -> dict[str, Any]:
     outcome = context.outcomes[0]
     return {
         "market": {
@@ -67,7 +80,7 @@ def _binary_config(context: MarketContext, plan: SourcePlan, entry_usd: float) -
             "expected_yes_token_id": outcome.yes_token_id,
             "expected_no_token_id": outcome.no_token_id,
         },
-        "entry": {"enabled": True, "side": "YES", "usd_budget": entry_usd, "max_price": 0.90, "max_entries": 1},
+        "entry": {"enabled": True, "side": entry_side, "usd_budget": entry_usd, "max_price": 0.90, "max_entries": 1},
         "classifier": {
             "provider": "anthropic",
             "model": "claude-opus-4-8",

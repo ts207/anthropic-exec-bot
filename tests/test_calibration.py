@@ -66,9 +66,12 @@ def test_config_estimate_deadline_decay(tmp_path) -> None:
         disagreement_buffer_scale=0.0,
     )
     results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
-    opp = results[0]
+    opp = next(r for r in results if r.side == "YES")
     assert opp.probability_source == "config_estimate_decayed"
     assert opp.estimated_probability == pytest.approx(0.30, rel=1e-2)
+    # The NO side decays consistently (complement of the decayed estimate).
+    no_row = next(r for r in results if r.side == "NO")
+    assert no_row.estimated_probability == pytest.approx(0.70, rel=1e-2)
 
 
 def test_config_estimate_without_decay_flag_is_untouched(tmp_path) -> None:
@@ -194,6 +197,79 @@ def test_calibration_buckets_show_realized_frequency(tmp_path) -> None:
 
 def test_forecast_calibrated_fails_closed_without_report(tmp_path) -> None:
     assert CalibrationLog(tmp_path).forecast_calibrated() is False
+
+
+# ---- automatic resolution capture ----
+
+
+def _closed_gamma_market(yes_price: float) -> dict:
+    return {"closed": True, "outcomes": '["Yes", "No"]', "outcomePrices": f'["{yes_price}", "{1 - yes_price}"]'}
+
+
+def test_capture_resolutions_records_and_closes_past_deadline_markets(tmp_path) -> None:
+    from dataclasses import replace
+
+    from polybot.discovery.calibration import capture_resolutions
+    from polybot.discovery.store import DiscoveryStore
+
+    store = DiscoveryStore(tmp_path / "data")
+    context = _graded(_binary_event())
+    past = replace(context, deadline_iso="2020-01-01T00:00:00Z")
+    future = replace(_graded(_binary_event(slug="future")), market_id="0xfuture-m")
+    store.save_context(past)
+    store.save_context(future)
+
+    calls: list[str] = []
+
+    def markets_fetch(condition_id: str) -> dict:
+        calls.append(condition_id)
+        return _closed_gamma_market(1.0)
+
+    log = CalibrationLog(tmp_path / "data")
+    result = capture_resolutions(store, log, markets_fetch=markets_fetch)
+    # Only the past-deadline market is queried; the future one is untouched.
+    assert result["recorded"] == [{"market_id": past.market_id, "outcome": "yes", "resolved_yes": True}]
+    assert result["closed_markets"] == [past.market_id]
+    assert len(calls) == 1
+    assert store.load_context(past.market_id).state == "CLOSED"
+    assert store.load_context(future.market_id).state != "CLOSED"
+
+    # Second pass is a no-op: resolution already recorded, context closed.
+    result = capture_resolutions(store, log, markets_fetch=markets_fetch)
+    assert result["recorded"] == [] and len(calls) == 1
+
+
+def test_capture_resolutions_waits_for_gamma_finalization(tmp_path) -> None:
+    from dataclasses import replace
+
+    from polybot.discovery.calibration import capture_resolutions
+    from polybot.discovery.store import DiscoveryStore
+
+    store = DiscoveryStore(tmp_path / "data")
+    past = replace(_graded(_binary_event()), deadline_iso="2020-01-01T00:00:00Z")
+    store.save_context(past)
+    log = CalibrationLog(tmp_path / "data")
+
+    # Deadline passed but Gamma has not finalized: nothing recorded, context
+    # stays open for the next cycle.
+    result = capture_resolutions(store, log, markets_fetch=lambda _cid: {"closed": False})
+    assert result["recorded"] == [] and result["closed_markets"] == []
+    assert store.load_context(past.market_id).state != "CLOSED"
+
+    result = capture_resolutions(store, log, markets_fetch=lambda _cid: _closed_gamma_market(0.0))
+    assert result["recorded"] == [{"market_id": past.market_id, "outcome": "yes", "resolved_yes": False}]
+    assert store.load_context(past.market_id).state == "CLOSED"
+
+
+def test_resolved_yes_parses_gamma_price_formats() -> None:
+    from polybot.discovery.calibration import _resolved_yes
+
+    assert _resolved_yes(_closed_gamma_market(1.0)) is True
+    assert _resolved_yes(_closed_gamma_market(0.0)) is False
+    assert _resolved_yes({"closed": True, "outcomes": ["No", "Yes"], "outcomePrices": ["0", "1"]}) is True
+    assert _resolved_yes({"closed": False, "outcomePrices": '["1", "0"]'}) is None
+    assert _resolved_yes(None) is None
+    assert _resolved_yes({"closed": True, "outcomePrices": "not-json"}) is None
 
 
 # ---- CLI commands ----

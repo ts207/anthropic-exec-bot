@@ -109,6 +109,10 @@ def main(argv: list[str] | None = None) -> int:
     record_resolution_parser.add_argument("--market", required=True)
     record_resolution_parser.add_argument("--outcome", required=True)
     record_resolution_parser.add_argument("--resolved", required=True, choices=["yes", "no"])
+    replay_parser = sub.add_parser("replay")
+    replay_parser.add_argument("--config", required=True)
+    replay_parser.add_argument("--articles", required=True)
+    replay_parser.add_argument("--limit", type=int, default=0)
     run_fleet_parser = sub.add_parser("run-fleet")
     run_fleet_parser.add_argument("--config", required=True)
     run_fleet_parser.add_argument("--live", action="store_true")
@@ -245,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
         from .discovery.runner import record_resolution_command
 
         return record_resolution_command(Path(args.config), args.market, args.outcome, args.resolved)
+    if args.command == "replay":
+        from .replay import replay_articles_command
+
+        return replay_articles_command(Path(args.config), Path(args.articles), limit=args.limit)
     if args.command == "run-fleet":
         from .discovery.fleet import run_fleet_command
 

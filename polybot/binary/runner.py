@@ -330,6 +330,9 @@ class BinaryRuleBot:
                 log_event("binary_wallet_reconciled", **reconciliation)
         self._check_corroboration_deadline()
         decisions: list[BinaryDecision] = []
+        take_profit = self._check_take_profit()
+        if take_profit is not None:
+            decisions.append(take_profit)
         held = self.holdings.held_location()
         decay = time_decay_decision(self.config, held)
         if decay.action != "NO_ACTION" and self._decay_still_actionable(decay):
@@ -527,6 +530,31 @@ class BinaryRuleBot:
         result = self.executor.execute(decision, article)
         self._maybe_start_corroboration(result, article)
         return decision
+
+    def _check_take_profit(self) -> BinaryDecision | None:
+        """Sell into strength: once the held side's bid reaches the target,
+        the remaining upside is small against full resolution/UMA risk. Exits
+        through the normal gated path (staged sell, ledger settle)."""
+        target = self.config.position.take_profit_price
+        if target <= 0:
+            return None
+        held = self.holdings.held_location()
+        if held is None:
+            return None
+        current = self.store.current()
+        if current is not None and current.state in TERMINAL_STATES:
+            return None
+        if held == "yes":
+            bid = self.executor.adapter.yes_best_bid(self.market.yes_token_id)
+        else:
+            # Mirrored book: the NO bid is the complement of the YES ask.
+            yes_ask = self.executor.adapter.yes_best_ask(self.market.yes_token_id)
+            bid = round(1.0 - yes_ask, 4) if yes_ask is not None else None
+        if bid is None or bid < target:
+            return None
+        decision = BinaryDecision("EXIT_HELD", "TIME", f"take_profit_target_reached:{bid}")
+        log_event("binary_take_profit_triggered", held=held, bid=bid, target=target)
+        return self._execute_if_allowed(decision, _synthetic_article(decision.reason))
 
     def _corroboration_tracker(self) -> Any:
         from polybot.core.confirmations import CorroborationTracker

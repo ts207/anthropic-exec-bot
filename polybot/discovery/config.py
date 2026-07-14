@@ -128,6 +128,14 @@ class OpportunityConfig:
     # Ungated they still appear in the scan/funnel with a blocker.
     require_calibrated_forecast: bool = True
     min_resolved_for_calibration: int = 20
+    # Overpriced markets are edge too: price the NO side of every outcome
+    # (executable NO ask = 1 - YES bid) with the same buffers and anchoring.
+    scan_no_side: bool = True
+    # Neg-risk internal consistency: when a grouped event's YES bids sum above
+    # 1 (short every leg) or YES asks sum below 1 (buy every leg), the market
+    # is arguing with itself -- no forecast needed. Minimum net edge after
+    # per-leg slippage to report the arb.
+    min_group_arb_edge: float = 0.02
 
 
 @dataclass(frozen=True)

@@ -423,6 +423,9 @@ class LocationProtectionBot:
         self._notify_forecast_exits(mark_report.get("exits", []))
         self._process_monitoring()
         decisions: list[LocationDecision] = []
+        take_profit = self._check_take_profit()
+        if take_profit is not None:
+            decisions.append(take_profit)
         if self.holdings.held_location() is not None:
             # Time decay only applies to a held position; a flat bot has
             # nothing to trim or exit on the calendar.
@@ -707,6 +710,29 @@ class LocationProtectionBot:
         result = self.executor.execute(decision, article)
         self._maybe_start_corroboration(result, article)
         return decision
+
+    def _check_take_profit(self) -> LocationDecision | None:
+        """Sell into strength: once the held outcome's YES bid reaches the
+        target, the remaining upside is small against full resolution/UMA
+        risk. Exits through the normal gated path (staged sell, ledger settle)."""
+        target = self.config.position.take_profit_price
+        if target <= 0:
+            return None
+        held = self.holdings.held_location()
+        if held is None:
+            return None
+        current = self.store.current()
+        if current is not None and current.state in TERMINAL_STATES:
+            return None
+        outcome = self.config.outcome(held)
+        if outcome is None:
+            return None
+        bid = self.executor.adapter.yes_best_bid(outcome.yes_token_id)
+        if bid is None or bid < target:
+            return None
+        decision = LocationDecision("EXIT_YES_ONLY", "TIME", f"take_profit_target_reached:{bid}")
+        log_event("location_take_profit_triggered", held=held, bid=bid, target=target)
+        return self._execute_if_allowed(decision, _synthetic_article(decision.reason))
 
     def _corroboration_tracker(self) -> Any:
         from polybot.core.confirmations import CorroborationTracker

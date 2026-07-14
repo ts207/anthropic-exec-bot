@@ -13,7 +13,7 @@ from .config import DiscoveryConfig, load_discovery_config
 from .context import build_rule_analyzer
 from .emit import emit_bot_config
 from .gamma_universe import context_from_event, fetch_active_events, is_geopolitical_candidate, merge_refresh
-from .opportunity import QuoteProviderProtocol, scan_opportunities
+from .opportunity import QuoteProviderProtocol, scan_group_arbitrage, scan_opportunities
 from .scorer import correlation_group, grade_market
 from .sources import build_source_plan
 from .store import DiscoveryStore
@@ -163,14 +163,16 @@ def scan_opportunities_command(config_path: Path, *, quotes: QuoteProviderProtoc
     # Every scan feeds the calibration loop: what we believed, what the
     # market believed, same instant. Resolutions score both later.
     calibration.record_estimates(opportunities)
+    group_arbitrage = scan_group_arbitrage(contexts, config.opportunity, quotes)
     payload = [item.as_dict() for item in opportunities]
-    _atomic_json_write(config.data_dir / "opportunities.json", {"opportunities": payload})
+    _atomic_json_write(config.data_dir / "opportunities.json", {"opportunities": payload, "group_arbitrage": group_arbitrage})
     executable = [item for item in opportunities if not item.blockers]
     print(
         json.dumps(
             {
                 "scanned_outcomes": len(opportunities),
                 "executable": [item.as_dict() for item in executable],
+                "group_arbitrage": group_arbitrage,
                 "blocked": Counter(blocker.split(":")[0] for item in opportunities for blocker in item.blockers),
             },
             indent=2,
@@ -299,6 +301,7 @@ def run_discovery_command(
     quotes: QuoteProviderProtocol | None = None,
     analyzer=None,
     notifier=None,
+    markets_fetch=None,
 ) -> int:
     """Scheduled pipeline loop: discover -> grade -> plan-sources -> scan on
     an interval, alerting (Telegram) on newly LIVE_CONFIRMATION_ELIGIBLE
@@ -312,7 +315,7 @@ def run_discovery_command(
     notifier = notifier or TelegramNotifier()
     while True:
         try:
-            _run_discovery_cycle(config_path, config, events_fetch=events_fetch, quotes=quotes, analyzer=analyzer, notifier=notifier)
+            _run_discovery_cycle(config_path, config, events_fetch=events_fetch, quotes=quotes, analyzer=analyzer, notifier=notifier, markets_fetch=markets_fetch)
         except Exception as exc:
             log_event("discovery_cycle_error", error=str(exc))
             try:
@@ -332,6 +335,7 @@ def _run_discovery_cycle(
     quotes,
     analyzer,
     notifier,
+    markets_fetch=None,
 ) -> None:
     store = DiscoveryStore(config.data_dir)
     previous = _pipeline_state(config)
@@ -340,15 +344,25 @@ def _run_discovery_cycle(
     plan_sources_command(config_path)
     scan_opportunities_command(config_path, quotes=quotes)
 
+    # Resolved markets feed the calibration loop automatically -- every
+    # resolution makes the probability sources measurably scoreable.
+    from .calibration import CalibrationLog, capture_resolutions
+
+    resolutions = capture_resolutions(store, CalibrationLog(config.data_dir), markets_fetch=markets_fetch)
+    for item in resolutions["recorded"]:
+        notifier.notify("Discovery: outcome resolved; calibration log updated", **item)
+
     contexts = store.all_contexts()
     live_now = sorted(c.market_id for c in contexts if c.state == "LIVE_CONFIRMATION_ELIGIBLE")
     executable_now = sorted(
-        f"{o.get('market_id')}:{o.get('outcome')}"
+        f"{o.get('market_id')}:{o.get('outcome')}:{o.get('side', 'YES')}"
         for o in _last_scan(config)
         if not o.get("blockers")
     )
+    arbs_now = sorted(f"{a.get('market_id')}:{a.get('type')}" for a in _last_scan_arbitrage(config))
     new_live = [m for m in live_now if m not in set(previous.get("live_eligible", []))]
     new_executable = [o for o in executable_now if o not in set(previous.get("executable", []))]
+    new_arbs = [a for a in arbs_now if a not in set(previous.get("group_arbitrage", []))]
     for market_id in new_live:
         context = store.load_context(market_id)
         notifier.notify(
@@ -360,9 +374,11 @@ def _run_discovery_cycle(
         )
     for key in new_executable:
         notifier.notify("Discovery: newly executable opportunity", opportunity=key)
+    for key in new_arbs:
+        notifier.notify("Discovery: group-consistency arbitrage detected", arbitrage=key)
     _atomic_json_write(
         config.data_dir / "pipeline_state.json",
-        {"live_eligible": live_now, "executable": executable_now},
+        {"live_eligible": live_now, "executable": executable_now, "group_arbitrage": arbs_now},
     )
     log_event(
         "discovery_cycle_complete",
@@ -370,6 +386,7 @@ def _run_discovery_cycle(
         executable=len(executable_now),
         new_live=len(new_live),
         new_executable=len(new_executable),
+        group_arbitrage=len(arbs_now),
     )
 
 
@@ -393,6 +410,18 @@ def _last_scan(config: DiscoveryConfig) -> list[dict[str, Any]]:
     except json.JSONDecodeError:
         return []
     items = raw.get("opportunities") if isinstance(raw, dict) else None
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _last_scan_arbitrage(config: DiscoveryConfig) -> list[dict[str, Any]]:
+    path = config.data_dir / "opportunities.json"
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    items = raw.get("group_arbitrage") if isinstance(raw, dict) else None
     return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 

@@ -201,3 +201,37 @@ def test_fleet_ranks_by_edge_without_liquidity_bias(tmp_path, monkeypatch) -> No
     )
     desired = manager.desired_markets([deep, thin])
     assert [c.market_id for c in desired] == [deep.market_id]
+
+
+def test_fleet_emits_no_side_config_when_no_edge_is_best(tmp_path, monkeypatch) -> None:
+    _patch_roots(monkeypatch, tmp_path)
+    config = DiscoveryConfig(
+        fleet=FleetConfig(enabled=True, max_bots=5, generated_dir=str(tmp_path / "generated")),
+        data_dir=tmp_path / "data",
+        logs_dir=tmp_path / "logs",
+    )
+    store = DiscoveryStore(config.data_dir)
+    market = grade_market(_analyzed_context(_binary_event()), ScoringConfig(allow_fixture_analysis_live=True))
+    store.save_context(market)
+    store.save_source_plan(build_source_plan(market))
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    (config.data_dir / "opportunities.json").write_text(
+        json.dumps(
+            {
+                "opportunities": [
+                    {"market_id": market.market_id, "outcome": "yes", "side": "NO", "tradable_edge": 0.15, "blockers": []},
+                    {"market_id": market.market_id, "outcome": "yes", "side": "YES", "tradable_edge": 0.03, "blockers": []},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = FleetManager(config, store, live=False, per_order_usd=50.0, ledger_path=str(config.data_dir / "allocations.json"), spawner=_Spawner())
+    assert manager.best_entry_side(market.market_id) == "NO"
+
+    summary = manager.sync([market])
+    assert summary["started"] == [market.market_id]
+    from polybot.binary.config import load_binary_config
+
+    generated = next((tmp_path / "generated").glob("*.yaml"))
+    assert load_binary_config(generated).entry.side == "NO"

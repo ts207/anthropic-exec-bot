@@ -97,6 +97,10 @@ forecast:
 position:
   max_yes_shares_to_sell: 100000.0
   max_rotation_usd_to_buy: 500.0
+  # Sell the whole position when the held outcome's YES bid reaches this
+  # price: once the thesis is priced in, the last few cents are not worth
+  # carrying full resolution risk. 0 = hold to resolution/news exit.
+  take_profit_price: 0.0
 
 trigger:
   auto_execute_level: 4
