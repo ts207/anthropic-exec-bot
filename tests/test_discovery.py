@@ -320,7 +320,9 @@ def _graded(event: dict) -> MarketContext:
 
 def test_scan_finds_executable_opportunity(tmp_path) -> None:
     context = _graded(_binary_event())
-    config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}})
+    # model_weight=1.0 opts out of market anchoring to isolate the base
+    # edge accounting; anchoring itself is covered in test_calibration.py.
+    config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}}, model_weight=1.0, disagreement_buffer_scale=0.0)
     results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
     assert len(results) == 1
     opp = results[0]
@@ -438,6 +440,8 @@ def test_full_pipeline(tmp_path, capsys) -> None:
         config_path.read_text(encoding="utf-8")
         + f"""
 opportunity:
+  model_weight: 1.0
+  disagreement_buffer_scale: 0.0
   probability_estimates:
     "{binary_id}":
       "yes": 0.60
@@ -630,6 +634,8 @@ def test_run_discovery_once_alerts_on_new_eligible(tmp_path) -> None:
         config_path.read_text(encoding="utf-8")
         + f"""
 opportunity:
+  model_weight: 1.0
+  disagreement_buffer_scale: 0.0
   probability_estimates:
     "{binary_id}":
       "yes": 0.60
@@ -665,7 +671,7 @@ opportunity:
 def test_scan_sizes_small_live_market_to_its_book(tmp_path) -> None:
     context = grade_market(_analyzed_context(_binary_event(liquidity=800.0)), ScoringConfig(allow_fixture_analysis_live=True))
     assert context.scores["recommended_max_order_usd"] == 16.0
-    config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}})
+    config = OpportunityConfig(probability_estimates={context.market_id: {"yes": 0.60}}, model_weight=1.0, disagreement_buffer_scale=0.0)
     results = scan_opportunities([context], config, _FakeQuotes(), _allocator(tmp_path))
     assert not results[0].blockers
     assert results[0].allocation_usd == 16.0  # book-absorbable size, not the 50 per-order cap

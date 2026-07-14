@@ -111,6 +111,23 @@ class OpportunityConfig:
     # Effective resolution-risk buffer = resolution_risk_buffer +
     # analyzer_resolution_risk * resolution_risk_scale (per market).
     resolution_risk_scale: float = 0.05
+    # Market-anchored blending: the market mid is itself a calibrated
+    # probability estimator, usually better than an operator guess. The scan
+    # prices edges with model_weight*model + (1-model_weight)*mid, so a
+    # standing disagreement with the market must be LARGE to trade. Raise the
+    # weight only after the calibration report proves the model beats the
+    # market's own Brier score. 1.0 disables anchoring.
+    model_weight: float = 0.35
+    # Extra uncertainty buffer = |model - mid| * this scale: a big standing
+    # disagreement with the crowd is itself evidence the model may be wrong,
+    # so the edge bar rises exactly where miscalibration hurts most.
+    disagreement_buffer_scale: float = 0.25
+    # Forecast-state probabilities may only price allocatable opportunities
+    # after the calibration report marks them calibrated (Brier beats the
+    # market mid over min_resolved_for_calibration resolved outcomes).
+    # Ungated they still appear in the scan/funnel with a blocker.
+    require_calibrated_forecast: bool = True
+    min_resolved_for_calibration: int = 20
 
 
 @dataclass(frozen=True)

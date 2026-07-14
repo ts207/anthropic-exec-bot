@@ -150,7 +150,19 @@ def scan_opportunities_command(config_path: Path, *, quotes: QuoteProviderProtoc
     config, store, allocator = _load(config_path)
     contexts = store.all_contexts()
     quotes = quotes or _live_quotes(contexts)
-    opportunities = scan_opportunities(contexts, config.opportunity, quotes, allocator)
+    from .calibration import CalibrationLog
+
+    calibration = CalibrationLog(config.data_dir)
+    opportunities = scan_opportunities(
+        contexts,
+        config.opportunity,
+        quotes,
+        allocator,
+        forecast_calibrated=calibration.forecast_calibrated(),
+    )
+    # Every scan feeds the calibration loop: what we believed, what the
+    # market believed, same instant. Resolutions score both later.
+    calibration.record_estimates(opportunities)
     payload = [item.as_dict() for item in opportunities]
     _atomic_json_write(config.data_dir / "opportunities.json", {"opportunities": payload})
     executable = [item for item in opportunities if not item.blockers]
@@ -211,6 +223,32 @@ def reconcile_ledger_command(config_path: Path) -> int:
     manager = FleetManager(config, store, live=False, per_order_usd=allocator.config.per_order_usd, ledger_path=str(allocator.state_path))
     state = allocator.reconcile(is_open=manager.is_holding)
     print(json.dumps({"open_positions": state.get("open_positions", []), "realized_net": state.get("realized_net", 0.0)}, indent=2, sort_keys=True))
+    return 0
+
+
+def record_resolution_command(config_path: Path, market_id: str, outcome: str, resolved: str) -> int:
+    """Feed the calibration loop: record how one outcome actually resolved.
+    Every resolution scores every probability source that ever priced it."""
+    from .calibration import CalibrationLog
+
+    config = load_discovery_config(config_path)
+    if resolved.lower() not in {"yes", "no"}:
+        raise SystemExit("--resolved must be 'yes' or 'no'")
+    CalibrationLog(config.data_dir).record_resolution(market_id, outcome, resolved.lower() == "yes")
+    print(json.dumps({"recorded": {"market_id": market_id, "outcome": outcome, "resolved_yes": resolved.lower() == "yes"}}, indent=2))
+    return 0
+
+
+def calibration_report_command(config_path: Path) -> int:
+    """Score every probability source against resolved outcomes (Brier vs the
+    market mid's own Brier on the same rows) and write calibration_status.json.
+    The scan reads that status: forecast probabilities can't price allocatable
+    opportunities until this report proves they beat the market."""
+    from .calibration import CalibrationLog
+
+    config = load_discovery_config(config_path)
+    report = CalibrationLog(config.data_dir).report(min_resolved=config.opportunity.min_resolved_for_calibration)
+    print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
 

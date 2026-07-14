@@ -102,6 +102,13 @@ def main(argv: list[str] | None = None) -> int:
     run_discovery_parser.add_argument("--once", action="store_true")
     reconcile_ledger_parser = sub.add_parser("reconcile-ledger")
     reconcile_ledger_parser.add_argument("--config", required=True)
+    calibration_report_parser = sub.add_parser("calibration-report")
+    calibration_report_parser.add_argument("--config", required=True)
+    record_resolution_parser = sub.add_parser("record-resolution")
+    record_resolution_parser.add_argument("--config", required=True)
+    record_resolution_parser.add_argument("--market", required=True)
+    record_resolution_parser.add_argument("--outcome", required=True)
+    record_resolution_parser.add_argument("--resolved", required=True, choices=["yes", "no"])
     run_fleet_parser = sub.add_parser("run-fleet")
     run_fleet_parser.add_argument("--config", required=True)
     run_fleet_parser.add_argument("--live", action="store_true")
@@ -230,6 +237,14 @@ def main(argv: list[str] | None = None) -> int:
         from .discovery.runner import reconcile_ledger_command
 
         return reconcile_ledger_command(Path(args.config))
+    if args.command == "calibration-report":
+        from .discovery.runner import calibration_report_command
+
+        return calibration_report_command(Path(args.config))
+    if args.command == "record-resolution":
+        from .discovery.runner import record_resolution_command
+
+        return record_resolution_command(Path(args.config), args.market, args.outcome, args.resolved)
     if args.command == "run-fleet":
         from .discovery.fleet import run_fleet_command
 

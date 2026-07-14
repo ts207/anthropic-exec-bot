@@ -174,6 +174,32 @@ another reason for C2 heartbeats and Telegram degradation alerts. Accepted.
 13. ✅ IMPLEMENTED — Region second correlation dimension (`per_region_usd` ledger cap; region derived from deciding actors) (B4).
 14. ✅ IMPLEMENTED — Second-source confirmation above `entry.second_source_above_usd`: the first trigger defers to `ENTRY_AWAITING_SECOND_SOURCE` until an independent domain confirms within `second_source_window_minutes` (A2).
 
+**P3 — probability calibration loop (the single biggest profitability lever):**
+15. ✅ IMPLEMENTED — Market-anchored pricing: scan edges use
+    `model_weight*model + (1-model_weight)*mid` (default weight 0.35), so a
+    standing disagreement with the market must be large to trade; raise the
+    weight only after the model proves itself.
+16. ✅ IMPLEMENTED — Disagreement-scaled uncertainty: the edge bar widens by
+    `|model − mid| * disagreement_buffer_scale`, protecting exactly where
+    miscalibration hurts most.
+17. ✅ IMPLEMENTED — Calibration ledger: every scan logs each priced estimate
+    with its source and the market mid at the same instant
+    (`calibration_estimates.jsonl`); `record-resolution` logs outcomes;
+    `calibration-report` scores per-source Brier vs the market mid's Brier
+    on the same rows, with calibration-curve buckets.
+18. ✅ IMPLEMENTED — Hard gate: forecast-state probabilities are blocked from
+    allocatable opportunities (`forecast_probability_uncalibrated`) until the
+    report proves they beat the market over
+    `min_resolved_for_calibration` resolved outcomes. Fails closed when the
+    report has never run.
+19. ✅ IMPLEMENTED — Deadline decay: config estimates flagged
+    `{_decay: true, _as_of: ...}` shrink with remaining time
+    (uniform-arrival), so a static "by date X" estimate can't silently go
+    stale.
+20. OPEN — Recalibrate `entry.confirmed_probability` and forecast priors
+    empirically from the resolution log once enough markets resolve (of all
+    `confirmed_scheduled` triggers, what fraction actually resolved YES?).
+
 **Standing rule:** raise the notional guardrails only after the funnel and
 calibration reports show realized positive edge across multiple resolved,
 uncorrelated events — never on a good week.
