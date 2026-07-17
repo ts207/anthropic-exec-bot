@@ -158,6 +158,9 @@ def _sources_section(plan: SourcePlan) -> dict[str, Any]:
         "alert_only_domains": list(plan.alert_only_domains),
         "allow_feed_auto_trade": False,
         "max_trade_article_age_hours": 24.0,
+        # Event-anchored depth capture: gate escalations, pre-order,
+        # post-fill -> book_snapshots.jsonl (the slippage/repricing dataset).
+        "log_book_snapshots": True,
     }
 
 

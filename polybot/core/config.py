@@ -103,6 +103,11 @@ class SourcesConfig:
     promote_feed_to_article: bool = True
     max_trade_article_age_hours: float = 24.0
     allow_unknown_age_poll_auto_trade: bool = False
+    # Event-anchored order-book capture (book_snapshots.jsonl): full depth is
+    # persisted when an article clears the keyword gate, right before an
+    # order, and right after a fill. Off by default (tests/offline); emitted
+    # fleet configs enable it -- this is the slippage/repricing dataset.
+    log_book_snapshots: bool = False
 
 __all__ = [
     "ClassifierConfig",

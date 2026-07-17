@@ -46,6 +46,9 @@ class LocationExecutor:
         self.adapter = adapter
         self.holdings = HoldingsStore(self.store.data_dir, default_held=config.event.held_location or None)
         self.journal = ExecutionJournal(self.store.data_dir)
+        from polybot.core.book_snapshots import build_book_snapshot_logger
+
+        self.book_snapshots = build_book_snapshot_logger(self.store.data_dir, config.sources.log_book_snapshots)
         risk_path = SETTINGS.risk_state_path if not config.execution.dry_run else self.store.data_dir / "risk_state.json"
         self.risk = risk or RiskState.load(path=risk_path)
         self.portfolio = PortfolioLink.from_config(config.portfolio)
@@ -234,6 +237,7 @@ class LocationExecutor:
 
         journal = self.journal.start(decision.action, decision=_decision_dict(decision), article=article.__dict__)
         self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
+        self.book_snapshots.snapshot([held.yes_token_id], moment="pre_order", execution_id=journal.execution_id, action=decision.action)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", outcome=held.name)
@@ -302,6 +306,9 @@ class LocationExecutor:
             retry_result = self.adapter.sell_yes_fak(held.yes_token_id, target_shares - total_sold, self.config.execution.sell.min_price)
             total_sold += self.adapter.verify_fill(retry_result, held.yes_token_id).filled_shares
 
+        self.book_snapshots.snapshot(
+            [held.yes_token_id], moment="post_execution", execution_id=journal.execution_id, action=decision.action, total_sold=total_sold
+        )
         if total_sold < target_shares:
             self.store.write(
                 "FLIP_INCOMPLETE",
@@ -454,6 +461,7 @@ class LocationExecutor:
 
         journal = self.journal.start("ENTER_YES", decision=_decision_dict(decision), article=article.__dict__)
         self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
+        self.book_snapshots.snapshot([target.yes_token_id], moment="pre_order", execution_id=journal.execution_id, action="ENTER_YES")
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", outcome=target.name)
@@ -524,6 +532,9 @@ class LocationExecutor:
         buy_result = self.adapter.buy_yes_fak(target.yes_token_id, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, target.yes_token_id)
         journal = self.journal.update(journal, "buy_reconciled", buy_result=buy_result, filled_shares=buy_fill.filled_shares)
+        self.book_snapshots.snapshot(
+            [target.yes_token_id], moment="post_execution", execution_id=journal.execution_id, action="ENTER_YES", filled_shares=buy_fill.filled_shares
+        )
         if buy_fill.filled_shares <= 0:
             self._portfolio_settle(None)
             self._portfolio_release()

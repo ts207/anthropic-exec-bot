@@ -137,6 +137,10 @@ safety:
 sources:
   poll_urls: []
   feed_urls: []
+  # Persist full order-book depth at the moments that matter (article clears
+  # the keyword gate, pre-order, post-fill) into book_snapshots.jsonl --
+  # the dataset that calibrates slippage and proves the repricing window.
+  log_book_snapshots: true
 
 data_dir: data/location-entry-example
 logs_dir: logs

@@ -398,6 +398,10 @@ class LocationProtectionBot:
         self._budget_lock = threading.Lock()
         self.executor = LocationExecutor(config, self.store, self.notifier, adapter)
         self.holdings = self.executor.holdings
+        # Event-anchored book capture shares the executor's logger (same
+        # data_dir, same enable flag) so gate/order/fill snapshots interleave
+        # in one book_snapshots.jsonl per market.
+        self.book_snapshots = self.executor.book_snapshots
         self.forecast = ForecastPaperEngine(
             config,
             forecast_adapter or QuoteOnlyFacade(adapter),
@@ -523,6 +527,16 @@ class LocationProtectionBot:
         message = _format_live_update_message(article, body_text=notify_text, incremental=is_incremental)
         for chunk in _chunk_telegram_message(message):
             self.notifier.notify(chunk, title=article.title, url=article.url, domain=article.domain, published_at=article.published_at)
+        # The repricing window starts NOW: capture every leg's book while
+        # prices are (possibly) still stale, before classification spends
+        # seconds. The whole group is one snapshot set -- also feeds the
+        # group-sum consistency analysis.
+        self.book_snapshots.snapshot(
+            [o.yes_token_id for o in self.config.outcomes],
+            moment="gate_escalation",
+            article_hash=article.hash,
+            domain=article.domain,
+        )
         age_hours = _article_age_hours(article)
         max_age = self.config.sources.max_trade_article_age_hours
         if max_age > 0 and age_hours is not None and age_hours > max_age:

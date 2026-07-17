@@ -316,6 +316,10 @@ class BinaryRuleBot:
         self._budget_lock = threading.Lock()
         self.executor = BinaryExecutor(config, market, self.store, self.notifier, adapter)
         self.holdings = self.executor.holdings
+        # Event-anchored book capture shares the executor's logger (same
+        # data_dir, same enable flag) so gate/order/fill snapshots interleave
+        # in one book_snapshots.jsonl per market.
+        self.book_snapshots = self.executor.book_snapshots
         self.operator_gate = operator_gate
         self.live_requested = live_requested
 
@@ -405,6 +409,11 @@ class BinaryRuleBot:
             url=article.url,
             domain=article.domain,
             published_at=article.published_at,
+        )
+        # The repricing window starts NOW: capture the book while the price is
+        # (possibly) still stale, before classification spends seconds.
+        self.book_snapshots.snapshot(
+            [self.market.yes_token_id], moment="gate_escalation", article_hash=article.hash, domain=article.domain
         )
         age_hours = _article_age_hours(article)
         max_age = self.config.sources.max_trade_article_age_hours

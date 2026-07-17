@@ -44,6 +44,9 @@ class BinaryExecutor:
         self.holdings = HoldingsStore(self.store.data_dir, default_held=config.market.held_side.lower() or None)
         self.journal = ExecutionJournal(self.store.data_dir)
         self.portfolio = PortfolioLink.from_config(config.portfolio)
+        from polybot.core.book_snapshots import build_book_snapshot_logger
+
+        self.book_snapshots = build_book_snapshot_logger(self.store.data_dir, config.sources.log_book_snapshots)
 
     def held_side(self) -> str | None:
         return self.holdings.held_location()
@@ -191,6 +194,7 @@ class BinaryExecutor:
         held_token = self.market.yes_token_id if held == "yes" else self.market.no_token_id
         journal = self.journal.start(decision.action, decision=_decision_dict(decision), article=article.__dict__)
         self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
+        self.book_snapshots.snapshot([held_token], moment="pre_order", execution_id=journal.execution_id, action=decision.action)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", side=held)
@@ -251,6 +255,9 @@ class BinaryExecutor:
             retry_result = self._sell_side(held, target_shares - total_sold)
             total_sold += self.adapter.verify_fill(retry_result, held_token).filled_shares
 
+        self.book_snapshots.snapshot(
+            [held_token], moment="post_execution", execution_id=journal.execution_id, action=decision.action, total_sold=total_sold
+        )
         if total_sold < target_shares:
             # Some shares remain live, so the holding is NOT cleared.
             self.store.write(
@@ -371,6 +378,7 @@ class BinaryExecutor:
         token = self.market.yes_token_id if side == "yes" else self.market.no_token_id
         journal = self.journal.start(decision.action, decision=_decision_dict(decision), article=article.__dict__)
         self.store.write("TRIGGER_DETECTED", execution_id=journal.execution_id, decision=_decision_dict(decision), article=article.__dict__)
+        self.book_snapshots.snapshot([token], moment="pre_order", execution_id=journal.execution_id, action=decision.action)
         cancel_result = None
         if self.config.safety.cancel_open_orders_first:
             self.store.write("CANCELING_ORDERS", side=side)
@@ -405,6 +413,9 @@ class BinaryExecutor:
         self._portfolio_reserve(usd_budget)
         buy_result = self.adapter.buy_yes_fak(token, usd_budget, cap) if side == "yes" else self.adapter.buy_no_fak(token, usd_budget, cap)
         buy_fill = self.adapter.verify_fill(buy_result, token)
+        self.book_snapshots.snapshot(
+            [token], moment="post_execution", execution_id=journal.execution_id, action=decision.action, filled_shares=buy_fill.filled_shares
+        )
         if buy_fill.filled_shares <= 0:
             self._portfolio_release()
             self.store.write(
