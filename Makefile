@@ -20,6 +20,7 @@ setup: ## create venv, install deps, seed .env
 	test -d .venv || python3 -m venv .venv
 	.venv/bin/pip install --quiet -r requirements.txt
 	@test -f .env || (cp .env.example .env && chmod 600 .env && echo ">>> created .env -- FILL IN YOUR KEYS before running")
+	@command -v claude >/dev/null 2>&1 || echo ">>> claude CLI not found -- classification uses your Claude subscription via it: npm install -g @anthropic-ai/claude-code && claude login"
 	@echo "setup complete. next: edit .env, then 'make paper'"
 
 test: ## run the full test suite

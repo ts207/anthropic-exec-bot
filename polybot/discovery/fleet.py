@@ -260,11 +260,13 @@ class FleetManager:
         # side flipped, or the dry-run mode no longer matches the fleet's:
         # rewriting an unchanged config would needlessly churn the ack hash.
         expected_mode = f"dry_run: {'false' if self.live else 'true'}"
+        provider = self.config.classifier.provider if self.config.classifier.provider != "rule_based" else "anthropic"
         if out.exists():
             text = out.read_text(encoding="utf-8")
             # yaml quotes 'NO' (bare NO is a YAML boolean), so match both forms.
             side_ok = context.kind == "grouped" or f"side: {entry_side}" in text or f"side: '{entry_side}'" in text
-            if context.rule_text_sha256 in text and expected_mode in text and side_ok:
+            provider_ok = f"provider: {provider}" in text
+            if context.rule_text_sha256 in text and expected_mode in text and side_ok and provider_ok:
                 return out
         return emit_bot_config(
             context,
@@ -274,6 +276,7 @@ class FleetManager:
             ledger_path=self.ledger_path,
             dry_run=not self.live,
             entry_side=entry_side,
+            classifier_provider=self.config.classifier.provider if self.config.classifier.provider != "rule_based" else "anthropic",
         )
 
     def _entry_usd(self, context: MarketContext) -> float:

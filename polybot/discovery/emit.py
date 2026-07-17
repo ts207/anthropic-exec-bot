@@ -29,6 +29,7 @@ def emit_bot_config(
     ledger_path: str = "",
     dry_run: bool = True,
     entry_side: str = "YES",
+    classifier_provider: str = "anthropic",
 ) -> Path:
     """Render a ready-to-review executor config for this market: the existing
     entry/defense/exit engines are the final execution component, so the
@@ -47,6 +48,9 @@ def emit_bot_config(
         payload = _location_config(context, plan, entry_usd)
     else:
         payload = _binary_config(context, plan, entry_usd, entry_side)
+    # The executor inherits the pipeline's classification transport:
+    # claude_cli = the operator's Claude subscription, anthropic = metered API.
+    payload["classifier"]["provider"] = classifier_provider or "anthropic"
     payload["execution"]["dry_run"] = dry_run
     if ledger_path:
         from .registry import region_of

@@ -106,10 +106,17 @@ class RuleBasedFixtureBinaryClassifier:
 
 
 class LLMBinaryClassifier:
-    def __init__(self, config: ClassifierConfig, bot_config: BinaryBotConfig, anthropic_client: object | None = None):
+    def __init__(
+        self,
+        config: ClassifierConfig,
+        bot_config: BinaryBotConfig,
+        anthropic_client: object | None = None,
+        cli_runner: Any = None,
+    ):
         self.config = config
         self.bot_config = bot_config
         self._anthropic_client = anthropic_client
+        self._cli_runner = cli_runner
         self.last_usage: dict[str, Any] | None = None
 
     def classify(self, article: Article, market_rule_text: str, held_side: str | None = None) -> RuleSignal:
@@ -118,11 +125,50 @@ class LLMBinaryClassifier:
         prompt = _prompt(article, market_rule_text, self.bot_config, held_side=held_side)
         if provider == "anthropic":
             raw = self._anthropic(prompt)
+        elif provider in {"claude_cli", "claude-cli", "claude_code_cli"}:
+            raw = self._cli_with_anthropic_fallback(prompt)
         else:
             raise RuntimeError(
-                f"unsupported binary classifier provider: {self.config.provider} (supported: anthropic, rule_based)"
+                f"unsupported binary classifier provider: {self.config.provider} (supported: anthropic, claude_cli, rule_based)"
             )
         return RuleSignal.from_dict(_json_object(raw))
+
+    def _claude_cli(self, prompt: str) -> str:
+        """Classify via the Claude Code CLI (subscription auth, no metered
+        API). See polybot/core/claude_cli.py for the flag rationale."""
+        from polybot.core.claude_cli import extract_claude_cli_result, run_claude_cli
+
+        stdout = (
+            self._cli_runner(prompt)
+            if self._cli_runner is not None
+            else run_claude_cli(
+                prompt,
+                model=self.config.model,
+                output_schema=_OUTPUT_SCHEMA,
+                cli_binary=self.config.cli_binary,
+                timeout_seconds=self.config.cli_timeout_seconds,
+            )
+        )
+        text, usage = extract_claude_cli_result(stdout)
+        self.last_usage = usage
+        return text
+
+    def _cli_with_anthropic_fallback(self, prompt: str) -> str:
+        """CLI first; if it fails AND an API key exists, fall back to the
+        metered API rather than missing a trade-grade classification."""
+        try:
+            return self._claude_cli(prompt)
+        except Exception as exc:
+            if not (os.getenv("ANTHROPIC_API_KEY") or os.getenv("LLM_API_KEY")):
+                raise
+            fallback_model = os.getenv("ANTHROPIC_CLASSIFIER_FALLBACK_MODEL") or "claude-sonnet-4-6"
+            raw = self._anthropic(prompt, model=fallback_model)
+            usage = dict(self.last_usage or {})
+            usage["fallback_from"] = "claude CLI"
+            usage["fallback_error"] = str(exc)[:500]
+            usage["fallback_model"] = fallback_model
+            self.last_usage = usage
+            return raw
 
     def _anthropic(self, prompt: str, *, model: str | None = None) -> str:
         response = self._anthropic_client_or_build().messages.create(

@@ -7,9 +7,21 @@ Python CLI). `make help` lists every target.
 
 ```bash
 make setup          # venv + deps + creates .env from the template
-$EDITOR .env        # fill in TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY
+$EDITOR .env        # fill in TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
 make test           # 400+ tests should pass
 ```
+
+**Classification runs on your Claude subscription by default** (provider
+`claude_cli` in the config): install the Claude CLI and log in once —
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude login
+```
+
+No `ANTHROPIC_API_KEY` needed. If you set one in `.env` anyway, it becomes
+an automatic fallback when the CLI fails; set `classifier.provider:
+anthropic` to use the metered API exclusively.
 
 ## 2. Paper mode (the default posture — cannot trade)
 

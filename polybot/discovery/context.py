@@ -91,14 +91,29 @@ class FixtureRuleAnalyzer:
 
 
 class LLMRuleAnalyzer:
-    """Anthropic-backed structured reading of the verbatim resolution rules."""
+    """LLM-backed structured reading of the verbatim resolution rules.
+    Providers: anthropic (metered API) or claude_cli (Claude Code CLI --
+    the operator's subscription session; see polybot/core/claude_cli.py)."""
 
-    def __init__(self, config: ClassifierConfig, anthropic_client: object | None = None):
+    def __init__(self, config: ClassifierConfig, anthropic_client: object | None = None, cli_runner: Any = None):
         self.config = config
         self._anthropic_client = anthropic_client
+        self._cli_runner = cli_runner
 
     def analyze(self, context: MarketContext) -> RuleAnalysis:
         prompt = _analysis_prompt(context)
+        provider = self.config.provider.strip().lower()
+        if provider in {"claude_cli", "claude-cli", "claude_code_cli"}:
+            text = self._claude_cli(prompt)
+            model_label = f"claude_cli:{self.config.model}"
+        else:
+            text = self._anthropic(prompt)
+            model_label = f"anthropic:{self.config.model}"
+        raw = _json_object(text)
+        raw["model"] = model_label
+        return RuleAnalysis.from_dict(raw)
+
+    def _anthropic(self, prompt: str) -> str:
         response = self._client().messages.create(
             model=self.config.model,
             max_tokens=8192,
@@ -109,10 +124,24 @@ class LLMRuleAnalyzer:
         )
         if response.stop_reason == "refusal":
             raise RuntimeError("anthropic rule analyzer refused the request")
-        text = "".join(block.text for block in response.content if block.type == "text")
-        raw = _json_object(text)
-        raw["model"] = f"anthropic:{self.config.model}"
-        return RuleAnalysis.from_dict(raw)
+        return "".join(block.text for block in response.content if block.type == "text")
+
+    def _claude_cli(self, prompt: str) -> str:
+        from polybot.core.claude_cli import extract_claude_cli_result, run_claude_cli
+
+        stdout = (
+            self._cli_runner(prompt)
+            if self._cli_runner is not None
+            else run_claude_cli(
+                prompt,
+                model=self.config.model,
+                output_schema=_ANALYSIS_SCHEMA,
+                cli_binary=self.config.cli_binary,
+                timeout_seconds=self.config.cli_timeout_seconds,
+            )
+        )
+        text, _usage = extract_claude_cli_result(stdout)
+        return text
 
     def _client(self) -> Any:
         if self._anthropic_client is None:
@@ -128,9 +157,11 @@ class LLMRuleAnalyzer:
 def build_rule_analyzer(config: ClassifierConfig) -> RuleAnalyzerProtocol:
     if config.provider == "rule_based":
         return FixtureRuleAnalyzer()
-    if config.provider == "anthropic":
+    if config.provider.strip().lower() in {"anthropic", "claude_cli", "claude-cli", "claude_code_cli"}:
         return LLMRuleAnalyzer(config)
-    raise RuntimeError(f"unsupported rule analyzer provider: {config.provider} (supported: anthropic, rule_based)")
+    raise RuntimeError(
+        f"unsupported rule analyzer provider: {config.provider} (supported: anthropic, claude_cli, rule_based)"
+    )
 
 
 def _analysis_prompt(context: MarketContext) -> str:

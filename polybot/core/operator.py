@@ -99,6 +99,18 @@ class OperatorGate:
             blockers.append("anthropic_not_configured")
         elif anthropic_missing:
             warnings.append("anthropic_not_configured")
+        # Subscription-auth classification: the CLI binary must exist on this
+        # host (the API key is NOT required -- and is deliberately stripped
+        # from the classifier subprocess env).
+        from polybot.core.claude_cli import claude_cli_available, is_claude_cli_provider
+
+        if is_claude_cli_provider(self.config.classifier.provider) and not claude_cli_available(
+            getattr(self.config.classifier, "cli_binary", "claude")
+        ):
+            if live_requested:
+                blockers.append("claude_cli_not_installed")
+            else:
+                warnings.append("claude_cli_not_installed")
         return OperatorStatus(
             position_id=self.position_id,
             operator_dir=str(self.operator_dir),

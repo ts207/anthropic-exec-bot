@@ -208,6 +208,7 @@ def emit_bot_config_command(config_path: Path, market_id: str, out: Path | None 
         entry_usd=entry_usd,
         out_path=out,
         ledger_path=str(allocator.state_path),
+        classifier_provider=config.classifier.provider if config.classifier.provider != "rule_based" else "anthropic",
     )
     print(json.dumps({"written": str(path), "kind": context.kind, "state": context.state}, indent=2))
     return 0
