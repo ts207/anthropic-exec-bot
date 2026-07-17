@@ -1,0 +1,106 @@
+# The ONE config every `make` target uses. Ships paper-safe: the fleet is
+# enabled but every bot is armed alert_only and dry-run -- it discovers,
+# grades, scans, alerts, and paper-trades the whole geopolitical universe
+# without being able to move a cent.
+#
+# Going live is a deliberate two-line change (see QUICKSTART.md):
+#   fleet.position_mode: "live"
+#   fleet.auto_ack: true
+# ...then `make live`. Master kill switch at any time: `make halt`.
+
+universe:
+  max_events: 300
+  # Liquidity/volume floors are OFF: liquidity sizes orders, never
+  # disqualifies a market.
+  min_liquidity: 0.0
+  min_volume: 0.0
+  max_days_to_deadline: 365.0
+
+scoring:
+  min_rule_text_chars: 200
+  min_clarity_live: 0.75
+  min_clarity_paper: 0.55
+  min_observability_live: 0.7
+  min_observability_paper: 0.5
+  min_automation_live: 0.7
+  max_resolution_risk_live: 0.35
+  min_liquidity_live: 0.0
+  min_liquidity_paper: 0.0
+  small_live_liquidity_fraction: 0.02
+  small_live_min_order_usd: 5.0
+  max_spread_live: 0.10
+  max_days_to_deadline_live: 180.0
+  max_markets_per_correlation_group: 2
+
+opportunity:
+  min_edge: 0.05
+  slippage_buffer: 0.01
+  resolution_risk_buffer: 0.02
+  model_uncertainty_buffer: 0.03
+  max_entry_price: 0.90
+  max_spread: 0.15
+  # Market-anchored pricing: edges are computed from
+  # model_weight*model + (1-model_weight)*market_mid. The market's own price
+  # is the benchmark estimator until calibration-report proves otherwise.
+  model_weight: 0.35
+  # Edge bar widens by |model - mid| * this: big disagreements with the
+  # crowd demand more edge.
+  disagreement_buffer_scale: 0.25
+  # Forecast-engine probabilities cannot size live opportunities until
+  # calibration-report shows they beat the market's Brier over this many
+  # resolved outcomes.
+  require_calibrated_forecast: true
+  min_resolved_for_calibration: 20
+  # Price BOTH sides of every outcome; overpriced markets are edge too.
+  scan_no_side: true
+  # Grouped events whose YES prices don't sum to ~1 are reported as
+  # arbitrage (the market arguing with itself).
+  min_group_arb_edge: 0.02
+  # Per-market resolution risk widens the buffer beyond the flat base.
+  resolution_risk_scale: 0.05
+  # Operator estimates: market_id -> outcome -> p. Flag event-arrival
+  # estimates with {_decay: true, _as_of: "<ISO date>"} so they shrink with
+  # remaining time instead of silently going stale.
+  probability_estimates: {}
+  forecast_data_root: "data/geopolitics"
+  forecast_max_age_hours: 24.0
+
+schedule:
+  interval_minutes: 60.0
+
+fleet:
+  enabled: true
+  # <= 0 means UNCAPPED: one bot per eligible market, deep or thin.
+  max_bots: 0
+  # alert_only = the paper soak. Change to "live" + auto_ack: true only
+  # after the funnel/calibration reports justify it.
+  position_mode: "alert_only"
+  auto_ack: false
+  generated_dir: "configs/geopolitics/generated"
+  # Hung-bot detection + crash-loop brake.
+  heartbeat_stale_seconds: 300
+  max_restarts_per_hour: 3
+
+allocator:
+  per_order_usd: 50.0
+  per_market_usd: 100.0
+  per_event_usd: 150.0
+  per_group_usd: 200.0
+  # Second correlation dimension: one theater cannot absorb the book.
+  per_region_usd: 300.0
+  daily_usd: 300.0
+  total_usd: 1000.0
+  max_open_positions: 5
+  max_per_deadline_week_usd: 400.0
+  # Portfolio kill switch: cumulative realized losses beyond this flip the
+  # whole fleet to alert_only automatically.
+  max_drawdown_usd: 150.0
+
+classifier:
+  # anthropic for real runs (needs ANTHROPIC_API_KEY in .env);
+  # rule_based for offline smoke tests.
+  provider: anthropic
+  model: claude-opus-4-8
+
+data_dir: data/discovery
+logs_dir: logs

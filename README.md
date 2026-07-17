@@ -1,5 +1,8 @@
 # polybot
 
+**Want to just run it? See [QUICKSTART.md](QUICKSTART.md)** — `make setup`,
+fill in `.env`, `make paper`. `make help` lists every command.
+
 `polybot` now has two distinct product areas:
 
 - geopolitics position bots under `polybot/iran/`, `polybot/location/`,
