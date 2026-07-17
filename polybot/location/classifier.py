@@ -361,7 +361,11 @@ class LLMLocationClassifier:
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"claude CLI timed out after {timeout}s") from exc
         if completed.returncode != 0:
-            raise RuntimeError(f"claude CLI exited {completed.returncode}: {completed.stderr.strip()[:500]}")
+            # With --output-format json the CLI reports errors (rate limits,
+            # auth problems) in the stdout envelope's "result" field and
+            # leaves stderr empty, so fall back to stdout for the diagnostic.
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"claude CLI exited {completed.returncode}: {detail[:500]}")
         return completed.stdout
 
     def _extract_codex_cli_result_text(self, stdout: str) -> str:
