@@ -118,6 +118,12 @@ def main(argv: list[str] | None = None) -> int:
     eval_classifier_parser = sub.add_parser("eval-classifier")
     eval_classifier_parser.add_argument("--config", required=True)
     eval_classifier_parser.add_argument("--cases", required=True)
+    latency_report_parser = sub.add_parser("latency-report")
+    latency_report_parser.add_argument("--logs", default="logs")
+    latency_report_parser.add_argument("--data", default="data")
+    trades_report_parser = sub.add_parser("trades-report")
+    trades_report_parser.add_argument("--data", default="data")
+    trades_report_parser.add_argument("--ledger")
     run_fleet_parser = sub.add_parser("run-fleet")
     run_fleet_parser.add_argument("--config", required=True)
     run_fleet_parser.add_argument("--live", action="store_true")
@@ -266,6 +272,14 @@ def main(argv: list[str] | None = None) -> int:
         from .evalset import eval_classifier_command
 
         return eval_classifier_command(Path(args.config), Path(args.cases))
+    if args.command == "latency-report":
+        from .analysis import latency_report_command
+
+        return latency_report_command(logs_dir=Path(args.logs), data_root=Path(args.data))
+    if args.command == "trades-report":
+        from .analysis import trades_report_command
+
+        return trades_report_command(data_root=Path(args.data), ledger_path=Path(args.ledger) if args.ledger else None)
     if args.command == "run-fleet":
         from .discovery.fleet import run_fleet_command
 

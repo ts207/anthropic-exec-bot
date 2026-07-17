@@ -167,6 +167,17 @@ def scan_opportunities_command(config_path: Path, *, quotes: QuoteProviderProtoc
     group_arbitrage = scan_group_arbitrage(contexts, config.opportunity, quotes)
     payload = [item.as_dict() for item in opportunities]
     _atomic_json_write(config.data_dir / "opportunities.json", {"opportunities": payload, "group_arbitrage": group_arbitrage})
+    # opportunities.json is a snapshot (overwritten every cycle); the history
+    # file is the time series -- how long edges persist, what spreads do
+    # around events -- and is what post-soak analysis actually studies.
+    from polybot.core.storage import append_jsonl
+
+    scanned_at = datetime.now(timezone.utc).isoformat()
+    history_path = config.data_dir / "scan_history.jsonl"
+    for item in payload:
+        append_jsonl(history_path, {"at": scanned_at, "kind": "opportunity", **item})
+    for arb in group_arbitrage:
+        append_jsonl(history_path, {"at": scanned_at, "kind": "group_arbitrage", **arb})
     executable = [item for item in opportunities if not item.blockers]
     print(
         json.dumps(

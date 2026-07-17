@@ -65,6 +65,12 @@ calibration: ## are the probability sources beating the market? (Brier report)
 reconcile: ## ledger hygiene: free dead position slots, roll stale buckets
 	$(GEO) reconcile-ledger --config $(CONFIG)
 
+latency: ## publication -> fetch -> classify -> order percentiles (are we winning the race?)
+	$(GEO) latency-report
+
+trades: ## per-trade P&L table from the execution journals
+	$(GEO) trades-report --ledger data/discovery/allocations.json
+
 # ---- change validation (run before arming any prompt/config change) ----
 
 # usage: make replay BOT=configs/geopolitics/generated/x.yaml ARTICLES=logs/binary_articles.jsonl
@@ -82,4 +88,4 @@ eval: ## adversarial regression cases; nonzero exit = the change regressed
 backup: ## snapshot data/ (ledger, journals, calibration, acks)
 	deploy/backup.sh
 
-.PHONY: help setup test paper paper-once live halt watch-only arm status funnel calibration reconcile replay eval backup
+.PHONY: help setup test paper paper-once live halt watch-only arm status funnel calibration reconcile latency trades replay eval backup

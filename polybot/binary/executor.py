@@ -443,7 +443,15 @@ class BinaryExecutor:
             usd_budget=usd_budget,
             best_ask=ask,
         )
-        self.journal.update(journal, "completed", result="ENTERED", held_side=side, filled_shares=buy_fill.filled_shares)
+        self.journal.update(
+            journal,
+            "completed",
+            result="ENTERED",
+            held_side=side,
+            filled_shares=buy_fill.filled_shares,
+            estimated_fill_usd=round(buy_fill.filled_shares * ask, 4),
+            usd_budget=usd_budget,
+        )
         return "ENTERED"
 
     def _flip_buy_leg(
