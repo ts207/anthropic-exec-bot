@@ -86,13 +86,18 @@ def _binary_config(context: MarketContext, plan: SourcePlan, entry_usd: float, e
         },
         "entry": {"enabled": True, "side": entry_side, "usd_budget": entry_usd, "max_price": 0.90, "max_entries": 1},
         "classifier": {
-            "provider": "anthropic",
+            # claude_cli bills against the Claude subscription's weekly
+            # limit; "anthropic" here silently routed every fleet bot to the
+            # metered API (which has no credits and just errors).
+            "provider": "claude_cli",
             "model": "claude-opus-4-8",
             # Cheap screen pass: the strong model only runs when this one sees
             # anything other than NO_ACTION.
             "screen_model": "claude-haiku-4-5-20251001",
-            "passes": 2,
-            "require_pass_agreement": True,
+            # Paper posture: one confirm pass. Two-pass agreement is a live
+            # safety measure; operator review restores it when arming live.
+            "passes": 1,
+            "require_pass_agreement": False,
         },
         "execution": {"dry_run": True, "sell": {"enabled": True, "min_price": 0.03}, "flip_buy": {"enabled": False}},
         "keywords": {"escalate_terms": plan.escalate_terms},
@@ -134,13 +139,18 @@ def _location_config(context: MarketContext, plan: SourcePlan, entry_usd: float)
             "max_entries": 1,
         },
         "classifier": {
-            "provider": "anthropic",
+            # claude_cli bills against the Claude subscription's weekly
+            # limit; "anthropic" here silently routed every fleet bot to the
+            # metered API (which has no credits and just errors).
+            "provider": "claude_cli",
             "model": "claude-opus-4-8",
             # Cheap screen pass: the strong model only runs when this one sees
             # anything other than NO_ACTION.
             "screen_model": "claude-haiku-4-5-20251001",
-            "passes": 2,
-            "require_pass_agreement": True,
+            # Paper posture: one confirm pass. Two-pass agreement is a live
+            # safety measure; operator review restores it when arming live.
+            "passes": 1,
+            "require_pass_agreement": False,
         },
         "execution": {"dry_run": True, "sell": {"enabled": True, "min_price": 0.03}, "buy_rotation": {"enabled": False}},
         "safety": {"one_shot": True, "max_executions": 2, "poll_seconds": 30.0, "armed_poll_seconds": 2.0},

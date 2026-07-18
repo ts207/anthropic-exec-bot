@@ -551,24 +551,43 @@ def test_screen_trade_signal_escalates_to_strong_model(tmp_path) -> None:
     assert bot.holdings.held_location() == "yes"
 
 
-def test_screen_failure_escalates_instead_of_blocking(tmp_path) -> None:
+def test_screen_failure_escalates_when_live_but_fails_closed_on_paper(tmp_path) -> None:
+    class _Broken:
+        def classify(self, article, market_rule_text, held_side=None):
+            raise RuntimeError("screen down")
+
+    # Live: fail-open — the screen tier may only save money, never miss a
+    # trade defending a real position.
     config = _config(
         data_dir=tmp_path / "state",
         logs_dir=tmp_path / "logs",
         sources=SourcesConfig(max_trade_article_age_hours=0.0),
     )
     bot = _bot(tmp_path, config, DryRunTradingAdapter(yes_ask=0.40))
-
-    class _Broken:
-        def classify(self, article, market_rule_text, held_side=None):
-            raise RuntimeError("screen down")
-
     strong = _CountingClassifier(_signal())
     bot.screen_classifier = _Broken()
     bot.classifier = strong
+    bot.live_requested = True
     decision = bot.process_article(article("The round will begin next week. Officials confirmed the venue."))
     assert strong.calls == 1
     assert decision.action == "ENTER_YES"
+
+    # Paper: fail-closed — a broken screen path must not convert every noise
+    # article into full-price confirm passes.
+    config2 = _config(
+        data_dir=tmp_path / "state2",
+        logs_dir=tmp_path / "logs2",
+        sources=SourcesConfig(max_trade_article_age_hours=0.0),
+    )
+    bot2 = _bot(tmp_path, config2, DryRunTradingAdapter(yes_ask=0.40))
+    strong2 = _CountingClassifier(_signal())
+    bot2.screen_classifier = _Broken()
+    bot2.classifier = strong2
+    bot2.live_requested = False
+    decision2 = bot2.process_article(article("The round will begin next week. Officials confirmed the venue."))
+    assert strong2.calls == 0
+    assert decision2.action == "NO_ACTION"
+    assert decision2.reason == "screen_error_paper_fail_closed"
 
 
 def test_effective_poll_seconds_armed() -> None:

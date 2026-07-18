@@ -1090,6 +1090,14 @@ class LocationProtectionBot:
             screen = self._classify_with_budget(article, 0, classifier=self.screen_classifier, stage="screen")
         except Exception as exc:
             log_event("location_screen_classifier_error", error=str(exc))
+            if not self.live_requested:
+                # Paper posture fails CLOSED: a broken screen path must not
+                # convert every noise article into full-price confirm passes.
+                # Live keeps the fail-open contract: the screen tier may only
+                # save money, never miss a trade defending a real position.
+                decision = LocationDecision("NO_ACTION", "1", "screen_error_paper_fail_closed")
+                self._log_decision(article, decision)
+                return decision
             return None
         held = self.holdings.held_location()
         provisional = entry_decision(self.config, screen) if held is None else final_decision(self.config, screen, held=held)
