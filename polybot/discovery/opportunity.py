@@ -301,6 +301,14 @@ def scan_group_arbitrage(
     for context in contexts:
         if context.kind != "grouped" or context.state not in TRADEABLE_STATES:
             continue
+        if not context.neg_risk:
+            # "Grouped" only means the legs share an event. Without the
+            # negRisk flag they are not mutually exclusive (ballot-access
+            # lists, pardon lists, top-N primaries), so YES prices
+            # legitimately sum past 1.0 and the exactly-one-YES arithmetic
+            # below reports phantom arbitrage (observed: "edge 8.82" on a
+            # 20-leg ballot group).
+            continue
         open_outcomes = [o for o in context.outcomes if o.accepting_orders and not o.closed]
         if len(open_outcomes) < 2 or len(open_outcomes) != len(context.outcomes):
             # A partially closed group no longer guarantees exactly-one-YES

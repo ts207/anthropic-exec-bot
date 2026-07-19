@@ -730,6 +730,21 @@ def test_group_arbitrage_detects_overround(tmp_path) -> None:
     assert arb["edge_after_slippage"] == pytest.approx(0.18)
 
 
+def test_group_arbitrage_skips_non_neg_risk_groups(tmp_path) -> None:
+    # Multi-winner groups (ballot access, pardon lists) share an event but
+    # are not mutually exclusive: YES prices legitimately sum past 1.0, so
+    # the exactly-one-YES arithmetic must not flag them as arbitrage.
+    event = _grouped_event()
+    event["negRisk"] = False
+    for market in event["markets"]:
+        market["negRisk"] = False  # _market() infers negRisk from group_title
+    context = _graded(event)
+    assert not context.neg_risk
+    books = {o.yes_token_id: (0.62, 0.60) for o in context.outcomes}
+    arbs = scan_group_arbitrage([context], OpportunityConfig(), _MapQuotes(books))
+    assert arbs == []
+
+
 def test_group_arbitrage_detects_underround(tmp_path) -> None:
     context = _graded(_grouped_event())
     books = {o.yes_token_id: (0.40, 0.35) for o in context.outcomes}
