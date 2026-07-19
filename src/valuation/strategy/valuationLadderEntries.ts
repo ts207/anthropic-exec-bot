@@ -124,7 +124,12 @@ export function buildLadderEntryPlans(input: {
 
 export function ladderDirection(leg: ValuationLeg): LadderDirection {
   const text = `${leg.question}\n${leg.ruleText}`.toLowerCase();
-  const hasDownCue = /[↓↘]|down|below|less than|at or below|falls? to/.test(text);
+  // "(LOW)" legs are falls-to markets even though the question says "hit"
+  // and the copy-pasted rule boilerplate says "reaches or exceeds"; treat
+  // them like the ↓-labeled strikes: a down cue whose rule text contradicts
+  // it stays UNKNOWN, which blocks every entry path (same trap produced
+  // phantom 77-82c curve entries on "(LOW)" strikes priced correctly).
+  const hasDownCue = /[↓↘]|\(low\)|hits? a low|down|below|less than|at or below|falls? to/.test(text);
   const hasConfirmedDownRule = /at or below|less than or equal|falls? to or below|below the listed amount/.test(text);
   if (hasDownCue && !hasConfirmedDownRule) return "UNKNOWN";
   if (hasConfirmedDownRule) return "DOWN";

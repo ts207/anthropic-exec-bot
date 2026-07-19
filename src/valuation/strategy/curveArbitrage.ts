@@ -1,5 +1,6 @@
 import type { BookQuote, CurvePoint, StrategyConfig, ValuationCandidate } from "./signalTypes.ts";
 import { allocateCandidate } from "./candidateAllocator.ts";
+import { ladderDirection } from "./valuationLadderEntries.ts";
 
 export function curveMonotonicityCandidates(
   points: CurvePoint[],
@@ -10,7 +11,12 @@ export function curveMonotonicityCandidates(
   const candidates: ValuationCandidate[] = [];
   for (const group of grouped.values()) {
     const sorted = [...group]
-      .filter((point) => point.leg.threshold !== undefined)
+      // Monotonicity (higher threshold must not cost more) only holds for
+      // reaches-or-exceeds legs. Falls-to "(LOW)" strikes price in the
+      // opposite order, so mixing them into the sorted ladder made every
+      // correctly-priced downside ladder look like a violation (observed:
+      // phantom 77-82c "edges" on Anthropic/Databricks (LOW) legs).
+      .filter((point) => point.leg.threshold !== undefined && ladderDirection(point.leg) === "UP")
       .sort((left, right) => (left.leg.threshold ?? 0) - (right.leg.threshold ?? 0));
     for (let i = 1; i < sorted.length; i += 1) {
       const lower = sorted[i - 1];
