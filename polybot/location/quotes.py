@@ -25,23 +25,37 @@ class PublicClobQuoteAdapter:
     when the confirmation strategy is running in dry-run mode.
     """
 
+    # A 404 means the book is gone (delisted/closed outcome); it does not
+    # come back, so retry rarely. Other failures (timeouts, connection
+    # errors) may be transient: back off for minutes, not hours. Without
+    # this, a universe sweep re-polled ~2,000 dead books every cycle and
+    # the connection-error timeouts alone added ~30 minutes per cycle.
+    DEAD_BOOK_BACKOFF_SECONDS = 6 * 3600.0
+    TRANSIENT_FAILURE_BACKOFF_SECONDS = 15 * 60.0
+
     def __init__(self, token_ids: list[str], *, refresh_seconds: float = 2.0):
         self.book = BookCache(token_ids)
         self.refresh_seconds = max(0.0, refresh_seconds)
         self._refreshed_at: dict[str, float] = {}
+        self._backoff_until: dict[str, float] = {}
 
     def quote_snapshot(self, yes_token_id: str) -> dict[str, Any]:
         now = time.monotonic()
         last = self._refreshed_at.get(yes_token_id)
-        if last is None or now - last >= self.refresh_seconds:
+        backoff = self._backoff_until.get(yes_token_id)
+        due = last is None or now - last >= self.refresh_seconds
+        if due and (backoff is None or now >= backoff):
             try:
                 self.book.rest_snapshot(yes_token_id)
+                self._backoff_until.pop(yes_token_id, None)
             except Exception as exc:
-                # A delisted/closed market's book 404s forever; one dead
-                # token must not abort the whole discovery/valuation cycle
-                # (observed: every hourly cycle died on the same 404 for
-                # 12h straight). Serve the possibly-empty cached state; the
-                # scanner treats a missing quote as that market's blocker.
+                # One dead token must not abort the whole discovery/valuation
+                # cycle. Serve the possibly-empty cached state; the scanner
+                # treats a missing quote as that market's blocker.
+                is_gone = "404" in str(exc)
+                self._backoff_until[yes_token_id] = now + (
+                    self.DEAD_BOOK_BACKOFF_SECONDS if is_gone else self.TRANSIENT_FAILURE_BACKOFF_SECONDS
+                )
                 log_event("quote_snapshot_failed", token_id=str(yes_token_id), error=str(exc))
             self._refreshed_at[yes_token_id] = time.monotonic()
         snapshot = self.book.snapshot_state(yes_token_id)

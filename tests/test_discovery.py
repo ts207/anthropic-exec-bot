@@ -733,6 +733,26 @@ def test_group_arbitrage_detects_overround(tmp_path) -> None:
     assert arb["edge_after_slippage"] == pytest.approx(0.18)
 
 
+def test_quote_adapter_backs_off_dead_books() -> None:
+    from polybot.location.quotes import PublicClobQuoteAdapter
+
+    adapter = PublicClobQuoteAdapter(["t1"], refresh_seconds=0.0)
+    calls = {"n": 0}
+
+    def broken(token_id: str) -> None:
+        calls["n"] += 1
+        raise RuntimeError("404 Client Error: Not Found for url: .../book")
+
+    adapter.book.rest_snapshot = broken  # type: ignore[method-assign]
+    adapter.quote_snapshot("t1")
+    adapter.quote_snapshot("t1")
+    adapter.quote_snapshot("t1")
+    # A gone book is fetched once, then negative-cached: a universe sweep
+    # must not re-poll ~2,000 dead books every cycle.
+    assert calls["n"] == 1
+    assert adapter.yes_best_ask("t1") is None
+
+
 def test_group_arbitrage_skips_non_neg_risk_groups(tmp_path) -> None:
     # Multi-winner groups (ballot access, pardon lists) share an event but
     # are not mutually exclusive: YES prices legitimately sum past 1.0, so
