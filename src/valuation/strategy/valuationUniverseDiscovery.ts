@@ -300,7 +300,16 @@ function monthIndex(value: string): number | undefined {
 
 function directionFromLeg(leg: ValuationLeg): "UP" | "DOWN" | "UNKNOWN" {
   const text = `${leg.question}\n${leg.ruleText}`.toLowerCase();
-  if (/[↓↘]|down|below|less than/.test(text)) {
+  // Downside markers FIRST: "(LOW)" legs and ↓-labeled strikes are
+  // falls-to markets even though their question says "hit" and Polymarket's
+  // copy-pasted rule boilerplate says "reaches or exceeds". Observed: the
+  // Stripe "hit (LOW) $150B" leg parsed as UP against a $173B tape and
+  // produced a phantom 97c edge on a market the crowd correctly prices at
+  // 1c. Label/rule-text conflicts must never resolve toward a trade.
+  if (/\(low\)|[↓↘]|hits? a low|falls? to|drops? to|declines? to/.test(text)) {
+    return "DOWN";
+  }
+  if (/down|below|less than/.test(text)) {
     return /at or below|less than or equal|falls? to or below|below the listed amount/.test(text) ? "DOWN" : "UNKNOWN";
   }
   if (/reaches or exceeds|exceeds|surpass|hit/.test(text)) return "UP";
