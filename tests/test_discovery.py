@@ -777,6 +777,40 @@ def test_estimator_skips_fresh_and_respects_budget(tmp_path) -> None:
     assert second.get("budget_exhausted") is True
 
 
+def test_estimator_aborts_and_cools_down_on_rate_limit(tmp_path) -> None:
+    from polybot.discovery.estimator import EstimatorConfig, refresh_estimates
+
+    contexts = [_graded(_binary_event(f"iran-ceasefire-{i}")) for i in range(5)]
+    calls = {"n": 0}
+
+    def limited(prompt: str) -> str:
+        calls["n"] += 1
+        raise RuntimeError('claude CLI exited 1: {"is_error":true,"api_error_status":429,'
+                           '"result":"You\'ve hit your session limit"}')
+
+    config = EstimatorConfig()
+    first = refresh_estimates(contexts, forecast_data_root=str(tmp_path), config=config, runner=limited)
+    # Aborts on the FIRST 429 instead of burning all 5 (or 25) calls.
+    assert calls["n"] == 1
+    assert first["rate_limited"] is True
+    assert first["estimated"] == []
+
+    # A follow-up cycle is skipped entirely while the cooldown holds -- no
+    # further calls into the limited subscription.
+    second = refresh_estimates(contexts, forecast_data_root=str(tmp_path), config=config, runner=limited)
+    assert calls["n"] == 1
+    assert second["rate_limited"] is True
+
+    # Once the cooldown expires, estimation resumes.
+    from datetime import datetime, timedelta, timezone
+    later = datetime.now(timezone.utc) + timedelta(minutes=config.rate_limit_cooldown_minutes + 1)
+    resumed = refresh_estimates(
+        [contexts[0]], forecast_data_root=str(tmp_path), config=config,
+        runner=_fake_estimator_runner(0.2), now=later,
+    )
+    assert resumed["estimated"] == [contexts[0].market_id]
+
+
 def test_estimator_skips_grouped_and_survives_errors(tmp_path) -> None:
     from polybot.discovery.estimator import EstimatorConfig, refresh_estimates
 

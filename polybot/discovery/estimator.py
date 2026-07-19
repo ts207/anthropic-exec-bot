@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -81,6 +81,23 @@ class EstimatorConfig:
     max_per_cycle: int = 25
     cli_timeout_seconds: int = 120
     max_rule_text_chars: int = 1800
+    # When a subscription rate limit (429 / "session limit") is hit, every
+    # remaining call this cycle will also fail, so the sweep aborts and does
+    # not retry estimates until this many minutes pass. The estimator shares
+    # one Claude subscription with the fleet classifiers and interactive
+    # chats; blindly re-firing 25 calls into a limited account just burns the
+    # quota harder and delays the reset. Persisted in a cooldown file so the
+    # backoff survives across cycles and process restarts.
+    rate_limit_cooldown_minutes: float = 60.0
+
+
+class RateLimited(RuntimeError):
+    """Raised when an estimate call hits a subscription rate limit."""
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "session limit" in text or "rate limit" in text or "credit balance" in text
 
 
 def estimate_market(
@@ -140,11 +157,21 @@ def refresh_estimates(
     Grouped markets are skipped in v1: a categorical distribution needs a
     different schema and normalization, and binary markets are where the
     calibration loop can start scoring immediately.
+
+    Rate-limit aware: a 429 aborts the sweep and writes a cooldown file, so
+    the shared Claude subscription is not hammered with 25 doomed calls per
+    cycle while the limit is in force.
     """
     now = now or datetime.now(timezone.utc)
     summary: dict[str, Any] = {"estimated": [], "skipped_fresh": 0, "skipped_grouped": 0, "errors": []}
     if not config.enabled:
         summary["disabled"] = True
+        return summary
+    cooldown_path = Path(forecast_data_root) / ".estimator_ratelimit_until"
+    cooling_until = _cooldown_until(cooldown_path)
+    if cooling_until is not None and now < cooling_until:
+        summary["rate_limited"] = True
+        summary["cooldown_until"] = cooling_until.isoformat()
         return summary
     candidates = [
         c for c in contexts
@@ -167,7 +194,21 @@ def refresh_estimates(
         outcome_name = context.outcomes[0].name if context.outcomes else "yes"
         try:
             payload = estimate_market(context, config, runner=runner, now=now)
-        except Exception as exc:  # one bad estimate must not stop the sweep
+        except Exception as exc:
+            if _is_rate_limit(exc):
+                # Every remaining call this cycle will also fail: abort and
+                # cool down instead of burning the shared quota.
+                until = now + timedelta(minutes=config.rate_limit_cooldown_minutes)
+                _write_cooldown(cooldown_path, until)
+                summary["rate_limited"] = True
+                summary["cooldown_until"] = until.isoformat()
+                log_event(
+                    "discovery_estimator_rate_limited",
+                    cooldown_until=until.isoformat(),
+                    estimated_this_cycle=len(summary["estimated"]),
+                )
+                break
+            # One bad estimate must not stop the sweep.
             log_event("discovery_estimate_failed", market_id=context.market_id, error=str(exc)[:300])
             summary["errors"].append(context.market_id)
             continue
@@ -193,6 +234,23 @@ def refresh_estimates(
         )
         summary["estimated"].append(context.market_id)
     return summary
+
+
+def _cooldown_until(path: Path) -> datetime | None:
+    try:
+        stamp = path.read_text(encoding="utf-8").strip()
+        parsed = datetime.fromisoformat(stamp)
+    except (OSError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _write_cooldown(path: Path, until: datetime) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(until.isoformat(), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _is_fresh(path: Path, refresh_hours: float, now: datetime) -> bool:
