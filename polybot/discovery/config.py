@@ -29,6 +29,15 @@ def _default_exclude_keywords() -> list[str]:
         "champions league", "oscars", "grammy", "box office", "album",
         "temperature", "rainfall", "stock", "s&p", "nasdaq", "fed rate",
         "airdrop", "token launch", "tiktok followers",
+        # Sports and esports leak through the diplomacy vocabulary --
+        # "strike" matches Counter-Strike, "world" cups abound -- and burned
+        # trade-grade opus calls grading Valorant brackets. Excludes run
+        # BEFORE includes, so these are safe against the include list.
+        "world cup", "fifa", "uefa", "olympic", "super bowl", "playoff",
+        "counter-strike", "cs2", "csgo", "valorant", "esports", "hltv",
+        "league of legends", "dota", "overwatch", "fortnite",
+        "ufc", "boxing", "tennis", "golf", "formula 1", "grand prix",
+        "wrestling", "wnba", "nhl", "la liga", "serie a", "bundesliga",
     ]
 
 
