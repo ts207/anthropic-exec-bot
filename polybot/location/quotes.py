@@ -4,6 +4,7 @@ import time
 from typing import Any, Protocol
 
 from polybot.book import BookCache
+from polybot.log import log_event
 
 
 class QuoteAdapter(Protocol):
@@ -33,7 +34,15 @@ class PublicClobQuoteAdapter:
         now = time.monotonic()
         last = self._refreshed_at.get(yes_token_id)
         if last is None or now - last >= self.refresh_seconds:
-            self.book.rest_snapshot(yes_token_id)
+            try:
+                self.book.rest_snapshot(yes_token_id)
+            except Exception as exc:
+                # A delisted/closed market's book 404s forever; one dead
+                # token must not abort the whole discovery/valuation cycle
+                # (observed: every hourly cycle died on the same 404 for
+                # 12h straight). Serve the possibly-empty cached state; the
+                # scanner treats a missing quote as that market's blocker.
+                log_event("quote_snapshot_failed", token_id=str(yes_token_id), error=str(exc))
             self._refreshed_at[yes_token_id] = time.monotonic()
         snapshot = self.book.snapshot_state(yes_token_id)
         snapshot["source"] = "public_clob_book"
