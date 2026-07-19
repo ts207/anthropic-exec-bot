@@ -721,6 +721,82 @@ class _MapQuotes:
         return self.books.get(token_id, (None, None))[1]
 
 
+# ---- autonomous estimator ----
+
+
+def _fake_estimator_runner(p_yes: float):
+    def runner(prompt: str) -> str:
+        assert "Resolution rules" in prompt  # the estimate must see the rules
+        assert "0." not in prompt.split("Question:")[0]  # no market price leaked
+        return json.dumps({
+            "type": "result",
+            "result": json.dumps({
+                "p_yes": p_yes,
+                "confidence": 0.6,
+                "base_rate_reasoning": "short-window discrete events rarely occur",
+                "key_factors": ["no scheduled meeting"],
+            }),
+        })
+
+    return runner
+
+
+def test_estimator_roundtrips_into_forecast_lookup(tmp_path) -> None:
+    from polybot.discovery.estimator import EstimatorConfig, refresh_estimates
+    from polybot.discovery.opportunity import forecast_probability_lookup
+
+    context = _graded(_binary_event())
+    summary = refresh_estimates(
+        [context],
+        forecast_data_root=str(tmp_path),
+        config=EstimatorConfig(),
+        runner=_fake_estimator_runner(0.12),
+    )
+    assert summary["estimated"] == [context.market_id]
+    lookup = forecast_probability_lookup(OpportunityConfig(forecast_data_root=str(tmp_path)))
+    outcome = context.outcomes[0].name
+    estimate = lookup(context.market_id, outcome)
+    assert estimate is not None
+    probability, source = estimate
+    assert probability == pytest.approx(0.12)
+    assert source == "forecast_state"
+
+
+def test_estimator_skips_fresh_and_respects_budget(tmp_path) -> None:
+    from polybot.discovery.estimator import EstimatorConfig, refresh_estimates
+
+    contexts = [_graded(_binary_event(f"iran-ceasefire-{i}")) for i in range(4)]
+    config = EstimatorConfig(max_per_cycle=2)
+    first = refresh_estimates([contexts[0]], forecast_data_root=str(tmp_path), config=config, runner=_fake_estimator_runner(0.3))
+    assert len(first["estimated"]) == 1
+    # Fresh estimate is not re-run; budget caps the rest of the sweep.
+    second = refresh_estimates(contexts, forecast_data_root=str(tmp_path), config=config, runner=_fake_estimator_runner(0.3))
+    assert first["estimated"][0] not in second["estimated"]
+    assert second["skipped_fresh"] == 1
+    assert len(second["estimated"]) == 2
+    assert second.get("budget_exhausted") is True
+
+
+def test_estimator_skips_grouped_and_survives_errors(tmp_path) -> None:
+    from polybot.discovery.estimator import EstimatorConfig, refresh_estimates
+
+    grouped = _graded(_grouped_event())
+    binary = _graded(_binary_event())
+
+    def broken(prompt: str) -> str:
+        raise RuntimeError("cli down")
+
+    summary = refresh_estimates(
+        [grouped, binary],
+        forecast_data_root=str(tmp_path),
+        config=EstimatorConfig(),
+        runner=broken,
+    )
+    assert summary["skipped_grouped"] == 1
+    assert summary["estimated"] == []
+    assert summary["errors"] == [binary.market_id]
+
+
 def test_group_arbitrage_detects_overround(tmp_path) -> None:
     context = _graded(_grouped_event())
     books = {o.yes_token_id: (0.62, 0.60) for o in context.outcomes}

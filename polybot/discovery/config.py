@@ -198,14 +198,23 @@ class DiscoveryConfig:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
     classifier: ClassifierConfig = field(default_factory=ClassifierConfig)
+    estimator: "EstimatorConfig" = field(default_factory=lambda: _estimator_config_default())
     data_dir: Path = Path("data/discovery")
     logs_dir: Path = Path("logs")
+
+
+def _estimator_config_default():
+    from .estimator import EstimatorConfig
+
+    return EstimatorConfig()
 
 
 def load_discovery_config(path: Path) -> DiscoveryConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must contain a YAML object")
+    from .estimator import EstimatorConfig
+
     return DiscoveryConfig(
         universe=UniverseConfig(**_section(raw, "universe")),
         scoring=ScoringConfig(**_section(raw, "scoring")),
@@ -214,6 +223,7 @@ def load_discovery_config(path: Path) -> DiscoveryConfig:
         schedule=ScheduleConfig(**_section(raw, "schedule")),
         fleet=FleetConfig(**_section(raw, "fleet")),
         classifier=ClassifierConfig(**_section(raw, "classifier")),
+        estimator=EstimatorConfig(**_section(raw, "estimator")),
         data_dir=Path(str(raw.get("data_dir", "data/discovery"))),
         logs_dir=Path(str(raw.get("logs_dir", "logs"))),
     )

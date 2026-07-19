@@ -448,6 +448,27 @@ def _run_discovery_cycle(
     discover_markets_command(config_path, events_fetch=events_fetch)
     grade_markets_command(config_path, analyzer=analyzer)
     plan_sources_command(config_path)
+
+    # Autonomous estimation: the system's own P(YES) per tradeable binary
+    # market, persisted where forecast_probability_lookup reads it. The
+    # scan below prices these against the book; capture_resolutions scores
+    # them; require_calibrated_forecast gates them from live sizing until
+    # the calibration report proves they beat the market.
+    from .estimator import refresh_estimates
+
+    estimates = refresh_estimates(
+        store.all_contexts(),
+        forecast_data_root=config.opportunity.forecast_data_root,
+        config=config.estimator,
+    )
+    if estimates.get("estimated") or estimates.get("errors"):
+        log_event(
+            "discovery_estimates_refreshed",
+            estimated=len(estimates.get("estimated", [])),
+            errors=len(estimates.get("errors", [])),
+            skipped_fresh=estimates.get("skipped_fresh", 0),
+        )
+
     scan_opportunities_command(config_path, quotes=quotes)
 
     # Resolved markets feed the calibration loop automatically -- every

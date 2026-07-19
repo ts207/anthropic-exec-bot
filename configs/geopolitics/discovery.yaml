@@ -107,5 +107,20 @@ classifier:
   model: claude-opus-4-8
   cli_timeout_seconds: 180
 
+# Autonomous probability estimation: the system's own P(YES) per tradeable
+# binary market (rules + deadline + base rates, deliberately WITHOUT the
+# market price in the prompt). Estimates are priced by every scan, scored
+# by the calibration loop as markets resolve, and are barred from sizing
+# live money until calibration-report proves they beat the market's Brier
+# (opportunity.require_calibrated_forecast). Once forecast_calibrated flips
+# true, raising opportunity.model_weight is the deliberate, evidence-backed
+# step that lets the bot trade its own view.
+estimator:
+  enabled: true
+  model: claude-sonnet-4-6
+  refresh_hours: 24.0
+  max_per_cycle: 25
+  cli_timeout_seconds: 120
+
 data_dir: data/discovery
 logs_dir: logs
