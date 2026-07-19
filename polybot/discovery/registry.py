@@ -137,3 +137,13 @@ def google_news_rss(query: str) -> str:
     from urllib.parse import quote_plus
 
     return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+
+
+def bing_news_rss(query: str) -> str:
+    from urllib.parse import quote_plus
+
+    # Second aggregator on separate (Microsoft) infrastructure. A degraded
+    # route to Google must not blind discovery: an ISP peering fault toward
+    # Google timed out every news.google.com feed for days while the rest of
+    # the internet stayed reachable, leaving Al Jazeera as the only live feed.
+    return f"https://www.bing.com/news/search?q={quote_plus(query)}&format=rss"

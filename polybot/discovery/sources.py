@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .registry import GENERAL_FAST_FEEDS, WIRE_DOMAINS, direct_feeds, google_news_rss, official_domains
+from .registry import GENERAL_FAST_FEEDS, WIRE_DOMAINS, bing_news_rss, direct_feeds, google_news_rss, official_domains
 from .types import MarketContext, SourcePlan
 
 
@@ -52,10 +52,20 @@ def build_source_plan(context: MarketContext) -> SourcePlan:
     for wire in ("reuters", "AP"):
         if actor_terms:
             queries.append(f"{wire} " + " ".join(actor_terms[:2] + keyword_terms[:1]))
-    google_feeds = [google_news_rss(q.strip()) for q in queries if q.strip()]
-    for url in google_feeds:
-        rationale.setdefault(url, []).append("google news discovery query from parties + decisive-event vocabulary")
-    feed_urls = fast_feeds + google_feeds
+    # Every query runs on BOTH aggregators: they sit on separate
+    # infrastructure (Google vs Microsoft), so one outage or degraded route
+    # cannot blind the market's discovery layer.
+    aggregator_feeds: list[str] = []
+    for q in queries:
+        text = q.strip()
+        if not text:
+            continue
+        aggregator_feeds.append(google_news_rss(text))
+        aggregator_feeds.append(bing_news_rss(text))
+    for url in aggregator_feeds:
+        label = "google news" if "news.google.com" in url else "bing news"
+        rationale.setdefault(url, []).append(f"{label} discovery query from parties + decisive-event vocabulary")
+    feed_urls = fast_feeds + aggregator_feeds
 
     auto_trade = sorted(set(WIRE_DOMAINS) | set(actor_domains) | ({resolution_domain} if resolution_domain else set()))
     escalate_terms = sorted(set(term.lower() for term in keyword_terms + actor_terms if term))

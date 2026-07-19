@@ -249,6 +249,9 @@ def test_source_plan_requires_analysis_and_derives_sources() -> None:
     assert "reuters.com" in plan.auto_trade_domains
     assert "state.gov" in plan.auto_trade_domains  # united_states official domain
     assert any("news.google.com/rss" in url for url in plan.feed_urls)
+    # Both aggregators must be present: one degraded route (observed: ISP
+    # peering fault toward Google) must not blind the discovery layer.
+    assert any("bing.com/news" in url for url in plan.feed_urls)
     assert plan.escalate_terms
     assert plan.rationale
 
