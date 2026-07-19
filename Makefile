@@ -68,6 +68,13 @@ reconcile: ## ledger hygiene: free dead position slots, roll stale buckets
 latency: ## publication -> fetch -> classify -> order percentiles (are we winning the race?)
 	$(GEO) latency-report
 
+portwatch: ## live IMF PortWatch chokepoint 7-day averages (Hormuz et al.)
+	$(PY) -c "from polybot.discovery.portwatch import chokepoint_reading, CHOKEPOINT_NAMES; \
+	seen=set(); \
+	[print(f'{r.portname:22} 7d-avg {r.ma7:6.2f}  latest {r.latest_value:3d} on {r.latest_date}') \
+	 for name in CHOKEPOINT_NAMES.values() if name not in seen and not seen.add(name) \
+	 for r in [chokepoint_reading(name)] if r]"
+
 trades: ## per-trade P&L table from the execution journals
 	$(GEO) trades-report --ledger data/discovery/allocations.json
 

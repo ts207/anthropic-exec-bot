@@ -57,7 +57,7 @@ Machine rule analysis:
 - counts as YES: {counts}
 - does NOT count: {does_not_count}
 - summary: {summary}
-
+{live_data}
 Forecasting discipline:
 - Anchor on base rates: most discrete geopolitical events (meetings,
   strikes, treaties, resignations) do NOT occur within any given short
@@ -81,6 +81,10 @@ class EstimatorConfig:
     max_per_cycle: int = 25
     cli_timeout_seconds: int = 120
     max_rule_text_chars: int = 1800
+    # Inject hard PortWatch chokepoint data into the prompt when a market's
+    # rules name a maritime chokepoint. Turns a base-rate guess into a
+    # data-anchored estimate for the Hormuz/Suez/Bab-el-Mandeb family.
+    use_portwatch: bool = True
     # When a subscription rate limit (429 / "session limit") is hit, every
     # remaining call this cycle will also fail, so the sweep aborts and does
     # not retry estimates until this many minutes pass. The estimator shares
@@ -98,6 +102,36 @@ class RateLimited(RuntimeError):
 def _is_rate_limit(exc: BaseException) -> bool:
     text = str(exc).lower()
     return "429" in text or "session limit" in text or "rate limit" in text or "credit balance" in text
+
+
+def _extract_threshold(text: str) -> float | None:
+    """Pull the numeric chokepoint threshold out of the rule text, e.g.
+    '7-day moving average of transit calls ... equal to or above 60'."""
+    import re
+
+    match = re.search(r"(?:above|below|least|exceed(?:s|ing)?|reach(?:es)?)\D{0,20}?(\d{2,4})", text, re.IGNORECASE)
+    return float(match.group(1)) if match else None
+
+
+def _live_data_block(context: MarketContext, config: EstimatorConfig) -> str:
+    """Fetch hard chokepoint data for a market that names one. Fails silent:
+    a data-source outage must never block the base-rate estimate."""
+    if not config.use_portwatch:
+        return ""
+    from .portwatch import chokepoint_reading, evidence_line, match_chokepoint
+
+    portname = match_chokepoint(f"{context.question}\n{context.rule_text}")
+    if portname is None:
+        return ""
+    try:
+        reading = chokepoint_reading(portname)
+    except Exception as exc:  # network/schema outage -> estimate without it
+        log_event("discovery_portwatch_fetch_failed", market_id=context.market_id, error=str(exc)[:200])
+        return ""
+    if reading is None:
+        return ""
+    threshold = _extract_threshold(context.rule_text)
+    return "\nHard live data (authoritative for resolution):\n- " + evidence_line(reading, threshold) + "\n"
 
 
 def estimate_market(
@@ -122,6 +156,7 @@ def estimate_market(
         counts="; ".join(analysis.counts[:6]) or "(none listed)",
         does_not_count="; ".join(analysis.does_not_count[:6]) or "(none listed)",
         summary=analysis.summary[:400],
+        live_data=_live_data_block(context, config),
     )
     if runner is not None:
         stdout = runner(prompt)
