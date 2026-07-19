@@ -104,8 +104,14 @@ function candidateBase(
 
 function thresholdDirection(leg: ValuationLeg): "UP" | "DOWN" | "UNKNOWN" {
   const text = `${leg.question}\n${leg.ruleText}`.toLowerCase();
-  const hasDownCue = /[↓↘]|down|below|less than|at or below|falls? to/.test(text);
-  const hasConfirmedDownRule = /at or below|less than or equal|falls? to or below|below the listed amount/.test(text);
+  // "(LOW)" legs and ↓-labeled strikes are falls-to markets even though the
+  // question says "hit" and Polymarket's copy-pasted rule boilerplate says
+  // "reaches or exceeds". Observed: the Stripe "hit (LOW) $150B" leg parsed
+  // as UP against a $173B tape and produced a phantom 97c SOURCE_CONFIRMED
+  // candidate on a market the crowd correctly prices at 1c. A label that
+  // contradicts the rule text must never resolve toward a trade.
+  const hasDownCue = /[↓↘]|\(low\)|hits? a low|low of \$|down|below|less than|at or below|falls? to|drops? to/.test(text);
+  const hasConfirmedDownRule = /\(low\)|[↓↘]|hits? a low|at or below|less than or equal|falls? to or below|below the listed amount/.test(text);
   if (hasConfirmedDownRule) return "DOWN";
   if (hasDownCue) return "UNKNOWN";
   if (/reaches or exceeds|exceeds|surpass|hit/.test(text)) return "UP";
