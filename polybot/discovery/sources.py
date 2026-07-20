@@ -38,11 +38,18 @@ def build_source_plan(context: MarketContext) -> SourcePlan:
     # the hand-built Iran/Qatar configs).
     actor_terms = [actor.replace("_", " ") for actor in (analysis.parties or actors)][:4]
     keyword_terms = analysis.keywords[:6]
-    # Direct publisher feeds go FIRST: Google News indexing lag (often 5-15
-    # minutes) is the dominant latency in the confirmed-entry race.
-    fast_feeds = direct_feeds(actors) + GENERAL_FAST_FEEDS
-    for url in fast_feeds:
-        rationale.setdefault(url, []).append("direct publisher feed; minutes faster than news-aggregator indexing")
+    # Ordered by MEASURED latency, not authority. These markets resolve on "a
+    # consensus of credible reporting", and probing (scripts/probe_feeds.sh)
+    # found credible outlets publishing 0-30 minutes after an event while the
+    # official government feeds ran 2.7-5.6 DAYS behind. So the fast credible
+    # feeds lead, official feeds follow (authoritative confirmation, not
+    # speed), and aggregators trail (5-15 min indexing lag on top of source).
+    official_feeds = direct_feeds(actors)
+    fast_feeds = GENERAL_FAST_FEEDS + official_feeds
+    for url in GENERAL_FAST_FEEDS:
+        rationale.setdefault(url, []).append("credible-reporting feed; measured minutes-fresh, leads the poll order")
+    for url in official_feeds:
+        rationale.setdefault(url, []).append("official source; authoritative confirmation but measured days behind")
     queries: list[str] = []
     if actor_terms and keyword_terms:
         queries.append(" ".join(actor_terms[:2] + keyword_terms[:2]))

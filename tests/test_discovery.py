@@ -244,6 +244,32 @@ def test_pentagon_rename_domain_is_auto_trade_eligible() -> None:
     assert not domain_allowed("warmongering-blog.com", domains)
 
 
+def test_credible_reporting_sources_can_authorize_a_trade() -> None:
+    # These markets resolve on "a consensus of credible reporting", and the
+    # rule analyses name major broadsheets as decisive sources. Official
+    # government feeds measured 2.7-5.6 DAYS stale, so if broadsheets cannot
+    # authorize a trade the strategy can never react in time.
+    from polybot.binary.runner import domain_allowed
+    from polybot.core.config import DEFAULT_AUTO_TRADE_DOMAINS
+
+    for host in ("nytimes.com", "www.theguardian.com", "www.bbc.co.uk", "wsj.com"):
+        assert domain_allowed(host, DEFAULT_AUTO_TRADE_DOMAINS), host
+    # Speed sources that are state-affiliated or lower-tier stay alert-only:
+    # we poll them for reaction time, they must not authorize a trade.
+    for host in ("aa.com.tr", "middleeasteye.net", "timesofisrael.com", "x.com"):
+        assert not domain_allowed(host, DEFAULT_AUTO_TRADE_DOMAINS), host
+
+
+def test_fast_feeds_lead_with_measured_fastest_sources() -> None:
+    # Ordering here is by measured freshness, not reputation: BBC Middle East
+    # probed at 212 min while the Guardian probed at 0 min.
+    from polybot.discovery.registry import GENERAL_FAST_FEEDS
+
+    assert "theguardian.com" in GENERAL_FAST_FEEDS[0]
+    assert any("nytimes.com" in u for u in GENERAL_FAST_FEEDS)
+    assert any("aljazeera.com" in u for u in GENERAL_FAST_FEEDS)
+
+
 def test_direct_actor_feeds_are_not_silently_empty() -> None:
     # The previous entries returned HTTP 200 with zero <item>s, so the system
     # believed it had fast official sources while receiving nothing. Keep the
@@ -948,9 +974,14 @@ def test_source_plan_puts_direct_feeds_first() -> None:
     plan = build_source_plan(_analyzed_context(_binary_event()))
     # united_states is a deciding party -> its direct press feed leads, ahead
     # of aggregator queries whose indexing lag dominates reaction time.
-    # (Was state.gov until 2026-07-20, when probing found that feed serving
-    # 200-with-zero-items; war.gov is the live Pentagon feed.)
-    assert plan.feed_urls[0].startswith("https://www.war.gov/")
+    # Ordering follows MEASURED latency: credible-reporting feeds (0-30 min)
+    # lead, official government feeds (measured 2.7-5.6 days stale) follow,
+    # aggregators trail. Was state.gov until 2026-07-20, when probing found
+    # that feed serving 200-with-zero-items.
+    assert "theguardian.com" in plan.feed_urls[0]
+    war_gov = next(i for i, u in enumerate(plan.feed_urls) if "war.gov" in u)
+    guardian = plan.feed_urls.index(plan.feed_urls[0])
+    assert guardian < war_gov, "fast credible feeds must be polled before slow official ones"
     assert "https://www.aljazeera.com/xml/rss/all.xml" in plan.feed_urls
     google = [u for u in plan.feed_urls if "news.google.com" in u]
     assert google and plan.feed_urls.index(google[0]) > plan.feed_urls.index("https://www.aljazeera.com/xml/rss/all.xml")

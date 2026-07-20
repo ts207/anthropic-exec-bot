@@ -9,10 +9,24 @@ DEFAULT_AUTO_TRADE_DOMAINS = [
     "afp.com",
     "state.gov",
     "whitehouse.gov",
+    "war.gov",  # defense.gov redirects here; exact-host matching would miss it
     "mfa.gov.ir",
     "mofa.gov.qa",
     "fm.gov.om",
     "mofa.gov.pk",
+    # Tier-one broadsheets. These markets resolve on "a consensus of credible
+    # reporting", and the rule analyses name major broadsheets (NYT, WaPo,
+    # WSJ) as decisive sources -- so they ARE the resolution standard, not
+    # colour commentary. They also publish minutes after an event while the
+    # official feeds measured DAYS behind. Single-source risk is carried by
+    # the classifier's two-pass agreement + verbatim-quote requirements, and
+    # every one of these markets is paper-only today.
+    "nytimes.com",
+    "washingtonpost.com",
+    "wsj.com",
+    "theguardian.com",
+    "bbc.com",
+    "bbc.co.uk",
 ]
 
 DEFAULT_ALERT_ONLY_DOMAINS = ["x.com", "twitter.com", "t.me", "irna.ir"]

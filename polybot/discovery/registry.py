@@ -5,7 +5,20 @@ from __future__ import annotations
 # and the source-plan builder (official feeds per party). Deliberately
 # conservative: unknown actors simply get wire + Google News coverage.
 
-WIRE_DOMAINS = ["reuters.com", "apnews.com", "afp.com"]
+# Wires plus the tier-one broadsheets the market rules treat as the
+# resolution standard ("a consensus of credible reporting"). Reuters and AP
+# have no public RSS (both 401), so in practice the broadsheets are what we
+# actually receive first on our own infrastructure.
+WIRE_DOMAINS = [
+    "reuters.com",
+    "apnews.com",
+    "afp.com",
+    "nytimes.com",
+    "washingtonpost.com",
+    "wsj.com",
+    "theguardian.com",
+    "bbc.com",
+]
 
 # actor key -> (aliases for detection, official domains)
 ACTORS: dict[str, tuple[list[str], list[str]]] = {
@@ -71,17 +84,29 @@ DIRECT_ACTOR_FEEDS: dict[str, list[str]] = {
     ],
 }
 
+# Ordered by MEASURED freshness (scripts/probe_feeds.sh, 2026-07-20), not by
+# reputation. These markets resolve on "a consensus of credible reporting",
+# so the trigger is the first credible REPORT -- official government feeds
+# measured 2.7 to 5.6 DAYS stale and cannot serve that role. Polling a feed
+# only buys reaction time; DEFAULT_AUTO_TRADE_DOMAINS still decides which
+# source may authorize a trade.
 GENERAL_FAST_FEEDS: list[str] = [
-    # BBC Middle East: own-infrastructure RSS, publishes within minutes, and
-    # measured freshest of every candidate probed (latest item minutes old vs
-    # Al Jazeera's, on a separate route from both Google and Al Jazeera).
-    # Alert-grade by domain policy, same as Al Jazeera -- it buys reaction
-    # time, it does not authorize a trade.
-    "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
-    # Al Jazeera publishes to its own RSS immediately and covers Middle East
-    # diplomacy earlier than most; alert/hold-signal grade by default (domain
-    # policy still decides whether it may auto-trade).
+    # 0 min at probe: tier-one broadsheet, own infrastructure.
+    "https://www.theguardian.com/world/middleeast/rss",
+    # 0 min at probe.
+    "https://www.cbsnews.com/latest/rss/world",
+    # 7 and 20 min at probe.
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/MiddleEast.xml",
+    # 8 min: regional specialist, often first on Gulf/Iran detail.
+    "https://www.middleeasteye.net/rss",
+    # 10 min: wire agency, fast on Middle East (state-affiliated, so it is a
+    # speed source only -- deliberately NOT auto-trade eligible).
+    "https://www.aa.com.tr/en/rss/default?cat=middle-east",
+    # 29-36 min: broad regional coverage.
     "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://www.timesofisrael.com/feed/",
+    "https://www.france24.com/en/middle-east/rss",
 ]
 
 
