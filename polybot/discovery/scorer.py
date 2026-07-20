@@ -77,8 +77,15 @@ def grade_market(
             max(scoring.small_live_min_order_usd, context.liquidity * scoring.small_live_liquidity_fraction), 2
         )
 
+    discretionary_paper_only = False
     if analysis.discretionary:
-        return _finalize(context, "MONITOR_ONLY", ["discretionary_rules"], scores, group)
+        if not scoring.allow_discretionary_paper:
+            return _finalize(context, "MONITOR_ONLY", ["discretionary_rules"], scores, group)
+        # Paper only, always: a judgment word in the rules bars live trading
+        # forever, but must not bar us from LEARNING whether the classifier
+        # reads that market correctly. Enforced below as a live blocker that
+        # no other score can clear.
+        discretionary_paper_only = True
     if analysis.rule_clarity < scoring.min_clarity_paper:
         return _finalize(context, "MONITOR_ONLY", [f"rule_clarity_below_paper_threshold:{analysis.rule_clarity}"], scores, group)
     if analysis.evidence_observability < scoring.min_observability_paper:
@@ -87,6 +94,10 @@ def grade_market(
         return _finalize(context, "MONITOR_ONLY", [f"liquidity_below_paper_threshold:{context.liquidity:g}"], scores, group)
 
     live_blockers: list[str] = []
+    if discretionary_paper_only:
+        # Unconditional: discretionary rules never reach live, no matter how
+        # strong every other score is.
+        live_blockers.append("discretionary_rules_paper_only")
     if analysis.rule_clarity < scoring.min_clarity_live:
         live_blockers.append(f"rule_clarity_below_live_threshold:{analysis.rule_clarity}")
     if analysis.evidence_observability < scoring.min_observability_live:

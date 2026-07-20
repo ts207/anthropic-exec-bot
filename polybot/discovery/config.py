@@ -67,6 +67,13 @@ class ScoringConfig:
     """Thresholds for the eligibility state machine."""
 
     min_rule_text_chars: int = 200
+    # Discretionary rules can NEVER trade live. But excluding them from paper
+    # too means the soak generates zero evidence about markets whose rules are
+    # clear and observable yet contain one judgment word ("generally ceases",
+    # "substantially complete") -- which describes the best-observability
+    # announcement markets in the Iran theater (clarity 0.78, observability
+    # 0.90). Paper cannot lose money, and the misfire corpus is the point.
+    allow_discretionary_paper: bool = False
     min_clarity_live: float = 0.75
     min_clarity_paper: float = 0.55
     min_observability_live: float = 0.7

@@ -18,6 +18,11 @@ universe:
 
 scoring:
   min_rule_text_chars: 200
+  # Discretionary rules stay barred from live FOREVER, but reach paper so the
+  # soak can measure whether the classifier reads them correctly. Unblocks the
+  # US-Iran announcement ladders (blockade-end, halt-in-offensive): clarity
+  # 0.78 / observability 0.90, gated only by the word "generally" in the rules.
+  allow_discretionary_paper: true
   min_clarity_live: 0.75
   min_clarity_paper: 0.55
   min_observability_live: 0.7

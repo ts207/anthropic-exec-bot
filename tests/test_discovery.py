@@ -228,6 +228,22 @@ def test_scorer_hard_states() -> None:
     assert discretionary.state == "MONITOR_ONLY"
 
 
+def test_discretionary_reaches_paper_but_never_live_when_allowed() -> None:
+    # The Iran announcement ladders are clear and observable but contain one
+    # judgment word ("generally ceases"). Excluding them from paper generated
+    # zero evidence about the classifier; allowing paper must NOT leak live.
+    event = _binary_event(description=RULES + " sole discretion.")
+    blocked = grade_market(_analyzed_context(event), ScoringConfig(allow_fixture_analysis_live=True))
+    assert blocked.state == "MONITOR_ONLY"
+
+    allowed = grade_market(
+        _analyzed_context(event),
+        ScoringConfig(allow_fixture_analysis_live=True, allow_discretionary_paper=True),
+    )
+    assert allowed.state == "PAPER_ELIGIBLE"
+    assert "discretionary_rules_paper_only" in allowed.state_reasons
+
+
 def test_scorer_correlation_group_limit_downgrades_live() -> None:
     scoring = ScoringConfig(max_markets_per_correlation_group=1)
     context = _analyzed_context(_binary_event())
