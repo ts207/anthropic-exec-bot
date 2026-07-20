@@ -23,6 +23,7 @@ market rules.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Callable
 from urllib.parse import urlencode
 
@@ -134,8 +135,28 @@ def match_chokepoint(text: str) -> str | None:
     return None
 
 
-def evidence_line(reading: ChokepointReading, threshold: float | None = None) -> str:
-    """One-line factual summary for injection into an estimator prompt."""
+def staleness_days(reading: ChokepointReading, today: "date | None" = None) -> int:
+    """How far behind real time the published series is. PortWatch publishes
+    with a multi-day lag (observed: 8 days), so the estimator must not treat
+    the latest value as current-state evidence."""
+    from datetime import date as _date
+
+    today = today or _date.today()
+    try:
+        return max(0, (today - _date.fromisoformat(reading.latest_date)).days)
+    except ValueError:
+        return 0
+
+
+def evidence_line(reading: ChokepointReading, threshold: float | None = None, *, today: "date | None" = None) -> str:
+    """One-line factual summary for injection into an estimator prompt.
+
+    ALWAYS discloses the publication lag: the fix that made the estimator
+    data-aware would otherwise make it stale-data-overconfident, which is the
+    same error in the opposite direction. The market prices today's news; our
+    series may be a week behind it.
+    """
+    lag = staleness_days(reading, today)
     base = (
         f"IMF PortWatch data for {reading.portname}: latest daily transit calls "
         f"{reading.latest_value} on {reading.latest_date}; trailing 7-day moving "
@@ -146,5 +167,11 @@ def evidence_line(reading: ChokepointReading, threshold: float | None = None) ->
         base += (
             f" Market threshold is {threshold:g}; the 7-day average is currently "
             f"{'ABOVE' if gap <= 0 else 'BELOW'} it by {abs(gap):g}."
+        )
+    if lag > 1:
+        base += (
+            f" CAUTION: this data is {lag} days stale (published with a lag); it says nothing "
+            f"about the most recent {lag} days, during which the market has been pricing live "
+            f"news. Do not treat the market's disagreement with this figure as automatic edge."
         )
     return base

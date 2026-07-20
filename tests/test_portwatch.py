@@ -67,6 +67,34 @@ def test_match_chokepoint_maps_market_text() -> None:
     assert match_chokepoint("Will the US invade Iran?") is None
 
 
+def test_staleness_is_disclosed_in_evidence() -> None:
+    from datetime import date
+
+    from polybot.discovery.portwatch import staleness_days
+
+    reading = ChokepointReading(
+        portname="Strait of Hormuz", latest_date="2026-07-12", latest_value=10,
+        ma7=16.43, days_available=7, series=[],
+    )
+    assert staleness_days(reading, today=date(2026, 7, 20)) == 8
+    line = evidence_line(reading, threshold=60, today=date(2026, 7, 20))
+    # A stale series must never be presented as current state: the estimator
+    # would otherwise read the market's disagreement as free edge.
+    assert "8 days stale" in line
+    assert "automatic edge" in line
+
+
+def test_fresh_data_carries_no_staleness_warning() -> None:
+    from datetime import date
+
+    reading = ChokepointReading(
+        portname="Suez Canal", latest_date="2026-07-20", latest_value=41,
+        ma7=41.14, days_available=7, series=[],
+    )
+    line = evidence_line(reading, threshold=60, today=date(2026, 7, 20))
+    assert "stale" not in line
+
+
 def test_evidence_line_reports_gap_to_threshold() -> None:
     reading = ChokepointReading(
         portname="Strait of Hormuz", latest_date="2026-07-12", latest_value=10,
@@ -75,4 +103,4 @@ def test_evidence_line_reports_gap_to_threshold() -> None:
     line = evidence_line(reading, threshold=60)
     assert "16.43" in line
     assert "BELOW" in line
-    assert "43.57" in line  # 60 - 16.43
+    assert "43.57" in line  # 60 - 16.43  # 60 - 16.43
