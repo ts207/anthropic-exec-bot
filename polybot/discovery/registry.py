@@ -9,7 +9,12 @@ WIRE_DOMAINS = ["reuters.com", "apnews.com", "afp.com"]
 
 # actor key -> (aliases for detection, official domains)
 ACTORS: dict[str, tuple[list[str], list[str]]] = {
-    "united_states": (["united states", "u.s.", "us ", "washington", "white house", "state department", "pentagon"], ["state.gov", "whitehouse.gov", "defense.gov"]),
+    # war.gov: defense.gov now 301-redirects to war.gov ("Department of War"),
+    # so Pentagon announcements arrive on a host that does NOT match
+    # "defense.gov" under domain_allowed()'s exact/suffix rule -- the decisive
+    # source for the Iran halt-in-offensive markets would have been demoted to
+    # alert-only. Both are listed until the rename fully settles.
+    "united_states": (["united states", "u.s.", "us ", "washington", "white house", "state department", "pentagon", "department of war"], ["state.gov", "whitehouse.gov", "defense.gov", "war.gov", "centcom.mil"]),
     "iran": (["iran", "tehran", "iranian"], ["mfa.gov.ir"]),
     "israel": (["israel", "jerusalem", "israeli", "idf"], ["gov.il", "mfa.gov.il"]),
     "russia": (["russia", "moscow", "kremlin", "russian"], ["mid.ru", "kremlin.ru"]),
@@ -50,12 +55,29 @@ MEDIATOR_ACTORS = ["qatar", "oman", "switzerland", "egypt", "turkey", "united_na
 # which is the dominant latency in the confirmed-entry race. Only feeds with
 # stable public URLs are listed; wires without public RSS still go through
 # Google News queries.
+# VERIFIED 2026-07-20 with scripts/probe_feeds.sh -- every URL here returned
+# HTTP 200 AND a non-zero <item> count. The previous two entries
+# (state.gov/rss-feed/press-releases, news.un.org) both returned 200 with ZERO
+# items: the system believed it had fast official sources and was actually
+# receiving nothing, silently leaving Google News (5-15 min indexing lag) as
+# the only path. Re-probe before trusting any addition here.
 DIRECT_ACTOR_FEEDS: dict[str, list[str]] = {
-    "united_states": ["https://www.state.gov/rss-feed/press-releases/feed/"],
-    "united_nations": ["https://news.un.org/feed/subscribe/en/news/all/rss.xml"],
+    "united_states": [
+        # Pentagon news + press releases (defense.gov redirects here).
+        "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=1&Site=945&max=20",
+        "https://www.war.gov/DesktopModules/ArticleCS/RSS.ashx?ContentType=800&Site=945&max=20",
+        # Formal presidential actions (EOs, proclamations, memoranda).
+        "https://www.whitehouse.gov/presidential-actions/feed/",
+    ],
 }
 
 GENERAL_FAST_FEEDS: list[str] = [
+    # BBC Middle East: own-infrastructure RSS, publishes within minutes, and
+    # measured freshest of every candidate probed (latest item minutes old vs
+    # Al Jazeera's, on a separate route from both Google and Al Jazeera).
+    # Alert-grade by domain policy, same as Al Jazeera -- it buys reaction
+    # time, it does not authorize a trade.
+    "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
     # Al Jazeera publishes to its own RSS immediately and covers Middle East
     # diplomacy earlier than most; alert/hold-signal grade by default (domain
     # policy still decides whether it may auto-trade).

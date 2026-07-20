@@ -228,6 +228,36 @@ def test_scorer_hard_states() -> None:
     assert discretionary.state == "MONITOR_ONLY"
 
 
+def test_pentagon_rename_domain_is_auto_trade_eligible() -> None:
+    # defense.gov 301-redirects to war.gov, and domain_allowed() matches on
+    # exact host / suffix -- so a Pentagon announcement (the decisive source
+    # for the Iran halt-in-offensive ladders) would silently demote to
+    # alert-only unless war.gov is an official domain too.
+    from polybot.binary.runner import domain_allowed
+    from polybot.discovery.registry import official_domains
+
+    domains = official_domains(["united_states"])
+    assert "war.gov" in domains
+    assert "defense.gov" in domains
+    assert domain_allowed("www.war.gov", domains)
+    assert domain_allowed("media.war.gov", domains)
+    assert not domain_allowed("warmongering-blog.com", domains)
+
+
+def test_direct_actor_feeds_are_not_silently_empty() -> None:
+    # The previous entries returned HTTP 200 with zero <item>s, so the system
+    # believed it had fast official sources while receiving nothing. Keep the
+    # registry honest: entries must at least be well-formed feed URLs.
+    from polybot.discovery.registry import DIRECT_ACTOR_FEEDS
+
+    urls = [u for feeds in DIRECT_ACTOR_FEEDS.values() for u in feeds]
+    assert urls, "direct feeds are the latency edge; an empty registry is a regression"
+    assert all(u.startswith("https://") for u in urls)
+    # These two were verified dead on 2026-07-20; do not reintroduce silently.
+    assert not any("state.gov/rss-feed/press-releases" in u for u in urls)
+    assert not any("news.un.org/feed/subscribe" in u for u in urls)
+
+
 def test_discretionary_reaches_paper_but_never_live_when_allowed() -> None:
     # The Iran announcement ladders are clear and observable but contain one
     # judgment word ("generally ceases"). Excluding them from paper generated
@@ -918,7 +948,9 @@ def test_source_plan_puts_direct_feeds_first() -> None:
     plan = build_source_plan(_analyzed_context(_binary_event()))
     # united_states is a deciding party -> its direct press feed leads, ahead
     # of aggregator queries whose indexing lag dominates reaction time.
-    assert plan.feed_urls[0] == "https://www.state.gov/rss-feed/press-releases/feed/"
+    # (Was state.gov until 2026-07-20, when probing found that feed serving
+    # 200-with-zero-items; war.gov is the live Pentagon feed.)
+    assert plan.feed_urls[0].startswith("https://www.war.gov/")
     assert "https://www.aljazeera.com/xml/rss/all.xml" in plan.feed_urls
     google = [u for u in plan.feed_urls if "news.google.com" in u]
     assert google and plan.feed_urls.index(google[0]) > plan.feed_urls.index("https://www.aljazeera.com/xml/rss/all.xml")
