@@ -277,6 +277,11 @@ function curveRepairPlans(input: {
       const evidence = input.evidenceByCompany.get(leg.company);
       const quote = input.quotes.get(leg.marketSlug);
       const direction = ladderDirection(leg);
+      // Every other planner gates on UP; this one did not, so curve-repair
+      // bids were opened on falls-to "(LOW)" legs whose ladder prices run in
+      // the opposite order -- 26 of 27 paper positions ended up on markets
+      // the system reads backwards.
+      if (direction !== "UP") return [];
       const structuralBlockers = structuralBlockersFor({
         leg,
         direction,

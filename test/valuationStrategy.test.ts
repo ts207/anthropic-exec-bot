@@ -807,6 +807,59 @@ test("forecast paper updates after fixing and scores resolved touch", () => {
   assert.equal(updated.metrics.totalHypotheticalPnl, 0.8182);
 });
 
+test("falls-to legs are never scored as paper wins by reaches-or-exceeds logic", async () => {
+  // A "(LOW)" leg resolves YES when the valuation FALLS to the threshold.
+  // Scoring maxEligibleValuation >= threshold as a win inverted 23 resolved
+  // paper positions and fabricated +$171 of P&L -- the exact number the
+  // go/no-go decision reads. Anything not clearly UP must score as unknown.
+  const { updateLadderPaperOrders } = await import("../src/valuation/strategy/ladderPaper.ts");
+  const downPlan = {
+    company: "Anthropic",
+    marketSlug: "will-anthropics-valuation-hit-low-1pt0-by-july-31",
+    eventSlug: "anthropic-valuation",
+    deadline: "2026-07-31T23:59:00Z",
+    threshold: 1_000,
+    // Valuation is ABOVE the threshold: a falls-to leg has NOT triggered.
+    maxEligibleValuation: 1_139,
+    direction: "DOWN" as const,
+    entryMode: "MAKER_CURVE_REPAIR_BID" as const,
+    passiveBidPrice: 0.069,
+    yesAsk: 0.12,
+    yesBid: 0.05,
+    modelFair: 0.89,
+    requiredEdge: 0.06,
+    paperEligible: true,
+    liveEligible: false,
+    blockers: [] as string[],
+    reason: "bid_backed_curve_repair_passive_bid_paper_only",
+  } as never;
+
+  const opened = updateLadderPaperOrders({
+    previous: { version: 1, updatedAt: "2026-07-06T00:00:00Z", orders: [] },
+    plans: [downPlan],
+    now: new Date("2026-07-06T12:00:00Z"),
+    sizeUsd: 1,
+  });
+  const resolved = updateLadderPaperOrders({
+    previous: opened.state,
+    plans: [downPlan],
+    now: new Date("2026-08-01T12:00:00Z"), // past deadline -> forced resolve
+    sizeUsd: 1,
+  });
+  const order = [...resolved.state.orders].pop();
+  if (order && order.status === "resolved") {
+    assert.notEqual(
+      order.finalResolution,
+      true,
+      "a falls-to leg whose valuation stayed above the threshold must not resolve YES",
+    );
+    assert.ok(
+      (order.hypotheticalPnl ?? 0) <= 0,
+      "an untriggered falls-to leg cannot produce positive paper P&L",
+    );
+  }
+});
+
 test("ladder entry planner creates near-boundary passive maker bid without crossing ask", () => {
   const config = testConfig();
   const leg = legFixture({ threshold: 1_000, marketSlug: "stripe-175" });

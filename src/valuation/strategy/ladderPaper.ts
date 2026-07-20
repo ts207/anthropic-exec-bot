@@ -323,6 +323,12 @@ function wouldPassiveBidFill(plan: EntryPlan, bidPrice: number): boolean {
 
 function finalResolution(plan: EntryPlan): boolean | null {
   if (plan.threshold === undefined || plan.maxEligibleValuation === undefined) return null;
+  // maxEligibleValuation >= threshold only means YES for reaches-or-exceeds
+  // legs. On a falls-to "(LOW)" leg it means the opposite, and scoring those
+  // as wins fabricated +$171 of paper P&L across 23 positions that in reality
+  // resolved NO -- i.e. it corrupted the exact number the go/no-go decision
+  // depends on. Anything not clearly UP is scored as unknown, never a win.
+  if (plan.direction !== "UP") return null;
   if (plan.entryMode === "RANGE_SPREAD_PAPER" && plan.range) {
     const lowerTouched = plan.maxEligibleValuation >= plan.range.lowerThreshold;
     const higherTouched = plan.maxEligibleValuation >= plan.range.higherThreshold;
